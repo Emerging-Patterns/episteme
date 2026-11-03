@@ -1,0 +1,14 @@
+{
+  "ws-a": {
+    "s-small": [
+      {"id": "hm-1", "content": "Where do the lantern keepers sleep?", "peer_id": "noah", "session_id": "s-small", "workspace_id": "ws-a", "metadata": {}, "token_count": 8, "created_at": "2026-03-11T18:25:58.787375Z"},
+      {"id": "hm-2", "content": "In the east room.\n\nThe tower log says so.", "peer_id": "claude", "session_id": "s-small", "workspace_id": "ws-a", "metadata": {"type": "assistant_response"}, "token_count": 11, "created_at": "2026-03-11T18:26:04.684915Z"},
+      {"id": "hm-3", "content": "", "peer_id": "claude", "session_id": "s-small", "workspace_id": "ws-a", "metadata": {}, "token_count": 0, "created_at": "2026-03-11T18:26:05Z"}
+    ],
+    "s-empty": []
+  },
+  "ws-b": {
+    "s-big": {"count": 250, "peer": "claude"},
+    "s-hundred": {"count": 100, "peer": "noah"}
+  }
+}

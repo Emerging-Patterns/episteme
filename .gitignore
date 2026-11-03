@@ -1,0 +1,9 @@
+.superpowers/
+result
+result-*
+.ez/*
+!.ez/lib
+.ez/lib/*
+bin/
+*.gpu
+__pycache__/

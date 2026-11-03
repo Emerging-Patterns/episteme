@@ -1,0 +1,155 @@
+[lock]
+version = "2"
+hub = "https://hub.bend-lang.com"
+[packages]
+[packages.0x185ae03c75e3e75be1171471f68b43cb]
+[packages.0x185ae03c75e3e75be1171471f68b43cb.source]
+kind = "hub"
+[packages.0x185ae03c75e3e75be1171471f68b43cb.files]
+"bytes.bend" = "07a046795be85c891390055013bca17bb6e4e88a91e836eec0df4a9e1dc5cabe"
+[packages.0x1afdf90dbe41c30b1df4594db039b02a]
+[packages.0x1afdf90dbe41c30b1df4594db039b02a.source]
+kind = "hub"
+[packages.0x1afdf90dbe41c30b1df4594db039b02a.files]
+"effs/wire.c" = "9ad4a732bafa5faefc5b5a201962b2cd9c8dbc6cd2eceef50a7e69d46424f455"
+"effs/wire.js" = "a3fdd272b5ebe5f43eb325a3d4fad7c249058458d4f7175fbb979eb87827a0eb"
+"wire.bend" = "a42c34499290f6a9e032e9c9c210cbaa7e1be5526ef4c7cb0ca27b50407e2ec1"
+[packages.0x1dd647736fb09289bc1eed9825ef1113]
+[packages.0x1dd647736fb09289bc1eed9825ef1113.source]
+kind = "hub"
+[packages.0x1dd647736fb09289bc1eed9825ef1113.files]
+"effs/sqlite.c" = "8a76236a328d9120a342943fbc007b33b2b10e836ba748bf0b4e1a5092cb7e57"
+"effs/sqlite.js" = "e1bcfc6c2037856573fcb7b4374297a1d6496d01facedb9d8d6ca5a12720cc2a"
+"sqlite.bend" = "5219db84dd9bc47d6291ed064e6e1884c7829b46f1cd8035eb24e9af6642c3a2"
+[packages.0x4eed9d7ac6ece61523d747a9d804e4f0]
+[packages.0x4eed9d7ac6ece61523d747a9d804e4f0.source]
+kind = "hub"
+[packages.0x4eed9d7ac6ece61523d747a9d804e4f0.files]
+"int.bend" = "5588aa776b7883a661b30489bccc7f2bf54ee0e333d363eaa33804cb1b130fcf"
+[packages.0x5a44d8a54be79db966199d0fa91fe8e6]
+[packages.0x5a44d8a54be79db966199d0fa91fe8e6.source]
+kind = "git"
+url = "https://github.com/Emerging-Patterns/shake"
+rev = "309348a37e5e4e91b010625ce4271e5449f5b5ba"
+entry = "main.bend"
+root = "."
+narHash = "sha256-KLx6LZAdjyITKvGboTSI65aMYWZB8EG5Oh+9iRUZm/U="
+tag = "v0.8.0"
+[packages.0x5a44d8a54be79db966199d0fa91fe8e6.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"main.bend" = "4b2d0dd0ef5b7b123ce033a0943ef3955bb65e79082d8978784e2bf08f4a06fe"
+"src/args.bend" = "5e1b2f9b04f8eba6ec1e691935a7ea7e52b0838463f797eb992888051fb0e626"
+"src/check.bend" = "99df53c1bfd423e393edc3615415415c5a677905e8ed84649e34c82ae9243f9f"
+"src/cli.bend" = "db1d66785516b6aa33fb694c288adbadb6876d1ce4e3b9d5d4fcb045645723cc"
+[packages.0x856d414a32087762da315b6efc605eaa]
+[packages.0x856d414a32087762da315b6efc605eaa.source]
+kind = "hub"
+[packages.0x856d414a32087762da315b6efc605eaa.files]
+LICENSE = "c6273324dfad426e6642b106cfabf5a32ea65b5f352f76cff751c1716c929274"
+"compose.bend" = "813e3f8d2eb1bffdab6bb1289a02fb57ae5858b191697c6d3d9fa3493cd96b8e"
+"core.bend" = "418456ea9840713c2ca9bf8a39abbf851e3593bca78d03e520317975d68ef670"
+"emit.bend" = "11e56ab95a6901d42b9cf9333956818b1d4aad4e5cd0fb07806eb2ed4b28d34d"
+"num.bend" = "1901b4ee62ca21f122fb48682a5fa17deccc4718b23faf5a7e2723874bf2d69b"
+"parse.bend" = "79b83c5a4e2d1c85f9a7e97f553f527d94c3f7dc0c1fa65a064c66d58586188f"
+"re.bend" = "71884587d2558c46f9b28a90ca5fb798944f53b59b21f7aa028666dc0eff8b0f"
+"scan.bend" = "f3f9e3468dac98046bdb0e1da1a1031007edb2eea0c810fc0bab68a3e9acf58f"
+"token.bend" = "5c1892b789658476a8a2469e3b95170ae0bd1a39e8405a1a1edf7ada05af52ee"
+"value.bend" = "5f9bd0ad8a09286a1f71cf9544a82d3474807ba5f83784a1323d33aa244ed6e3"
+"yaml.bend" = "99bcca17ebee1c7e49be7b45e246b7f45309ce6a452dac17805c8f2b9f9a612d"
+"yaml11.bend" = "5b2d9ba5ba6ea284fa832d337d4c5a49f46643e9fc5cee364c0810829b959e30"
+[packages.0x8abe7473e8854cc69c687ee77b7d72e3]
+[packages.0x8abe7473e8854cc69c687ee77b7d72e3.source]
+kind = "git"
+url = "https://github.com/Emerging-Patterns/ezsys"
+rev = "69dcef850175ade4144ca01dec97720ae5199dab"
+entry = "main.bend"
+root = "."
+narHash = "sha256-N+CwX+C6iYxBlsyDY2J16xBnViHv769CoeixotQ8VPg="
+tag = "v0.1.0"
+[packages.0x8abe7473e8854cc69c687ee77b7d72e3.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"main.bend" = "172fd00bf5fd2dc5c8f253924d826f47931396b5a374598ccd4267a172111fdb"
+"src/clock.bend" = "df15d5e4a353975a227034990a7a825dfd6aeaa21cd73342eeddd6f80966352e"
+"src/dir.bend" = "7179eae7cf0211a93d26453a18ea185b53096cc55ef1d8eb3498ccba5a6ef7a4"
+"src/effs/clock.c" = "74271a272dd81f96930185c48ed1fb047df67b1d3dae310d410607a5507a8884"
+"src/effs/clock.js" = "f7017981780593be09acf6d9213629620d33ecf5f42822dabe00c6bccbc62386"
+"src/effs/dir.c" = "af2b26062fa05f2cef91ffa0060a160416a4c1863deccc8ee798dbaa30ed9200"
+"src/effs/dir.js" = "2cc3073734f75426516bc65e5d42e3a02895a349bc13a63c55d7c4dbf78edabf"
+"src/effs/rename.c" = "61aa32964631920c441c87ef2eb95d5c0aaf311d6a158b6f1e214856ad4f985d"
+"src/effs/rename.js" = "fb0e2271b6c4a1db1f28c36aeac9b74fd72fe97b5700dd73b936922926b465d0"
+"src/errno.bend" = "bca5af1e719fc89dd9b7c783f13c5e828da2650e8d5b39e1885bfde4bd95e0f3"
+"src/step.bend" = "cb1f8823808f9fe6ba3a8f64b34327a62c8f9939b63f24f0e4be312fa3210649"
+"src/str.bend" = "dc338178b4545ac3c3717da7bbae8e7196aaca343157724125ac0488609f4d1f"
+"src/sys.bend" = "9b95080562e2a2ed647bd6586fcb0d9aa3c4864ed3debee079062e60fac07dd9"
+"src/text.bend" = "ce9b6bdfe5a3cc9de42497bddb584e486ca502d9922e8edb989a8024b131d160"
+[packages.0x9bf2c4100bf9328348d215e7ae1657de]
+[packages.0x9bf2c4100bf9328348d215e7ae1657de.source]
+kind = "hub"
+[packages.0x9bf2c4100bf9328348d215e7ae1657de.files]
+"dns.bend" = "4f13455fc5cb6150a23f431e8a2cc09c56ab0aa8a4b2935f1d89e689b1ff7843"
+"effs/dns.c" = "5d216d6c8c86e78e49fb84939790c496e68500f3e6fa18bf2b8b96aea5ab71af"
+"effs/dns.js" = "3abdd6528b6c8b885639b81a2542fdfb2668af78e2a16c70b45b94dfc50d1010"
+[packages.0xa81e161008ecc2f297c0a3065cb9b188]
+[packages.0xa81e161008ecc2f297c0a3065cb9b188.source]
+kind = "git"
+url = "https://github.com/Emerging-Patterns/ezjson"
+rev = "fbae34db74596ddca4ec29409825926246d22cec"
+entry = "main.bend"
+root = "."
+narHash = "sha256-bOtXnTBW1oDQOGlFpEKxNklcUY1WmPt5y8HWWQY8sK4="
+tag = "v1.2.0"
+[packages.0xa81e161008ecc2f297c0a3065cb9b188.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"main.bend" = "030530d356d712d66fc58daa6bf81c81379d3132547b7e7a42de436c374e9e27"
+"src/lazy.bend" = "5e0ec859ceea76521a7a04c78edfe47dafe9b036166602af7f085079f6f7d7e5"
+"src/lex.bend" = "2b6857aa4a69f79ccdbec71e8ccf906f668cb45bf6e5759ecef48a04b0a9fa17"
+"src/parse.bend" = "03be50cae0939f1695c3219ef007774e62f4b23066dd0bf3b450b95b5a358985"
+"src/print.bend" = "32a92e32f9e58cb028c59209c6aeb2b408f0510d199b31cff172c09bbb68fd6a"
+"src/pull.bend" = "c682f4f968f78b10bf39351130aa48fc9ade47c01f5bb2b4b74a061df7afb141"
+"src/value.bend" = "be1f4959ca09f749556f761fb491714d5f047350f1292513c8396caccea683da"
+[packages.0xedb2120a04a47dc18c3a756ec7c62750]
+[packages.0xedb2120a04a47dc18c3a756ec7c62750.source]
+kind = "git"
+url = "https://github.com/Emerging-Patterns/ezhttp"
+rev = "91800d3b2d6c9d9ce38e21cf28999c628850d4c1"
+entry = "main.bend"
+root = "."
+narHash = "sha256-01FVzBxDA1wST5KwuP3Zlf4kfUp0PXzjgwwe1RYma8U="
+tag = "v0.22.0"
+[packages.0xedb2120a04a47dc18c3a756ec7c62750.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"main.bend" = "e2077baf8f6af28b37f3ab50bb89fe4a190fb139028c865f6f75599a3460fcb9"
+"src/auth.bend" = "53b36c29add9fa647134fea758fe43f3333ae8bbf2fd10df95fe28545dc00153"
+"src/b64.bend" = "4212a94d354d3919d630302d8d7f6436e000f09a308ad5ad27e37edd841d2a96"
+"src/body.bend" = "fffb26a568972263dfb70de1dcd9bd07ba6268d2cc2549b1dc34bfd35c860d25"
+"src/cache.bend" = "5bad4c297b74b1b468bdc61aa48a17fc810c8e3a9cb31acd96bd83bf81e539aa"
+"src/client.bend" = "86bda19883ac106260966f9bca90fbbe24f0d94fbad572954b37ad988569915d"
+"src/cookie.bend" = "c68e150822c2992146a57c1e75ef204897bce9f144838a4d79ae75b5ef8d0fe1"
+"src/cors.bend" = "cbb4cbea1253117f88c7191318313993c930315e0f80ff5b14e7846b4cb97178"
+"src/echo.bend" = "8ec77c0af73d1ec548f3cb5e52e8065f49b9970c8bf5bf558cecda1a482d7231"
+"src/entities.bend" = "c8667112616c7d1f4d67d3dd4243c0de23e94848f06952b564dc6fe1a337ca59"
+"src/form.bend" = "4f77cf42ded962d82626ea2e0e61dd5e5f2ec1d918f2a57d97670e0b45aa1fb7"
+"src/html.bend" = "2c768c4d9e3545e8c6bff104abbb82e2760317c4435b0802434534770dcd97ae"
+"src/http.bend" = "0ade8350d03a94280b9a123a3293305e3d8b1c99ad6fec06bf1f26b8a02a4130"
+"src/packed.bend" = "95fa097859cc3a6e716aaba00623c4151c248e0198e3d0ed9f2935c0f913bf52"
+"src/pct.bend" = "eb3e23319f754fcb46c6d7bdfcce551a39ae8bbbad1f0ec21ce6dce345957442"
+"src/qs.bend" = "947b3b6e483159359357a0b0404e4a7511be50abcfb8cbd77a2f5283c8f352b7"
+"src/redirect.bend" = "b0b14d9d2402f0458f788b017fde65dcf37e691b7c2420e11265bb7a5bbffb2e"
+"src/server.bend" = "97adf1dc0513aba22613a2c7ddba9bad4d82d62e84f4747a7deeafcd3eb4da8e"
+"src/step.bend" = "46d2dae4f791650b643b0fa354f787f61b7b63b5163caf514f4cd28e30de19d3"
+"src/unescape.bend" = "128853e05fce7f605f09a300eda3751b7168e6360771585109557423be5c6452"
+"src/url.bend" = "7c2a70772f630e5586e21b176f110bf1b441369b0be82a08ac0c9f5a492a0000"
+"src/wire.bend" = "e987c05c75b0fc6201623533f21f0648fdd508c305a9f0d0c078188205a7f002"
+"src/wirespec.bend" = "e6668b60127f689f6e5905e50f73166e3b705eb578aa3da97e9ab9cd3aecf2c0"
+[names]
+"bend-kit-bytes@0.3.2.0" = "0x185ae03c75e3e75be1171471f68b43cb"
+"bend-kit-dns@0.6.0.2" = "0x9bf2c4100bf9328348d215e7ae1657de"
+"bend-kit-wire@0.4.6.1" = "0x1afdf90dbe41c30b1df4594db039b02a"
+[tools]
+[tools.bolt]
+git = "https://github.com/Emerging-Patterns/bolt"
+rev = "78fad9564b1a5b49f1e39bbd46a7fec45e615a4c"
+tag = "v1.22.0"
+root = "."
+narHash = "sha256-OHkE75Urs5jTTU8Nygs2+enKYKOXeHOBDZ5t0ZwJVA4="
+entry = "main.bend"

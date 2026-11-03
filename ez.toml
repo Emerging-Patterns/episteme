@@ -1,0 +1,52 @@
+[package]
+name = "episteme"
+entry = "main.bend"
+[deps]
+[deps.ezsys]
+hash = "0x8abe7473e8854cc69c687ee77b7d72e3"
+git = "https://github.com/Emerging-Patterns/ezsys"
+rev = "69dcef850175ade4144ca01dec97720ae5199dab"
+tag = "v0.1.0"
+root = "."
+narHash = "sha256-N+CwX+C6iYxBlsyDY2J16xBnViHv769CoeixotQ8VPg="
+entry = "main.bend"
+[deps.ezhttp]
+hash = "0xedb2120a04a47dc18c3a756ec7c62750"
+git = "https://github.com/Emerging-Patterns/ezhttp"
+rev = "91800d3b2d6c9d9ce38e21cf28999c628850d4c1"
+tag = "v0.22.0"
+root = "."
+narHash = "sha256-01FVzBxDA1wST5KwuP3Zlf4kfUp0PXzjgwwe1RYma8U="
+entry = "main.bend"
+[deps.ezjson]
+hash = "0xa81e161008ecc2f297c0a3065cb9b188"
+git = "https://github.com/Emerging-Patterns/ezjson"
+rev = "fbae34db74596ddca4ec29409825926246d22cec"
+tag = "v1.2.0"
+root = "."
+narHash = "sha256-bOtXnTBW1oDQOGlFpEKxNklcUY1WmPt5y8HWWQY8sK4="
+entry = "main.bend"
+[deps.shake]
+hash = "0x5a44d8a54be79db966199d0fa91fe8e6"
+git = "https://github.com/Emerging-Patterns/shake"
+rev = "309348a37e5e4e91b010625ce4271e5449f5b5ba"
+tag = "v0.8.0"
+root = "."
+narHash = "sha256-KLx6LZAdjyITKvGboTSI65aMYWZB8EG5Oh+9iRUZm/U="
+entry = "main.bend"
+[deps.bend-kit-sqlite]
+hash = "0x1dd647736fb09289bc1eed9825ef1113"
+hub = "bend-kit-sqlite@0.1.0.1"
+entry = "sqlite.bend"
+[deps.yaml-for-bend]
+hash = "0x856d414a32087762da315b6efc605eaa"
+hub = "yaml-for-bend@0.1.1.0"
+entry = "compose.bend"
+[tools]
+[tools.bolt]
+git = "https://github.com/Emerging-Patterns/bolt"
+rev = "78fad9564b1a5b49f1e39bbd46a7fec45e615a4c"
+tag = "v1.22.0"
+root = "."
+narHash = "sha256-OHkE75Urs5jTTU8Nygs2+enKYKOXeHOBDZ5t0ZwJVA4="
+entry = "main.bend"
