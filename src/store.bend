@@ -599,24 +599,39 @@ def Store.mark(chars: U32) -> IO(U32):
     res : Result<&1, &1, U32 & String, String> <- Sys.file.read(dir ++ "/covered.json")
     return Store.mark.of(res)
 
-# nothing when the mark is at the top batch, else stop telling the user
+# none when the mark is at the top batch, else the refusal telling the user
 # to run ingest
-def Store.ready.if(behind: Bool, +chars: U32, mark: U32, top: U32) -> IO(Unit):
+def Store.behind.if(behind: Bool, +chars: U32, mark: U32, top: U32) -> Maybe<&2, String>:
   match behind:
     case False{}:
-      IO.pure(Unit, Unit{})
+      None{}
     case True{}:
-      Store.die(Unit, "the " ++ U32.show(chars) ++ "-character shards hold log batches up to "
-        ++ U32.show(mark) ++ " of " ++ U32.show(top) ++ "; run episteme ingest")
+      Some{"the " ++ U32.show(chars) ++ "-character shards hold log batches up to "
+        ++ U32.show(mark) ++ " of " ++ U32.show(top) ++ "; run episteme ingest"}
 
-# stop, telling the user to run episteme ingest, when the shards of one
+# the refusal telling the user to run episteme ingest when the shards of one
 # size are behind the log: the mark is below the top batch (a size with no
-# directory has mark 0). Reads never write the shards
-def Store.ready(+chars: U32) -> IO(Unit):
-  do IO<Unit>:
+# directory has mark 0); none when they are not. Reads never write the shards
+def Store.behind(+chars: U32) -> IO(Maybe<&2, String>):
+  do IO<Maybe<&2, String>>:
     +top : U32 <- Store.top()
     +mark : U32 <- Store.mark(chars)
-    Store.ready.if(U32.is_lt(mark, top), chars, mark, top)
+    return Store.behind.if(U32.is_lt(mark, top), chars, mark, top)
+
+# nothing when there is no refusal, else stop with it
+def Store.ready.if(got: Maybe<&2, String>) -> IO(Unit):
+  match got:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{why}:
+      Store.die(Unit, why)
+
+# stop, telling the user to run episteme ingest, when the shards of one
+# size are behind the log (Store.behind)
+def Store.ready(+chars: U32) -> IO(Unit):
+  do IO<Unit>:
+    got : Maybe<&2, String> <- Store.behind(chars)
+    Store.ready.if(got)
 
 # record that every source of one size is caught up with log batch num
 def Store.mark.put(chars: U32, num: U32) -> IO(Unit):

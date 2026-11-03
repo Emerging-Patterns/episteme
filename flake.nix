@@ -45,6 +45,12 @@
               EPISTEME=${episteme}/bin/episteme bash ${self}/tests/smoke.sh
               echo ok > $out
             '';
+            # episteme serve end to end: the MCP tools on the fixture book
+            serve = nixpkgs.legacyPackages.${system}.runCommand "serve"
+              { nativeBuildInputs = with nixpkgs.legacyPackages.${system}; [ python3 ]; } ''
+              EPISTEME=${episteme}/bin/episteme bash ${self}/tests/serve.sh
+              echo ok > $out
+            '';
           };
 
           devShells.default = ez.mkShell {

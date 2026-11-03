@@ -102,28 +102,27 @@ def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json) -> IO(Unit):
             Rr.Reader.notice(url, body)
             Ask.notice(rest, body)
 
-# the reads of the shards; none, and no reader asked, when there are none
+# the reads of the shards; no reads, and no reader asked, when there are
+# none; None when no reader instance is healthy
 def Ask.read(
   +ss: List<&2, S.Shard>,
   +pool: List<&2, St.Slot>,
   names: List<&2, Rd.Name>,
   +question: String
-) -> IO(List<&2, Rd.Read>):
+) -> IO(Maybe<&2, List<&2, Rd.Read>>):
   match ss:
     case Nil{}:
-      IO.pure(List<&2, Rd.Read>, [])
+      IO.pure(Maybe<&2, List<&2, Rd.Read>>, Some{[]})
     case Con{_s, _rest}:
-      do IO<List<&2, Rd.Read>>:
+      do IO<Maybe<&2, List<&2, Rd.Read>>>:
         Ask.notice(pool, Rd.Read.notice(names, question))
-        Pl.Pool.run(pool, ss, question)
+        Pl.Pool.try(pool, ss, question)
 
-# write each source's excerpts to <source>.md and INDEX.md under
-# runs/<now>/, then print the directory
+# write each source's excerpts to <source>.md under dir
 def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(Unit):
   match srcs:
     case Nil{}:
-      do IO<Unit>:
-        IO.print(dir)
+      IO.pure(Unit, Unit{})
     case Con{+src, rest}:
       do IO<Unit>:
         St.Store.save(dir ++ "/" ++ Rd.Read.file(src), E.Excerpt.render(Rd.Read.of_source(src, xs)))
@@ -162,6 +161,19 @@ def Ask.claim(tries: Nat, +base: String, +idx: U32) -> IO(String):
         res : Result<&1, &1, U32 & String, U32 & (String & String)> <- Process.run("mkdir", [dir], "", 65536, 60000)
         Ask.claimed(Ask.made(res), dir, _u => Ask.claim(more, base, U32.inc(idx)))
 
+# write the excerpts to run files under runs/<now>/: each source's excerpts
+# to <source>.md and INDEX.md; answers the directory
+def Ask.spill(+xs: List<&2, E.Ex>) -> IO(String):
+  do IO<String>:
+    stamp : String <- Sys.time.now_iso()
+    +runs : String <- St.Store.path("runs")
+    St.Store.mkdir(runs)
+    +dir : String <- Ask.claim(100n, runs ++ "/" ++ stamp, 0)
+    +srcs : List<&2, String> = Rd.Read.sources(xs, [])
+    St.Store.save(dir ++ "/INDEX.md", Rd.Read.index(srcs, xs))
+    Ask.files(srcs, dir, xs)
+    return dir
+
 # print the excerpts when they fit the budget, else write them to run files
 # and print where
 def Ask.deliver(fits: Bool, text: String, +xs: List<&2, E.Ex>) -> IO(Unit):
@@ -170,13 +182,8 @@ def Ask.deliver(fits: Bool, text: String, +xs: List<&2, E.Ex>) -> IO(Unit):
       IO.write(text)
     case False{}:
       do IO<Unit>:
-        stamp : String <- Sys.time.now_iso()
-        +runs : String <- St.Store.path("runs")
-        St.Store.mkdir(runs)
-        +dir : String <- Ask.claim(100n, runs ++ "/" ++ stamp, 0)
-        +srcs : List<&2, String> = Rd.Read.sources(xs, [])
-        St.Store.save(dir ++ "/INDEX.md", Rd.Read.index(srcs, xs))
-        Ask.files(srcs, dir, xs)
+        dir : String <- Ask.spill(xs)
+        IO.print(dir)
 
 # print the run: one JSON object, the footer on stderr; or the excerpts,
 # then the footer
@@ -245,22 +252,78 @@ def Ask.done(got: Got, json: Bool, +cfg: St.Config, +t0: Nat) -> IO(U32):
         Ask.out(json, xs, rs, names, Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0)), cfg)
         return Rd.Read.code(rs)
 
+# why a run did not happen, and the exit code `ask` stops with
+type Refusal is Data:
+  Refusal{code: U32, why: String}
+
+# the run when the reads came back, else the refusal and its exit code 2
+def Ask.came(
+  got: Maybe<&2, List<&2, Rd.Read>>,
+  +hits: List<&2, S.Shard>,
+  since: Maybe<&2, String>,
+  names: List<&2, Rd.Name>
+) -> Result<&2, &2, Refusal, Got>:
+  match got:
+    case None{}:
+      Fail{Refusal{2, Pl.Pool.none()}}
+    case Some{got}:
+      +rs = Rd.Read.ordered(hits, got)
+      Done{Ask.got(Rd.Read.excerpts(hits, rs), since, rs, names)}
+
+# the shards' reads when the shards are not behind the log, else the
+# refusal and its exit code 1
+def Ask.reads(
+  behind: Maybe<&2, String>,
+  +cap: U32,
+  +cfg: St.Config,
+  +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
+  +question: String
+) -> IO(Result<&2, &2, Refusal, Got>):
+  match behind:
+    case Some{why}:
+      IO.pure(Result<&2, &2, Refusal, Got>, Fail{Refusal{1, why}})
+    case None{}:
+      do IO<Result<&2, &2, Refusal, Got>>:
+        all : List<&2, S.Shard> <- St.Store.shards(cap, filter)
+        +ss : List<&2, S.Shard> = F.Filter.recent(since, all)
+        +hits : List<&2, S.Shard> = Ask.number(ss, 1)
+        +names : List<&2, Rd.Name> = Ask.names(ss)
+        got : Maybe<&2, List<&2, Rd.Read>> <- Ask.read(hits, Ask.pool(cfg), names, question)
+        return Ask.came(got, hits, since, names)
+
 # a question over the shards a passed filter hits, with the settings cfg:
-# stop when the shards are behind the log (reads never write), read the
-# shards the filter hits that hold a record at or after the
-# since with the pool, resolve each read, merge and drop the excerpts before
-# the since; delivers nothing, so `ask` and the eval share it
+# refused (exit 1) when the shards are behind the log (reads never write),
+# else read the shards the filter hits that hold a record at or after the
+# since with the pool, refused (exit 2) when no reader instance is healthy,
+# resolve each read, merge and drop the excerpts before the since; delivers
+# nothing, so `ask`, `serve` and the eval share it
+def Ask.collect(
+  +cfg: St.Config,
+  +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
+  +question: String
+) -> IO(Result<&2, &2, Refusal, Got>):
+  do IO<Result<&2, &2, Refusal, Got>>:
+    +cap : U32 <- St.Store.cap(cfg)
+    behind : Maybe<&2, String> <- St.Store.behind(cap)
+    Ask.reads(behind, cap, cfg, filter, since, question)
+
+# the run, or stop with its refusal: exit 1 through the store (which frees
+# an ingest's lock), else with its code
+def Ask.gathered(res: Result<&2, &2, Refusal, Got>) -> IO(Got):
+  match res:
+    case Done{got}:
+      IO.pure(Got, got)
+    case Fail{Refusal{+code, +why}}:
+      Bool.pick(IO(Got), U32.is_eq(code, 1), St.Store.die(Got, why),
+        IO.die(Got, code, "episteme: " ++ why))
+
+# Ask.collect, stopping with its refusal
 def Ask.gather(+cfg: St.Config, +filter: List<&2, F.Sel>, +since: Maybe<&2, String>, +question: String) -> IO(Got):
   do IO<Got>:
-    +cap : U32 <- St.Store.cap(cfg)
-    St.Store.ready(cap)
-    all : List<&2, S.Shard> <- St.Store.shards(cap, filter)
-    +ss : List<&2, S.Shard> = F.Filter.recent(since, all)
-    +hits : List<&2, S.Shard> = Ask.number(ss, 1)
-    +names : List<&2, Rd.Name> = Ask.names(ss)
-    got : List<&2, Rd.Read> <- Ask.read(hits, Ask.pool(cfg), names, question)
-    +rs : List<&2, Rd.Read> = Rd.Read.ordered(hits, got)
-    return Ask.got(Rd.Read.excerpts(hits, rs), since, rs, names)
+    res : Result<&2, &2, Refusal, Got> <- Ask.collect(cfg, filter, since, question)
+    Ask.gathered(res)
 
 # a question over the shards a passed filter hits, from the since on
 def Ask.go(+filter: List<&2, F.Sel>, +since: Maybe<&2, String>, +question: String, +json: Bool) -> IO(U32):
@@ -308,3 +371,67 @@ def Ask.checked(
 # the since; answers the exit code, 1 when a read failed
 def Ask.run(+filter: List<&2, F.Sel>, since: Maybe<&2, String>, +question: String, +json: Bool) -> IO(U32):
   Ask.checked(F.Filter.check(filter), filter, since, question, json)
+
+# --- for the server ---
+
+# the excerpts when they fit the budget, else the run files' directory and
+# their INDEX.md
+def Ask.text(fits: Bool, text: String, +xs: List<&2, E.Ex>) -> IO(String):
+  match fits:
+    case True{}:
+      IO.pure(String, text)
+    case False{}:
+      do IO<String>:
+        dir : String <- Ask.spill(xs)
+        return "The excerpts are over the budget; they are in " ++ dir ++ ":\n\n"
+          ++ Rd.Read.index(Rd.Read.sources(xs, []), xs)
+
+# a run delivered as text: the excerpts (or where they were written), a
+# blank line and the footer
+def Ask.told(got: Got, +cfg: St.Config, +t0: Nat) -> IO(String):
+  match got:
+    case Got{+xs, +rs, +names, unknown}:
+      match cfg:
+        case St.Config{_tokens, per, _pool, budget}:
+          +text = E.Excerpt.render(xs)
+          do IO<String>:
+            body : String <- Ask.text(Rd.Read.fits(String.length(text), budget, per), text, xs)
+            t1 : Nat <- IO.now()
+            return body ++ "\n" ++ Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0))
+
+# the run as text, or its refusal
+def Ask.reply(res: Result<&2, &2, Refusal, Got>, +cfg: St.Config, +t0: Nat) -> IO(Result<&2, &2, String, String>):
+  match res:
+    case Fail{Refusal{_code, why}}:
+      IO.pure(Result<&2, &2, String, String>, Fail{why})
+    case Done{got}:
+      do IO<Result<&2, &2, String, String>>:
+        text : String <- Ask.told(got, cfg, t0)
+        return Done{text}
+
+# a question whose since value read, from the since on
+def Ask.answer.dated(
+  res: Result<&2, &2, String, Maybe<&2, String>>,
+  +filter: List<&2, F.Sel>,
+  +question: String
+) -> IO(Result<&2, &2, String, String>):
+  match res:
+    case Fail{why}:
+      IO.pure(Result<&2, &2, String, String>, Fail{why})
+    case Done{since}:
+      do IO<Result<&2, &2, String, String>>:
+        +t0 : Nat <- IO.now()
+        +cfg : St.Config <- St.Store.config()
+        got : Result<&2, &2, Refusal, Got> <- Ask.collect(cfg, filter, since, question)
+        Ask.reply(got, cfg, t0)
+
+# a question over a filter that passed its check, answered as text rather
+# than printed: the excerpts and footer `ask` prints, or a refusal (a
+# malformed since, shards behind the log, no healthy reader) that `ask`
+# would stop with
+def Ask.answer(
+  +filter: List<&2, F.Sel>,
+  since: Maybe<&2, String>,
+  +question: String
+) -> IO(Result<&2, &2, String, String>):
+  Ask.answer.dated(F.Filter.since.arg(since), filter, question)

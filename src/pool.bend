@@ -7,7 +7,8 @@
 #
 # Trusted, not proved: `Pool.run(pool, ss, q)` checks each instance's health
 # in order, skipping one that fails with the stderr line `skipping <url>:
-# <why>`, and stops with exit 2 when none is healthy. It reads in two passes.
+# <why>`, and answers none when none is healthy (`Pool.run` then stops with
+# exit 2). It reads in two passes.
 # A pass fills one `Chan` queue with its shards and closes it, then starts one
 # worker per slot of the pass's instances (`IO.fork`, each with its own
 # `id_slot`); each worker reads shards until the queue is drained (so a faster
@@ -282,22 +283,41 @@ def Pool.retry(
         more : List<&2, Rd.Read> <- Pool.retry(rest, ws, ss, bad, question)
         return List.append(&2, Rd.Read, got, more)
 
-# the two passes with the workers ws; with no worker, stop with exit 2.
-# The second pass's reads come first, so Read.ordered takes them
-def Pool.start(ws: List<&2, Worker>, +ss: List<&2, S.Shard>, +question: String) -> IO(List<&2, Rd.Read>):
+# the two passes with the workers ws; none with no worker. The second
+# pass's reads come first, so Read.ordered takes them
+def Pool.start(ws: List<&2, Worker>, +ss: List<&2, S.Shard>, +question: String) -> IO(Maybe<&2, List<&2, Rd.Read>>):
   match ws:
     case Nil{}:
-      IO.die(List<&2, Rd.Read>, 2, "episteme: no reader instance is healthy")
+      IO.pure(Maybe<&2, List<&2, Rd.Read>>, None{})
     case Con{+wk, +rest}:
-      do IO<List<&2, Rd.Read>>:
+      do IO<Maybe<&2, List<&2, Rd.Read>>>:
         +first : List<&2, Rd.Read> <- Pool.pass(wk <> rest, ss, question)
         +bad : List<&2, Rd.Read> = Rd.Read.failed(first)
         again : List<&2, Rd.Read> <- Pool.retry(Pool.insts(bad, []), wk <> rest, ss, bad, question)
-        return List.append(&2, Rd.Read, again, first)
+        return Some{List.append(&2, Rd.Read, again, first)}
+
+# the refusal when no reader instance is healthy
+def Pool.none() -> String:
+  "no reader instance is healthy"
 
 # read every shard with the pool's healthy instances, skipping the others
-# with a line on stderr; a failed read is read again on another instance
-def Pool.run(insts: List<&2, St.Slot>, +ss: List<&2, S.Shard>, +question: String) -> IO(List<&2, Rd.Read>):
-  do IO<List<&2, Rd.Read>>:
+# with a line on stderr; a failed read is read again on another instance.
+# None when no instance is healthy
+def Pool.try(insts: List<&2, St.Slot>, +ss: List<&2, S.Shard>, +question: String) -> IO(Maybe<&2, List<&2, Rd.Read>>):
+  do IO<Maybe<&2, List<&2, Rd.Read>>>:
     ok : List<&2, St.Slot> <- Pool.healthy(insts)
     Pool.start(Pool.workers(ok, 1), ss, question)
+
+# the reads, or stop with exit 2 when there are none
+def Pool.got(got: Maybe<&2, List<&2, Rd.Read>>) -> IO(List<&2, Rd.Read>):
+  match got:
+    case None{}:
+      IO.die(List<&2, Rd.Read>, 2, "episteme: " ++ Pool.none())
+    case Some{rs}:
+      IO.pure(List<&2, Rd.Read>, rs)
+
+# Pool.try, stopping with exit 2 when no instance is healthy
+def Pool.run(insts: List<&2, St.Slot>, +ss: List<&2, S.Shard>, +question: String) -> IO(List<&2, Rd.Read>):
+  do IO<List<&2, Rd.Read>>:
+    got : Maybe<&2, List<&2, Rd.Read>> <- Pool.try(insts, ss, question)
+    Pool.got(got)

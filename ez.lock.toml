@@ -21,6 +21,27 @@ kind = "hub"
 "effs/sqlite.c" = "8a76236a328d9120a342943fbc007b33b2b10e836ba748bf0b4e1a5092cb7e57"
 "effs/sqlite.js" = "e1bcfc6c2037856573fcb7b4374297a1d6496d01facedb9d8d6ca5a12720cc2a"
 "sqlite.bend" = "5219db84dd9bc47d6291ed064e6e1884c7829b46f1cd8035eb24e9af6642c3a2"
+[packages.0x2cdfbd965b8ee76badc162cc31174fad]
+[packages.0x2cdfbd965b8ee76badc162cc31174fad.source]
+kind = "git"
+url = "https://github.com/Emerging-Patterns/ezmcp"
+rev = "222124b0814a3e5c1193e78eba0392e709b99174"
+entry = "main.bend"
+root = "."
+narHash = "sha256-WiH3GNBBpB/Hb7lTx/Eo/tX2OS6Io7NJvruq3lV9CnQ="
+[packages.0x2cdfbd965b8ee76badc162cc31174fad.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"main.bend" = "68a4628486991d1ee6805fb7ff7c66e5578b296beabbcc42311f7308ee704576"
+"src/client.bend" = "3226e3ccf88a6ca3fd5a3b9822dc2e2e28e6006e335f5a7960354f796803adbe"
+"src/effs/stdin.c" = "4ed5c4a6109bf6796075c162cc357b21648743ed066c2558ee0c397f718a3422"
+"src/effs/stdin.js" = "0ff22492ec7a86d39fb1234ffa0207851509d9ce2e2b6cbb77bb5f2c45f84197"
+"src/io.bend" = "b8c9b911126ab7dc82d700aabb324b78a19a61d1942fba46356a27cee7a97c7a"
+"src/line.bend" = "ce3da7fcd662912392ddd998ee1743b99f10567930aeb366994b5ee96bd7cd19"
+"src/openapi.bend" = "7fa9ed6032a648b96430f01eef94e17c206fb31e76262e45dc1b0f7f77316e7a"
+"src/rpc.bend" = "3b65d13daf19995a0657e60e69639ae09f41bc2bdf843c3c4ff4624df5752431"
+"src/server.bend" = "73cc14b2cc34db99d4c757a8d959762a9a19fa90a6bf73eb1778b8435e592e21"
+"src/sse.bend" = "be439d343cacc4cad78476dc1f4fcc079091145c0f00f9b5003dd5cecd013bff"
+"src/web.bend" = "bd59c879049a4707f081a01bc780a02d2c6ef5337d8d1971c0a60f2ec67bde64"
 [packages.0x4eed9d7ac6ece61523d747a9d804e4f0]
 [packages.0x4eed9d7ac6ece61523d747a9d804e4f0.source]
 kind = "hub"

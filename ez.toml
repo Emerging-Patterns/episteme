@@ -42,6 +42,13 @@ entry = "sqlite.bend"
 hash = "0x856d414a32087762da315b6efc605eaa"
 hub = "yaml-for-bend@0.1.1.0"
 entry = "compose.bend"
+[deps.ezmcp]
+hash = "0x2cdfbd965b8ee76badc162cc31174fad"
+git = "https://github.com/Emerging-Patterns/ezmcp"
+rev = "222124b0814a3e5c1193e78eba0392e709b99174"
+root = "."
+narHash = "sha256-WiH3GNBBpB/Hb7lTx/Eo/tX2OS6Io7NJvruq3lV9CnQ="
+entry = "main.bend"
 [tools]
 [tools.bolt]
 git = "https://github.com/Emerging-Patterns/bolt"

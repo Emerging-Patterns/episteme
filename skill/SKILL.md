@@ -9,6 +9,8 @@ episteme reads the user's raw record and returns verbatim excerpts, in time orde
 
 Run it as `episteme <command>` (or `nix run <path to the episteme repo> -- <command>`).
 
+When the `episteme` MCP tools are loaded (`ask`, `show`, `sources`, served by `episteme serve`), call them instead: `ask` takes `question`, `filter` (the `--filter` value) and an optional `since`, `show` takes `id`. Everything below holds for them too; a refusal comes back as a tool error.
+
 ## Sources
 
 Every record has one source:

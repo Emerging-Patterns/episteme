@@ -18,6 +18,7 @@ episteme sources
 episteme show <record id>[#<n>]
 episteme ask --filter <sources> [--since <date>] "<question>"
 episteme eval <questions.jsonl> --label <name>
+episteme serve [--host 127.0.0.1] [--port 18113]
 ```
 
 Build with `nix build`. Data lives under `$EPISTEME_HOME` (default `~/.local/share/episteme`); `config.json` there sets the shard size and the reader pool. Ingest holds `$EPISTEME_HOME/lock` (a second ingest refuses); `ask` and `sources` never write, and refuse with "run episteme ingest" when the shards are behind the log. Honcho is read from `$HONCHO_BASE_URL` with `$HONCHO_API_KEY`.
@@ -28,5 +29,7 @@ A reader is any HTTP server that answers `GET /health` and an OpenAI-style `POST
 
 - `deploy/f2/` is the default reader: BM25 fused with attention read out of Qwen3.5-0.8B (layers 0 to 11), ranking a question's whole run and filling one token budget. It needs one CUDA GPU with about 10 GB; see its `f2serve.py` header for setup.
 - `deploy/reader.sh` runs llama-server with any instruction model as a generating reader.
+
+`episteme serve` serves `ask`, `show` and `sources` as MCP tools over streamable HTTP at `/mcp` (on ezmcp); a refusal is a tool error, never an exit. It does no authorization: bind 127.0.0.1 unless a proxy that authenticates sits in front.
 
 `skill/SKILL.md` tells agents when and how to ask; install it with `ln -s <this repo>/skill ~/.claude/skills/episteme`.

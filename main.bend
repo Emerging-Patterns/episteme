@@ -16,6 +16,22 @@
 # Why it is trusted: They read the store and run `git`, which no law reaches.
 # `tests/smoke.sh` checks both on the fixture, and `sources` refusing when the
 # shards are behind the log.
+#
+# Trusted, not proved: `episteme serve [--host H] [--port P]` (default
+# 127.0.0.1:18113) serves the tools `ask`, `show` and `sources` as MCP over
+# streamable HTTP at /mcp with ezmcp, until the process stops. Each call does
+# what its command does and answers its text as the tool result: `ask` reads
+# its arguments with `Tool.ask` (laws/ToolQueryIsCliQuery.bend) and runs
+# `Ask.answer`; `show` and `sources` run `show.text` and `sources.text`, the
+# functions their commands print. A refusal the command would stop with (no
+# filter, no question, a malformed since, shards behind the log, no healthy
+# reader, no such record) is a tool result with isError, and the server goes
+# on; a show without an id is refused as invalid params. A store too broken
+# to read (Store.die) still stops the process.
+#
+# Why it is trusted: It is ezmcp's transport over the same IO as the
+# commands; `tests/serve.sh` checks every tool, each refusal, both filter
+# shapes and the server answering after a refused ask.
 import Base
 import ./src/para.bend as P
 import ./src/record.bend as R
@@ -33,6 +49,12 @@ import ./src/filter.bend as F
 import ./src/ask.bend as A
 import ./src/gold.bend as G
 import ./src/eval.bend as Ev
+import ./src/tool.bend as T
+import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
+import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import 0x2cdfbd965b8ee76badc162cc31174fad/main.bend as Mcp
+import 0x2cdfbd965b8ee76badc162cc31174fad/src/rpc.bend as Rpc
+import 0x2cdfbd965b8ee76badc162cc31174fad/src/server.bend as Server
 import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
 import 0x5a44d8a54be79db966199d0fa91fe8e6/main.bend as Shake
 
@@ -147,14 +169,39 @@ def stat.shards(ss: List<&2, S.Shard>, sts: List<&2, Stat>) -> List<&2, Stat>:
         case S.Shard{_n, items, sources, _chars, _frozen}:
           stat.shards(rest, stat.sources(sources, stat.items(items, sts)))
 
+# the table of sources when the shards are not behind the log, else the
+# refusal
+def sources.of(behind: Maybe<&2, String>, +cap: U32) -> IO(Result<&2, &2, String, String>):
+  match behind:
+    case Some{why}:
+      IO.pure(Result<&2, &2, String, String>, Fail{why})
+    case None{}:
+      do IO<Result<&2, &2, String, String>>:
+        ss : List<&2, S.Shard> <- St.Store.shards(cap, St.Store.every())
+        return Done{"source records paragraphs shards\n" ++ stat.lines(stat.shards(ss, []))}
+
+# each source with its records, paragraphs and shards, or the refusal when
+# the shards are behind the log
+def sources.text() -> IO(Result<&2, &2, String, String>):
+  do IO<Result<&2, &2, String, String>>:
+    cfg : St.Config <- St.Store.config()
+    +cap : U32 <- St.Store.cap(cfg)
+    behind : Maybe<&2, String> <- St.Store.behind(cap)
+    sources.of(behind, cap)
+
+# the text, or stop with the refusal
+def written(res: Result<&2, &2, String, String>) -> IO(Unit):
+  match res:
+    case Fail{why}:
+      St.Store.die(Unit, why)
+    case Done{text}:
+      IO.write(text)
+
 # print each source with its records, paragraphs and shards
 def run.sources() -> IO(Unit):
   do IO<Unit>:
-    cfg : St.Config <- St.Store.config()
-    +cap : U32 <- St.Store.cap(cfg)
-    St.Store.ready(cap)
-    ss : List<&2, S.Shard> <- St.Store.shards(cap, St.Store.every())
-    IO.write("source records paragraphs shards\n" ++ stat.lines(stat.shards(ss, [])))
+    res : Result<&2, &2, String, String> <- sources.text()
+    written(res)
 
 # a wanted record id and paragraph number, if one was named
 type Want is Data:
@@ -250,26 +297,36 @@ def line.at(lines: List<&2, String>, num: Nat) -> String:
     case Con{_head, _rest} 0n:
       ""
 
-# print the line of file:<path>:<line>
-def show.file(got: Maybe<&2, Cut>) -> IO(Unit):
+# what a show writes: its output and what goes to stderr
+type Shown is Data:
+  Shown{out: String, err: String}
+
+# the line of a file read, or why it was not
+def show.read(res: Result<&1, &1, U32 & String, String>, +path: String, num: String) -> Shown:
+  match res:
+    case Fail{(code, why)}:
+      Shown{"", "episteme: " ++ Sys.err.os(code, why, path)}
+    case Done{text}:
+      Shown{line.at(C.Chat.lines(text),
+        U32.to_nat(Maybe.default(&2, U32, U32.read(num), 0))) ++ "\n", ""}
+
+# the line of file:<path>:<line>
+def show.file(got: Maybe<&2, Cut>) -> IO(Shown):
   match got:
     case None{}:
-      IO.print_err("episteme: a file pointer is file:<path>:<line>")
-    case Some{Cut{path, num}}:
-      do IO<Unit>:
-        text : String <- St.Store.read(path)
-        IO.print(line.at(C.Chat.lines(text),
-          U32.to_nat(Maybe.default(&2, U32, U32.read(num), 0))))
+      IO.pure(Shown, Shown{"", "episteme: a file pointer is file:<path>:<line>"})
+    case Some{Cut{+path, num}}:
+      do IO<Shown>:
+        res : Result<&1, &1, U32 & String, String> <- Sys.file.read(path)
+        return show.read(res, path, num)
 
-# print a command's output, or its failure
-def ran(res: Result<&1, &1, U32 & String, U32 & (String & String)>) -> IO(Unit):
+# a command's output, or its failure
+def ran(res: Result<&1, &1, U32 & String, U32 & (String & String)>) -> Shown:
   match res:
     case Fail{(_code, why)}:
-      IO.print_err("episteme: " ++ why)
+      Shown{"", "episteme: " ++ why}
     case Done{(_code, (out, err))}:
-      do IO<Unit>:
-        IO.write(out)
-        IO.print_err(err)
+      Shown{out, err}
 
 # run `git --no-lazy-fetch -C <repo> show --stat --patch --end-of-options
 # <hash>`, so a hash is never read as an option and a partial clone never
@@ -278,63 +335,203 @@ def git.show(repo: String, hash: String) -> IO(Result<&1, &1, U32 & String, U32 
   Process.run("git", ["--no-lazy-fetch", "-C", repo, "show", "--stat", "--patch", "--end-of-options", hash], "",
     268435456, 60000)
 
-# print `git show --stat --patch` of git:<repo>@<hash>
-def show.git(got: Maybe<&2, Cut>) -> IO(Unit):
+# `git show --stat --patch` of git:<repo>@<hash>
+def show.git(got: Maybe<&2, Cut>) -> IO(Shown):
   match got:
     case None{}:
-      IO.print_err("episteme: a git pointer is git:<repo>@<hash>")
+      IO.pure(Shown, Shown{"", "episteme: a git pointer is git:<repo>@<hash>"})
     case Some{Cut{repo, hash}}:
-      do IO<Unit>:
+      do IO<Shown>:
         res : Result<&1, &1, U32 & String, U32 & (String & String)> <- git.show(repo, hash)
-        ran(res)
+        return ran(res)
 
 # the pointer by its kind
-def show.ptr.if(file: Bool, git: Bool, +ptr: String) -> IO(Unit):
+def show.ptr.if(file: Bool, git: Bool, +ptr: String) -> IO(Shown):
   match file git:
     case True{} _:
       show.file(cut.last(String.drop(ptr, 5n), ':'))
     case False{} True{}:
       show.git(cut.last(String.drop(ptr, 4n), '@'))
     case False{} False{}:
-      IO.pure(Unit, Unit{})
+      IO.pure(Shown, Shown{"", ""})
 
-# print what a pointer points at: a file's line or a commit
-def show.ptr(+ptr: String) -> IO(Unit):
+# what a pointer points at: a file's line or a commit
+def show.ptr(+ptr: String) -> IO(Shown):
   show.ptr.if(String.starts_with(ptr, "file:"), String.starts_with(ptr, "git:"), ptr)
 
-# print the paragraphs of a record, then what its pointer points at
-def show.rec(ps: List<&2, P.Para>, +rec: R.Record, +arg: String) -> IO(Unit):
+# the excerpt ahead of what the pointer shows
+def show.ahead(+text: String, sh: Shown) -> Shown:
+  match sh:
+    case Shown{out, err}:
+      Shown{text ++ out, err}
+
+# the paragraphs of a record, then what its pointer points at
+def show.rec(ps: List<&2, P.Para>, +rec: R.Record, +arg: String) -> IO(Result<&2, &2, String, Shown>):
   match ps:
     case Nil{}:
-      St.Store.die(Unit, "no paragraph " ++ arg)
+      IO.pure(Result<&2, &2, String, Shown>, Fail{"no paragraph " ++ arg})
     case Con{pa, rest}:
       match rec:
         case R.Record{_id, _ts, _source, _author, _thread, _parent, _paras, +ptr}:
-          do IO<Unit>:
-            IO.write(E.Excerpt.render([E.Ex{rec, pa <> rest}]))
-            show.ptr(ptr)
+          do IO<Result<&2, &2, String, Shown>>:
+            sh : Shown <- show.ptr(ptr)
+            return Done{show.ahead(E.Excerpt.render([E.Ex{rec, pa <> rest}]), sh)}
 
-# print the wanted record or paragraph
-def show.found(got: Maybe<&2, R.Record>, num: Maybe<&2, U32>, +arg: String) -> IO(Unit):
+# the wanted record or paragraph
+def show.found(got: Maybe<&2, R.Record>, num: Maybe<&2, U32>, +arg: String) -> IO(Result<&2, &2, String, Shown>):
   match got:
     case None{}:
-      St.Store.die(Unit, "no record " ++ arg)
+      IO.pure(Result<&2, &2, String, Shown>, Fail{"no record " ++ arg})
     case Some{+rec}:
       match rec:
         case R.Record{_id, _ts, _source, _author, _thread, _parent, paras, _ptr}:
           show.rec(picked(num, paras), rec, arg)
 
-# print the record or paragraph a Want names
-def show.want(wt: Want, +arg: String) -> IO(Unit):
+# the record or paragraph a Want names
+def show.want(wt: Want, +arg: String) -> IO(Result<&2, &2, String, Shown>):
   match wt:
     case Want{+id, num}:
-      do IO<Unit>:
+      do IO<Result<&2, &2, String, Shown>>:
         log : List<&2, R.Record> <- St.Store.log()
         show.found(find(id, log), num, arg)
 
+# a record, or one paragraph of it, and what its pointer points at; or the
+# refusal when there is none
+def show.text(+arg: String) -> IO(Result<&2, &2, String, Shown>):
+  show.want(want(arg), arg)
+
+# stderr's text, when there is any
+def show.err(+err: String) -> IO(Unit):
+  Bool.pick(IO(Unit), String.is_empty(err), IO.pure(Unit, Unit{}), IO.print_err(err))
+
+# print a show, or stop with its refusal
+def show.out(res: Result<&2, &2, String, Shown>) -> IO(Unit):
+  match res:
+    case Fail{why}:
+      St.Store.die(Unit, why)
+    case Done{Shown{out, +err}}:
+      do IO<Unit>:
+        IO.write(out)
+        show.err(err)
+
 # print a record, or one paragraph of it
 def show(+arg: String) -> IO(Unit):
-  show.want(want(arg), arg)
+  do IO<Unit>:
+    res : Result<&2, &2, String, Shown> <- show.text(arg)
+    show.out(res)
+
+# --- serve ---
+
+# strings as JSON strings
+def strs(xs: List<&2, String>) -> List<&2, Value.Json>:
+  match xs:
+    case Nil{}:
+      []
+    case Con{x, rest}:
+      Json.str(x) <> strs(rest)
+
+# a tool's input schema: an object of string properties, some required
+def schema(props: List<&1, String & Value.Json>, req: List<&2, String>) -> Value.Json:
+  Json.obj([("type", Json.str("object")), ("properties", Json.obj(props)),
+    ("required", Json.arr(strs(req)))])
+
+# a string property with its description
+def prop(+name: String, desc: String) -> String & Value.Json:
+  (name, Json.obj([("type", Json.str("string")), ("description", Json.str(desc))]))
+
+# what the server tells a client about its tools
+def serve.instructions() -> String:
+  String.concat([
+    "episteme returns verbatim, cited excerpts of the primary record: ingested books, ",
+    "Claude Code transcripts, Honcho chats, git history and the intent file. Readers only ",
+    "pick paragraphs; nothing is summarized, so answer from the excerpts and cite every ",
+    "claim as <record id>#<n>. Later excerpts are the current state. Call sources first ",
+    "when unsure what to filter on; pass the narrowest filter that can hold the answer, ",
+    "and since for recent chat or git work. A footer naming failed shards means those ",
+    "shards were not read: report it, and never read their gap as the record saying nothing."])
+
+# the tools episteme serves
+def serve.srv() -> Server.Server:
+  Mcp.server("episteme", version(), serve.instructions(), [
+    Mcp.tool("ask",
+      "Read every shard the filter hits for a question and return verbatim excerpts in time order, then a footer of the reads. Cost is the shards read: keep the filter narrow.",
+      schema([prop("question", "The question, in plain words, with the names and terms the record would use"),
+          prop("filter", "Sources to read, comma-separated: exact sources and prefixes ending in /, e.g. book:<corpus>/ or chat:claude/<project>,git:<repo>. Required; a filter over every chat is refused"),
+          prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ (chat and git only)")],
+        ["question", "filter"])),
+    Mcp.tool("show",
+      "Return a whole record, or one paragraph of it, and what its pointer points at (a file line or a git patch).",
+      schema([prop("id", "<record id> or <record id>#<n>, as cited in an excerpt")], ["id"])),
+    Mcp.tool("sources",
+      "List each source with its records, paragraphs and shards.",
+      schema([], []))])
+
+# a text or the refusal, as a tool result
+def serve.result(res: Result<&2, &2, String, String>) -> Rpc.Out:
+  match res:
+    case Fail{why}:
+      Mcp.ok(Mcp.result.error(why))
+    case Done{text}:
+      Mcp.ok(Mcp.result.text(text))
+
+# an ask call: refused as its arguments read, else answered
+def serve.ask(query: Result<&2, &2, String, T.Query>) -> IO(Rpc.Out):
+  match query:
+    case Fail{why}:
+      IO.pure(Rpc.Out, Mcp.ok(Mcp.result.error(why)))
+    case Done{T.Query{filter, since, question}}:
+      do IO<Rpc.Out>:
+        res : Result<&2, &2, String, String> <- A.Ask.answer(filter, since, question)
+        return serve.result(res)
+
+# a show as one text: its output, then what went to stderr
+def serve.shown(res: Result<&2, &2, String, Shown>) -> Rpc.Out:
+  match res:
+    case Fail{why}:
+      Mcp.ok(Mcp.result.error(why))
+    case Done{Shown{+out, +err}}:
+      Mcp.ok(Mcp.result.text(Bool.pick(String, String.is_empty(err), out, out ++ "\n" ++ err)))
+
+# a show call: refused without an id
+def serve.show(id: Maybe<&2, String>) -> IO(Rpc.Out):
+  match id:
+    case None{}:
+      IO.pure(Rpc.Out, Mcp.refuse.params("show needs an id"))
+    case Some{+id}:
+      do IO<Rpc.Out>:
+        res : Result<&2, &2, String, Shown> <- show.text(id)
+        return serve.shown(res)
+
+# a sources call
+def serve.sources() -> IO(Rpc.Out):
+  do IO<Rpc.Out>:
+    res : Result<&2, &2, String, String> <- sources.text()
+    return serve.result(res)
+
+# a tool call by name; ezmcp calls only the tools the table names
+def serve.tool.if(ask: Bool, shw: Bool, +args: Value.Json) -> IO(Rpc.Out):
+  match ask shw:
+    case True{} _:
+      serve.ask(T.Tool.ask(args))
+    case False{} True{}:
+      serve.show(Json.as_str(Json.get(args, "id")))
+    case False{} False{}:
+      serve.sources()
+
+# a tool call by its name
+def serve.named(+name: String, args: Value.Json) -> IO(Rpc.Out):
+  serve.tool.if(String.eq(name, "ask"), String.eq(name, "show"), args)
+
+# the runner: one tool call
+def serve.run(name: String, args: Value.Json) -> IO(Rpc.Out):
+  serve.named(name, args)
+
+# serve the tools as MCP over streamable HTTP at /mcp on host:port until the
+# process stops (4294967295 connections), each connection on its own fork
+def serve(+host: String, +port: U32) -> IO(Unit):
+  do IO<Unit>:
+    IO.print_err("episteme: serving MCP at http://" ++ host ++ ":" ++ U32.show(port) ++ "/mcp")
+    Mcp.http.serve(~serve.run, ~serve.srv(), ~"/mcp", ~[], host, port, 4294967295)
 
 # the commands episteme takes
 def spec() -> Shake.Cli:
@@ -358,6 +555,9 @@ def spec() -> Shake.Cli:
      Shake.sub("sources", "List each source with its records, paragraphs and shards.", [], []),
      Shake.sub("show", "Print a record, or one paragraph of it.",
        [Shake.pos("id", "<record id> or <record id>#<n>", True{}, None{}, [])], []),
+     Shake.sub("serve", "Serve ask, show and sources as MCP tools over streamable HTTP at /mcp.",
+       [Shake.opt("host", None{}, Some{"host"}, "The address to bind", False{}, Some{"127.0.0.1"}, []),
+        Shake.opt("port", None{}, Some{"port"}, "The port to bind", False{}, Some{"18113"}, [])], []),
      Shake.sub("ask", "Read every shard the filter hits for a question; print verbatim excerpts.",
        [Shake.many("filter", None{}, Some{"filter"},
          "Sources to read: values and prefixes ending in /, comma-separated", False{}, None{}, []),
@@ -497,6 +697,23 @@ def ask.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
           Maybe.default(&2, String, Shake.get(m, "question"), ""), Shake.on(m, "json"))
         IO.exit(code)
 
+# serve on the port when it read, else stop with exit 2
+def serve.port(got: Maybe<&2, U32>, +host: String) -> IO(Unit):
+  match got:
+    case None{}:
+      IO.die(Unit, 2, "episteme: --port must be a number")
+    case Some{port}:
+      serve(host, port)
+
+# serve with its own bindings; a port that does not read is refused
+def serve.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
+  match got:
+    case None{}:
+      IO.pure(Unit, Unit{})
+    case Some{+m}:
+      serve.port(U32.read(Maybe.default(&2, String, Shake.get(m, "port"), "18113")),
+        Maybe.default(&2, String, Shake.get(m, "host"), "127.0.0.1"))
+
 # eval-import with its own bindings
 def import.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
   match got:
@@ -518,15 +735,18 @@ def eval.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
           Maybe.default(&2, String, Shake.get(m, "label"), ""))
         IO.exit(code)
 
-# the eval commands by name: eval-import, else eval
-def command.eval(imp: Bool, +found: Shake.Matched) -> IO(Unit):
-  match imp:
-    case True{}:
+# the other commands by name: serve, eval-import, else eval
+def command.eval(srv: Bool, imp: Bool, +found: Shake.Matched) -> IO(Unit):
+  match srv imp:
+    case True{} _:
+      serve.at(Shake.sub_of(found, "serve"))
+    case False{} True{}:
       import.at(Shake.sub_of(found, "eval-import"))
-    case False{}:
+    case False{} False{}:
       eval.at(Shake.sub_of(found, "eval"))
 
-# the command by name: ingest, sources, ask, show, else an eval command
+# the command by name: ingest, sources, ask, show, else serve or an eval
+# command
 def command.if(ing: Bool, src: Bool, ask: Bool, shw: Bool, +name: String, +found: Shake.Matched) -> IO(Unit):
   match ing src ask shw:
     case True{} _ _ _:
@@ -538,7 +758,7 @@ def command.if(ing: Bool, src: Bool, ask: Bool, shw: Bool, +name: String, +found
     case False{} False{} False{} True{}:
       show.at(Shake.sub_of(found, "show"))
     case False{} False{} False{} False{}:
-      command.eval(String.eq(name, "eval-import"), found)
+      command.eval(String.eq(name, "serve"), String.eq(name, "eval-import"), found)
 
 # run the selected command
 def command(+name: String, +found: Shake.Matched) -> IO(Unit):
