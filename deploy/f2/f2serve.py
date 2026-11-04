@@ -13,8 +13,14 @@ lowercase words, light suffix stemming) and the attention score minus the
 same score for the question "N/A", over sqrt(paragraph characters).
 
 A shard's state (model.prefill) is kept on the GPU (CACHE_GB), then in
-pinned RAM (RAM_GB), then on disk under F2_STATES, least recently used
+host RAM (RAM_GB), then on disk under F2_STATES, least recently used
 first out; a miss everywhere is a prefill.
+
+Host copies are plain pageable memory, never pinned: PyTorch's caching
+host allocator keeps every freed pinned block, so a pinned RAM tier grew
+far past RAM_GB (50 GB RSS against RAM_GB 24 on a 642-shard book question,
+2026-11-03). At most SAVES new states wait for the disk writer; a prefill
+past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
 
 Setup: a Python 3.12 venv with requirements.txt, and the weights:
   huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
@@ -22,7 +28,7 @@ Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), SAVES (4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -39,6 +45,7 @@ BUDGET = float(os.environ.get("BUDGET", "4000"))
 SHARD_BUDGET = float(os.environ.get("SHARD_BUDGET", "120"))
 CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
+SAVES = int(os.environ.get("SAVES", "4"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
@@ -75,14 +82,32 @@ def parse(text):
     return {"path": None, "text": text, "spans": spans}
 
 
-def move(state, dev, pin=False):
-    """a state's cache tensors moved to dev, in place"""
-    for layer in state[1].layers:
+def tensors(cache):
+    for layer in cache.layers:
         for name, v in list(vars(layer).items()):
             if torch.is_tensor(v):
-                v = v.to(dev, non_blocking=True)
-                setattr(layer, name, v.pin_memory() if pin else v)
+                yield layer, name, v
+
+
+def move(state, dev):
+    """a state's cache tensors moved to dev, in place; to the host it is a
+    blocking copy into pageable memory (a non-blocking one would be pinned)"""
+    for layer, name, v in tensors(state[1]):
+        setattr(layer, name, v.to(dev, non_blocking=dev != "cpu"))
     return state
+
+
+def host_copy(state):
+    """a copy of a state on the host, the state itself untouched: the cache
+    deep-copied with each tensor swapped for a pageable host copy"""
+    memo = {id(v): v.to("cpu") for _, _, v in tensors(state[1])}
+    return (state[0], copy.deepcopy(state[1], memo)) + tuple(state[2:])
+
+
+def rss():
+    """this process's resident and shared (pinned shows as shared) GB"""
+    f = dict(l.split(":", 1) for l in open("/proc/self/status") if ":" in l)
+    return {k: int(f[k].split()[0]) / 1e6 for k in ("VmRSS", "RssShmem")}
 
 
 def nbytes(cache):
@@ -91,7 +116,7 @@ def nbytes(cache):
 
 
 class States:
-    """shard states and their "N/A" scores: GPU, then pinned RAM, then disk"""
+    """shard states and their "N/A" scores: GPU, then host RAM, then disk"""
 
     def __init__(self):
         self.gpu, self.ram = collections.OrderedDict(), collections.OrderedDict()
@@ -99,6 +124,7 @@ class States:
         self.n = collections.Counter()
         os.makedirs(STATES_DIR, exist_ok=True)
         self.writer = ThreadPool(1)
+        self.slots = threading.BoundedSemaphore(SAVES)
 
     def path(self, k):
         return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
@@ -110,7 +136,7 @@ class States:
             k2, ((state, null), s2) = self.gpu.popitem(last=False)
             self.gpu_b -= s2
             if RAM_BYTES > 0:
-                self.put_ram(k2, (move(state, "cpu", True), null), s2)
+                self.put_ram(k2, (move(state, "cpu"), null), s2)
 
     def put_ram(self, k, st, size):
         self.ram[k] = (st, size)
@@ -119,12 +145,13 @@ class States:
             _, (_, s2) = self.ram.popitem(last=False)
             self.ram_b -= s2
 
-    def save(self, k, st):
-        state, null = st
-        cpu = (move((state[0], copy.deepcopy(state[1]), state[2], state[3]), "cpu"), null)
-        tmp = self.path(k) + ".tmp"
-        torch.save(cpu, tmp)
-        os.replace(tmp, self.path(k))
+    def save(self, k, cpu):
+        try:
+            tmp = self.path(k) + ".tmp"
+            torch.save(cpu, tmp)
+            os.replace(tmp, self.path(k))
+        finally:
+            self.slots.release()
 
     def get(self, k, shard):
         if k in self.gpu:
@@ -144,7 +171,8 @@ class States:
             state = model.prefill(shard)
             st, size = (state, model.scores(state, "N/A")), nbytes(state[1])
             self.n["prefill"] += 1
-            self.writer.apply_async(self.save, (k, st))
+            self.slots.acquire()
+            self.writer.apply_async(self.save, (k, (host_copy(state), st[1])))
         self.put_gpu(k, st, size)
         return st
 
@@ -242,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/stats":
             self.send(200, {"gpu_states": len(STATES.gpu), "gpu_gb": STATES.gpu_b / 1e9,
                             "ram_states": len(STATES.ram), "ram_gb": STATES.ram_b / 1e9,
-                            "loads": dict(STATES.n)})
+                            "loads": dict(STATES.n), **rss()})
         else:
             self.send(404, {"error": "not found"})
 
