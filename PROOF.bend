@@ -121,6 +121,7 @@ import ./proofs/SinceRefusesWord.bend as PSinceRefusesWord
 import ./proofs/SourceDirsAreSafeAndDistinct.bend as PSourceDirsAreSafeAndDistinct
 import ./proofs/SourceSplitIsOnePass.bend as PSourceSplitIsOnePass
 import ./proofs/SubagentPromptByAgent.bend as PSubagentPromptByAgent
+import ./proofs/TelemetryLineOfARun.bend as PTelemetryLineOfARun
 import ./proofs/ToolQueryIsCliQuery.bend as PToolQueryIsCliQuery
 import ./proofs/ToolRecordsInlineOrPoint.bend as PToolRecordsInlineOrPoint
 import ./proofs/ToolResultIsPointer.bend as PToolResultIsPointer

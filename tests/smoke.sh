@@ -6,7 +6,8 @@
 # lost tail, a stale shard size, a crash in the middle of a run, the
 # ingest lock (a second ingest refused, the lock removed after a failed
 # one), the honcho connector against a fake Honcho, the git
-# connector on synthetic repos, the intent file and ingest --all, and ask (with and without --since) and eval without readers. Each ingest case ends with no id twice
+# connector on synthetic repos, the intent file and ingest --all, and ask (with and without --since), its
+# telemetry line and eval without readers. Each ingest case ends with no id twice
 # in the log and shards byte for byte as a reshard writes them. EPISTEME
 # names the binary (default bin/episteme, built with
 # `bend main.bend -o bin/episteme`).
@@ -514,6 +515,17 @@ grep -q '^episteme: c1: a filter is required' "$work/err.txt" || fail "no eval r
 rc=0; "$bin" ask --filter book:tiny/ "q" > "$work/out.txt" 2> "$work/err.txt" || rc=$?
 [ "$rc" = 2 ] || fail "ask with no healthy reader exited $rc, not 2"
 grep -q '^skipping http://127.0.0.1:9: ' "$work/err.txt" || fail "the dead reader is not named: $(cat "$work/err.txt")"
+# telemetry: that question's line is the last, refused with exit 2 and no
+# reads, naming the source the filter hit and the shards it would have read;
+# the eval's line says it came from eval
+tele=$EPISTEME_HOME/telemetry.jsonl
+line=$(tail -n 1 "$tele")
+for want in '"via":"ask","question":"q","filter":["book:tiny/"],"since":null,' '"code":2,"refused":"' \
+  '"sources":[{"source":"book:tiny/tiny-book","shards":' '"shards":[{"source":"book:tiny/tiny-book","n":1,"chars":' \
+  '"ok":false,"ms":0,"labels":0,"out_paras":0,"out_chars":0}' '"excerpts":0,"out_chars":0}'; do
+  case $line in *"$want"*) ;; *) fail "the telemetry line lacks $want: $line" ;; esac
+done
+grep -qF '"via":"eval","question":"q","filter":["book:none/"],' "$tele" || fail "no eval telemetry line"
 rc=0; "$bin" ask --filter book:tiny/ --since 2000-01-01T00:00:00.000Z "q" > "$work/out.txt" 2> "$work/err.txt" || rc=$?
 [ "$rc" = 2 ] || fail "ask since before every record exited $rc, not 2: no shard reached the dead pool"
 config 100

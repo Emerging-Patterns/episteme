@@ -177,7 +177,7 @@ def Eval.one(+cfg: St.Config, quest: Q) -> IO(Sc.Row):
       +sels = F.Filter.parse(filter)
       do IO<Sc.Row>:
         t0 : Nat <- IO.now()
-        got : A.Got <- A.Ask.gather(cfg, sels, None{}, question)
+        got : A.Got <- A.Ask.gather("eval", cfg, sels, None{}, question)
         t1 : Nat <- IO.now()
         Eval.scored(id, gold, got, Nat.sub(t1, t0))
 

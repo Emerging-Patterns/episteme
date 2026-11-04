@@ -61,6 +61,22 @@
 # malformed value (exit 2), a since after every record (no shard read, no
 # reader asked) and a since before them (the shards are read, and the dead
 # pool exits 2).
+#
+# Trusted, not proved: `Ask.collect`, and so every question `ask`, `serve`
+# and `eval` run (via "ask", "serve" and "eval"), appends one line,
+# `Tele.line` of the run (laws/TelemetryLineOfARun.bend), to
+# `telemetry.jsonl` under `Store.home()`, opened for append and written in
+# one write: its ts is `now_iso` at the start of `Ask.collect`, its ms runs
+# from then to the run's excerpts (delivery not counted), its code and
+# refusal are the refusal's (exit 1 when the shards are behind the log,
+# with no shards; exit 2 when no reader is healthy, with no reads) or else
+# `Read.code` of the reads and "", and its sources are every shard
+# `Store.shards` answers for the filter, before the since. A failed open or
+# write is said on stderr (`episteme: telemetry: ...`) and the question goes
+# on; telemetry never changes what a question answers or its exit code.
+#
+# Why it is trusted: It is one append over the pure line;
+# `tests/smoke.sh` checks a refused question's line.
 import Base
 import ./shard.bend as S
 import ./filter.bend as F
@@ -69,6 +85,7 @@ import ./read.bend as Rd
 import ./store.bend as St
 import ./pool.bend as Pl
 import ./reader.bend as Rr
+import ./telemetry.bend as T
 import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
 import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
 
@@ -270,6 +287,13 @@ def Ask.came(
       +rs = Rd.Read.ordered(hits, got)
       Done{Ask.got(Rd.Read.excerpts(hits, rs), since, rs, names)}
 
+# a question's run or refusal beside what telemetry needs of it: every
+# shard the filter hits, the shards it read, numbered for the run, and
+# their own names
+type Ran is Data:
+  Ran{all: List<&2, S.Shard>, hits: List<&2, S.Shard>, names: List<&2, Rd.Name>,
+    res: Result<&2, &2, Refusal, Got>}
+
 # the shards' reads when the shards are not behind the log, else the
 # refusal and its exit code 1
 def Ask.reads(
@@ -279,35 +303,124 @@ def Ask.reads(
   +filter: List<&2, F.Sel>,
   +since: Maybe<&2, String>,
   +question: String
-) -> IO(Result<&2, &2, Refusal, Got>):
+) -> IO(Ran):
   match behind:
     case Some{why}:
-      IO.pure(Result<&2, &2, Refusal, Got>, Fail{Refusal{1, why}})
+      IO.pure(Ran, Ran{[], [], [], Fail{Refusal{1, why}}})
     case None{}:
-      do IO<Result<&2, &2, Refusal, Got>>:
-        all : List<&2, S.Shard> <- St.Store.shards(cap, filter)
+      do IO<Ran>:
+        +all : List<&2, S.Shard> <- St.Store.shards(cap, filter)
         +ss : List<&2, S.Shard> = F.Filter.recent(since, all)
         +hits : List<&2, S.Shard> = Ask.number(ss, 1)
         +names : List<&2, Rd.Name> = Ask.names(ss)
         got : Maybe<&2, List<&2, Rd.Read>> <- Ask.read(hits, Ask.pool(cfg), names, question)
-        return Ask.came(got, hits, since, names)
+        return Ran{all, hits, names, Ask.came(got, hits, since, names)}
+
+# a result's exit code: its refusal's, else Read.code of its reads
+def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
+  match res:
+    case Fail{Refusal{code, _why}}:
+      code
+    case Done{Got{_xs, rs, _names, _unknown}}:
+      Rd.Read.code(rs)
+
+# a result's refusal, or ""
+def Ask.why(res: Result<&2, &2, Refusal, Got>) -> String:
+  match res:
+    case Fail{Refusal{_code, why}}:
+      why
+    case Done{_got}:
+      ""
+
+# a result's reads, or none
+def Ask.rs(res: Result<&2, &2, Refusal, Got>) -> List<&2, Rd.Read>:
+  match res:
+    case Fail{_r}:
+      []
+    case Done{Got{_xs, rs, _names, _unknown}}:
+      rs
+
+# a result's excerpts, or none
+def Ask.xs(res: Result<&2, &2, Refusal, Got>) -> List<&2, E.Ex>:
+  match res:
+    case Fail{_r}:
+      []
+    case Done{Got{xs, _rs, _names, _unknown}}:
+      xs
+
+# a failed telemetry write on stderr
+def Ask.tele.err(res: Result<&1, &1, U32 & String, Unit>, +path: String) -> IO(Unit):
+  match res:
+    case Fail{(code, why)}:
+      IO.print_err("episteme: telemetry: " ++ Sys.err.os(code, why, path))
+    case Done{_x}:
+      IO.pure(Unit, Unit{})
+
+# a write of a telemetry line, closed; a failure is said on stderr and
+# never stops the question
+def Ask.wrote(pair: File & Result<&1, &1, U32 & String, Unit>, +path: String) -> IO(Unit):
+  match pair:
+    case (handle, res):
+      do IO<Unit>:
+        File.close(handle)
+        Ask.tele.err(res, path)
+
+# the line appended to the open telemetry file, or the failed open said
+def Ask.opened(res: Result<&1, &1, U32 & String, File>, +line: String, +path: String) -> IO(Unit):
+  match res:
+    case Fail{(code, why)}:
+      IO.print_err("episteme: telemetry: " ++ Sys.err.os(code, why, path))
+    case Done{handle}:
+      do IO<Unit>:
+        pair : File & Result<&1, &1, U32 & String, Unit> <- File.write(handle, line ++ "\n")
+        Ask.wrote(pair, path)
+
+# append a line to telemetry.jsonl under the store, in one write
+def Ask.tele(+line: String) -> IO(Unit):
+  do IO<Unit>:
+    +path : String <- St.Store.path("telemetry.jsonl")
+    res : Result<&1, &1, U32 & String, File> <- File.open(path, "a")
+    Ask.opened(res, line, path)
+
+# the run's result after its telemetry line
+def Ask.logged(
+  ran: Ran,
+  ts: String,
+  via: String,
+  question: String,
+  filter: List<&2, F.Sel>,
+  since: Maybe<&2, String>,
+  ms: Nat
+) -> IO(Result<&2, &2, Refusal, Got>):
+  match ran:
+    case Ran{all, hits, names, +res}:
+      do IO<Result<&2, &2, Refusal, Got>>:
+        Ask.tele(T.Tele.line(ts, via, question, filter, since, ms, Ask.code(res), Ask.why(res),
+          all, hits, names, Ask.rs(res), Ask.xs(res)))
+        return res
 
 # a question over the shards a passed filter hits, with the settings cfg:
 # refused (exit 1) when the shards are behind the log (reads never write),
 # else read the shards the filter hits that hold a record at or after the
 # since with the pool, refused (exit 2) when no reader instance is healthy,
 # resolve each read, merge and drop the excerpts before the since; delivers
-# nothing, so `ask`, `serve` and the eval share it
+# nothing, so `ask`, `serve` and the eval share it, each naming itself as
+# via in the telemetry line every question appends
 def Ask.collect(
+  +via: String,
   +cfg: St.Config,
   +filter: List<&2, F.Sel>,
   +since: Maybe<&2, String>,
   +question: String
 ) -> IO(Result<&2, &2, Refusal, Got>):
   do IO<Result<&2, &2, Refusal, Got>>:
+    ts : String <- Sys.time.now_iso()
+    t0 : Nat <- IO.now()
     +cap : U32 <- St.Store.cap(cfg)
     behind : Maybe<&2, String> <- St.Store.behind(cap)
-    Ask.reads(behind, cap, cfg, filter, since, question)
+    ran : Ran <- Ask.reads(behind, cap, cfg, filter, since, question)
+    t1 : Nat <- IO.now()
+    Ask.logged(ran, ts, via, question, filter, since, Nat.sub(t1, t0))
 
 # the run, or stop with its refusal: exit 1 through the store (which frees
 # an ingest's lock), else with its code
@@ -320,9 +433,15 @@ def Ask.gathered(res: Result<&2, &2, Refusal, Got>) -> IO(Got):
         IO.die(Got, code, "episteme: " ++ why))
 
 # Ask.collect, stopping with its refusal
-def Ask.gather(+cfg: St.Config, +filter: List<&2, F.Sel>, +since: Maybe<&2, String>, +question: String) -> IO(Got):
+def Ask.gather(
+  +via: String,
+  +cfg: St.Config,
+  +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
+  +question: String
+) -> IO(Got):
   do IO<Got>:
-    res : Result<&2, &2, Refusal, Got> <- Ask.collect(cfg, filter, since, question)
+    res : Result<&2, &2, Refusal, Got> <- Ask.collect(via, cfg, filter, since, question)
     Ask.gathered(res)
 
 # a question over the shards a passed filter hits, from the since on
@@ -330,7 +449,7 @@ def Ask.go(+filter: List<&2, F.Sel>, +since: Maybe<&2, String>, +question: Strin
   do IO<U32>:
     +t0 : Nat <- IO.now()
     +cfg : St.Config <- St.Store.config()
-    got : Got <- Ask.gather(cfg, filter, since, question)
+    got : Got <- Ask.gather("ask", cfg, filter, since, question)
     Ask.done(got, json, cfg, t0)
 
 # the refusal on stderr and exit 2
@@ -422,7 +541,7 @@ def Ask.answer.dated(
       do IO<Result<&2, &2, String, String>>:
         +t0 : Nat <- IO.now()
         +cfg : St.Config <- St.Store.config()
-        got : Result<&2, &2, Refusal, Got> <- Ask.collect(cfg, filter, since, question)
+        got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", cfg, filter, since, question)
         Ask.reply(got, cfg, t0)
 
 # a question over a filter that passed its check, answered as text rather

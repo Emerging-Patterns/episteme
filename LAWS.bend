@@ -28,7 +28,8 @@
 # laws/GitRecordFields.bend (git history),
 # laws/IntentAppendsOnChange.bend (the intent file),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
-# laws/ToolQueryIsCliQuery.bend (the server's tool calls) and
+# laws/ToolQueryIsCliQuery.bend (the server's tool calls),
+# laws/TelemetryLineOfARun.bend (telemetry) and
 # laws/HitsCountRecalled.bend (the eval).
 #
 # The other law files are closed examples, each one law named for what it
@@ -156,6 +157,7 @@ import ./laws/SinceRefusesWord.bend as SinceRefusesWord
 import ./laws/SourceDirsAreSafeAndDistinct.bend as SourceDirsAreSafeAndDistinct
 import ./laws/SourceSplitIsOnePass.bend as SourceSplitIsOnePass
 import ./laws/SubagentPromptByAgent.bend as SubagentPromptByAgent
+import ./laws/TelemetryLineOfARun.bend as TelemetryLineOfARun
 import ./laws/ToolQueryIsCliQuery.bend as ToolQueryIsCliQuery
 import ./laws/ToolRecordsInlineOrPoint.bend as ToolRecordsInlineOrPoint
 import ./laws/ToolResultIsPointer.bend as ToolResultIsPointer
