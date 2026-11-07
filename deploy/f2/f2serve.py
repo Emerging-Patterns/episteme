@@ -118,6 +118,21 @@ def move(state, dev):
     return state
 
 
+def copy_to(state, dev):
+    """a copy of a state with its cache tensors on dev, the state itself
+    untouched: the cache and its layers are shallow copies holding the new
+    tensors (no tail pass writes into a kept state's cache)"""
+    c = copy.copy(state[1])
+    c.layers = [copy.copy(layer) for layer in state[1].layers]
+    for layer in c.layers:
+        for name, v in list(vars(layer).items()):
+            if torch.is_tensor(v):
+                setattr(layer, name, v.to(dev))
+            elif isinstance(v, dict):
+                setattr(layer, name, {i: t.to(dev) if torch.is_tensor(t) else t for i, t in v.items()})
+    return (state[0], c) + tuple(state[2:])
+
+
 def host_copy(state):
     """a copy of a state on the host, the state itself untouched: the cache
     deep-copied with each tensor swapped for a pageable host copy"""
@@ -156,21 +171,33 @@ class States:
         return next((k for k in tier if k not in keep), next(iter(tier)))
 
     def put_gpu(self, k, st, size, keep=()):
+        """an evicted state with a host copy in RAM is dropped, with none it
+        is copied to RAM"""
         self.gpu[k] = (st, size)
         self.gpu_b += size
         while self.gpu_b > CACHE_BYTES and len(self.gpu) > 1:
             k2 = self.victim(self.gpu, keep | {k})
             (state, null), s2 = self.gpu.pop(k2)
             self.gpu_b -= s2
-            if RAM_BYTES > 0:
+            if RAM_BYTES > 0 and k2 not in self.ram:
                 self.put_ram(k2, (move(state, "cpu"), null), s2, keep)
 
     def put_ram(self, k, st, size, keep=()):
+        """eviction takes host copies of states on the GPU first, then by
+        victim: the RAM tier is spent on states the GPU lacks"""
         self.ram[k] = (st, size)
         self.ram_b += size
         while self.ram_b > RAM_BYTES and self.ram:
-            (_, s2) = self.ram.pop(self.victim(self.ram, keep))
+            k2 = next((x for x in self.ram if x in self.gpu and x != k), None)
+            (_, s2) = self.ram.pop(k2 if k2 is not None else self.victim(self.ram, keep))
             self.ram_b -= s2
+
+    def spare(self, k, st, size):
+        """a host copy of a state going to the GPU kept in RAM, if RAM has the
+        room without evicting: its later eviction from the GPU then copies nothing"""
+        if self.ram_b + size <= RAM_BYTES:
+            self.ram[k] = (st, size)
+            self.ram_b += size
 
     def save(self, k, cpu):
         try:
@@ -196,13 +223,14 @@ class States:
             self.n["gpu"] += 1
             return self.gpu[k][0]
         if k in self.ram:
-            (state, null), size = self.ram.pop(k)
-            self.ram_b -= size
-            st = (move(state, model.DEV), null)
+            (state, null), size = self.ram[k]
+            self.ram.move_to_end(k)
+            st = (copy_to(state, model.DEV), null)
             self.n["ram"] += 1
         elif loading is not None or os.path.exists(self.path(k)):
             state, null = loading.get() if loading is not None else self.load(k)
-            st, size = (move(state, model.DEV), null), nbytes(state[1])
+            st, size = (copy_to(state, model.DEV), null), nbytes(state[1])
+            self.spare(k, (state, null), size)
             self.n["disk"] += 1
         else:
             state = model.prefill(shard)
