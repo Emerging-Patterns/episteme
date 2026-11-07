@@ -37,7 +37,7 @@ Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -56,6 +56,7 @@ CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
+TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
@@ -212,6 +213,21 @@ class States:
         return st
 
 
+TERMS = collections.OrderedDict()  # shard key -> each paragraph's term counts
+
+
+def terms(k, sh):
+    """the term counts of a shard's paragraphs, kept for the TERMS_MAX
+    shards used last: a question re-reads the shards the last one did"""
+    if k in TERMS:
+        TERMS.move_to_end(k)
+        return TERMS[k]
+    TERMS[k] = [collections.Counter(words(sh["text"][x:y])) for x, y, _ in sh["spans"]]
+    while len(TERMS) > TERMS_MAX:
+        TERMS.popitem(last=False)
+    return TERMS[k]
+
+
 class Run:
     """the paragraphs of some shards, with BM25 statistics over them"""
 
@@ -222,11 +238,10 @@ class Run:
         for si, sh in enumerate(shards):
             for li, (x, y, n) in enumerate(sh["spans"]):
                 self.paras.append((si, li + 1, n, sh["text"][x:y]))
-        docs = [words(p[3]) for p in self.paras]
-        self.avg = sum(map(len, docs)) / max(len(docs), 1)
-        self.df = collections.Counter(w for d in docs for w in set(d))
-        self.tfs = [collections.Counter(d) for d in docs]
-        self.dl = [len(d) for d in docs]
+        self.tfs = [tf for k, sh in zip(self.keys, shards) for tf in terms(k, sh)]
+        self.dl = [sum(tf.values()) for tf in self.tfs]
+        self.avg = sum(self.dl) / max(len(self.dl), 1)
+        self.df = collections.Counter(w for tf in self.tfs for w in tf)
 
     def bm25(self, q):
         N, ws, out = len(self.paras), words(q), []
