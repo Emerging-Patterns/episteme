@@ -172,3 +172,64 @@ def scores(state, question):
     ce = torch.tensor([e for s, e in spans])
     mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()  # skip the role tokens
     return mass[HEADS[0]] + mass[HEADS[1]]
+
+
+def stack(caches):
+    """one bf16 cache for several shards' packed caches, the caches left as
+    they are: the linear-attention states stacked, the full-attention keys and
+    values dequantized into one buffer right-padded with zeros to the longest
+    shard. The layers are shallow copies with fresh tensors, so the tail pass
+    that grows them touches no shard's own state"""
+    out = copy.copy(caches[0])
+    out.layers = [copy.copy(layer) for layer in caches[0].layers]
+    top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
+    for li, layer in enumerate(out.layers):
+        rows = [c.layers[li] for c in caches]
+        if hasattr(layer, "conv_states"):
+            for d in ("conv_states", "recurrent_states"):
+                fresh = dict(getattr(layer, d))
+                for i, v in fresh.items():
+                    if torch.is_tensor(v):
+                        fresh[i] = torch.cat([getattr(r, d)[i] for r in rows])
+                setattr(layer, d, fresh)
+        else:
+            for name in ("keys", "values"):
+                vars(layer).pop(name + "_scale", None)
+                x0 = getattr(rows[0], name)
+                buf = torch.zeros((len(rows), *x0.shape[1:-2], top, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
+                for b, r in enumerate(rows):
+                    x, sc = getattr(r, name), vars(r).get(name + "_scale")
+                    buf[b, ..., :x.shape[-2], :] = (x[0].float() * sc[0]).to(torch.bfloat16) if sc is not None else x[0]
+                setattr(layer, name, buf)
+    return out, top
+
+
+@torch.no_grad()
+def scores_batch(states, question):
+    """scores(state, question) for several shards in one forward: each
+    shard's cache is padded to the longest, the padding masked out, and each
+    row's question positions start at its own shard's length"""
+    emb, nq = question_tail(states[0][3], question)
+    lens = [len(s[0]) for s in states]
+    cache, top = stack([s[1] for s in states])
+    n, t = len(states), emb.shape[1]
+    ln = torch.tensor(lens, device=DEV)
+    pos = ln[:, None] + torch.arange(t, device=DEV)[None]
+    j = torch.arange(top + t, device=DEV)[None, None]
+    row = torch.arange(t, device=DEV)[None, :, None]
+    ok = (j < ln[:, None, None]) | ((j >= top) & (j - top <= row))
+    mask = torch.zeros(ok.shape, dtype=torch.bfloat16, device=DEV).masked_fill(~ok, torch.finfo(torch.bfloat16).min)
+    attention("eager")
+    o = M(inputs_embeds=emb.expand(n, -1, -1), past_key_values=cache, position_ids=pos,
+          attention_mask={"full_attention": mask[:, None], "linear_attention": None},
+          use_cache=True, output_attentions=True, logits_to_keep=1)
+    attention("sdpa")
+    A = [x for x in o.attentions if x is not None][AT].float()  # shards, heads, tail tokens, keys
+    out = []
+    for b, (ids, _cache, spans, _tail) in enumerate(states):
+        cum = torch.nn.functional.pad(A[b, :, :, :len(ids)].cumsum(-1), (1, 0))
+        cs = torch.tensor([s for s, e in spans])
+        ce = torch.tensor([e for s, e in spans])
+        mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()
+        out.append(mass[HEADS[0]] + mass[HEADS[1]])
+    return out

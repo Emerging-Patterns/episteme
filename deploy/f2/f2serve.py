@@ -37,7 +37,7 @@ Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -57,6 +57,7 @@ RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
+BATCH = int(os.environ.get("BATCH", "4"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
@@ -262,17 +263,27 @@ class Run:
                 if tier(k) == 2 and os.path.exists(STATES.path(k))]
         loading = {}  # the next AHEAD cold states, read from disk while the GPU works
         left = collections.Counter(self.keys)
-        got = {}
+        got, batch = {}, []
+
+        def flush():
+            if not batch:
+                return
+            for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
+                got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
+            batch.clear()
+
         for i in order:
             while cold and len(loading) < AHEAD:
                 k = cold.pop(0)
                 loading[k] = STATES.prefetch(k)
             sh = self.shards[i]
             left[self.keys[i]] -= 1
-            state, null = STATES.get(self.keys[i], sh, frozenset(k for k, c in left.items() if c > 0),
-                                     loading.pop(self.keys[i], None))
-            v = model.scores(state, q) - null
-            got[i] = (v / torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
+            keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
+            state, null = STATES.get(self.keys[i], sh, keep, loading.pop(self.keys[i], None))
+            batch.append((i, self.keys[i], state, null))
+            if len(batch) == BATCH:
+                flush()
+        flush()
         return [x for i in range(len(self.shards)) for x in got[i]]
 
     def pick(self, q, budget):
