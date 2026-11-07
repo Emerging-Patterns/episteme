@@ -86,24 +86,30 @@ def parse(text):
 
 
 def tensors(cache):
+    """every tensor of a cache, with a setter that replaces it: attention
+    layers hold theirs as attributes, linear-attention layers in dicts"""
     for layer in cache.layers:
         for name, v in list(vars(layer).items()):
             if torch.is_tensor(v):
-                yield layer, name, v
+                yield v, lambda t, layer=layer, name=name: setattr(layer, name, t)
+            elif isinstance(v, dict):
+                for i, t in list(v.items()):
+                    if torch.is_tensor(t):
+                        yield t, lambda t2, d=v, i=i: d.__setitem__(i, t2)
 
 
 def move(state, dev):
     """a state's cache tensors moved to dev, in place; to the host it is a
     blocking copy into pageable memory (a non-blocking one would be pinned)"""
-    for layer, name, v in tensors(state[1]):
-        setattr(layer, name, v.to(dev, non_blocking=dev != "cpu"))
+    for v, put in tensors(state[1]):
+        put(v.to(dev, non_blocking=dev != "cpu"))
     return state
 
 
 def host_copy(state):
     """a copy of a state on the host, the state itself untouched: the cache
     deep-copied with each tensor swapped for a pageable host copy"""
-    memo = {id(v): v.to("cpu") for _, _, v in tensors(state[1])}
+    memo = {id(v): v.to("cpu") for v, _ in tensors(state[1])}
     return (state[0], copy.deepcopy(state[1], memo)) + tuple(state[2:])
 
 
@@ -114,8 +120,7 @@ def rss():
 
 
 def nbytes(cache):
-    return sum(v.numel() * v.element_size() for layer in cache.layers
-               for v in vars(layer).values() if torch.is_tensor(v))
+    return sum(v.numel() * v.element_size() for v, _ in tensors(cache))
 
 
 class States:
