@@ -129,20 +129,26 @@ class States:
     def path(self, k):
         return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
 
-    def put_gpu(self, k, st, size):
+    @staticmethod
+    def victim(tier, keep):
+        """the least recently used key not in keep, else the least recently used"""
+        return next((k for k in tier if k not in keep), next(iter(tier)))
+
+    def put_gpu(self, k, st, size, keep=()):
         self.gpu[k] = (st, size)
         self.gpu_b += size
         while self.gpu_b > CACHE_BYTES and len(self.gpu) > 1:
-            k2, ((state, null), s2) = self.gpu.popitem(last=False)
+            k2 = self.victim(self.gpu, keep | {k})
+            (state, null), s2 = self.gpu.pop(k2)
             self.gpu_b -= s2
             if RAM_BYTES > 0:
-                self.put_ram(k2, (move(state, "cpu"), null), s2)
+                self.put_ram(k2, (move(state, "cpu"), null), s2, keep)
 
-    def put_ram(self, k, st, size):
+    def put_ram(self, k, st, size, keep=()):
         self.ram[k] = (st, size)
         self.ram_b += size
         while self.ram_b > RAM_BYTES and self.ram:
-            _, (_, s2) = self.ram.popitem(last=False)
+            (_, s2) = self.ram.pop(self.victim(self.ram, keep))
             self.ram_b -= s2
 
     def save(self, k, cpu):
@@ -153,7 +159,9 @@ class States:
         finally:
             self.slots.release()
 
-    def get(self, k, shard):
+    def get(self, k, shard, keep=frozenset()):
+        """k's state and null; eviction spares the keys in keep (those the
+        run reads later) while any other state is resident"""
         if k in self.gpu:
             self.gpu.move_to_end(k)
             self.n["gpu"] += 1
@@ -173,7 +181,7 @@ class States:
             self.n["prefill"] += 1
             self.slots.acquire()
             self.writer.apply_async(self.save, (k, (host_copy(state), st[1])))
-        self.put_gpu(k, st, size)
+        self.put_gpu(k, st, size, keep)
         return st
 
 
@@ -202,12 +210,21 @@ class Run:
         return out
 
     def attention(self, q):
-        out = []
-        for k, sh in zip(self.keys, self.shards):
-            state, null = STATES.get(k, sh)
+        """per paragraph, in shard order. The shards whose state is on the GPU
+        are scored first, then those in RAM, then the rest: a run bigger than
+        the tiers then hits what they hold, where a fixed order under LRU
+        evicts each state just before it is needed and never hits."""
+        tier = lambda k: 0 if k in STATES.gpu else 1 if k in STATES.ram else 2
+        order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
+        left = collections.Counter(self.keys)
+        got = {}
+        for i in order:
+            sh = self.shards[i]
+            left[self.keys[i]] -= 1
+            state, null = STATES.get(self.keys[i], sh, frozenset(k for k, c in left.items() if c > 0))
             v = model.scores(state, q) - null
-            out += (v / torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
-        return out
+            got[i] = (v / torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
+        return [x for i in range(len(self.shards)) for x in got[i]]
 
     def pick(self, q, budget):
         """shard key -> label numbers, best first until the budget"""
