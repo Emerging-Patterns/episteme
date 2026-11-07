@@ -344,6 +344,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def warm():
+    """one prefill and one tail pass on a two-line shard, so the kernels are
+    compiled and tuned before the first question rather than during it"""
+    model.scores(model.prefill(parse("== warm | 0 | f2 | w\n[p1] warm up\n")), "N/A")
+
+
 if __name__ == "__main__":
+    warm()
     print("f2 reader on 127.0.0.1:%d" % PORT, flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
