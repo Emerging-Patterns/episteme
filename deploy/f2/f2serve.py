@@ -46,6 +46,7 @@ SHARD_BUDGET = float(os.environ.get("SHARD_BUDGET", "120"))
 CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
 SAVES = int(os.environ.get("SAVES", "4"))
+AHEAD = int(os.environ.get("AHEAD", "8"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
@@ -132,6 +133,7 @@ class States:
         self.n = collections.Counter()
         os.makedirs(STATES_DIR, exist_ok=True)
         self.writer = ThreadPool(1)
+        self.reader = ThreadPool(1)
         self.slots = threading.BoundedSemaphore(SAVES)
 
     def path(self, k):
@@ -167,9 +169,17 @@ class States:
         finally:
             self.slots.release()
 
-    def get(self, k, shard, keep=frozenset()):
+    def load(self, k):
+        return torch.load(self.path(k), weights_only=False, map_location="cpu")
+
+    def prefetch(self, k):
+        """k's state read from disk to the host on the reader thread"""
+        return self.reader.apply_async(self.load, (k,))
+
+    def get(self, k, shard, keep=frozenset(), loading=None):
         """k's state and null; eviction spares the keys in keep (those the
-        run reads later) while any other state is resident"""
+        run reads later) while any other state is resident. loading is a
+        prefetch of k from disk, if one was started"""
         if k in self.gpu:
             self.gpu.move_to_end(k)
             self.n["gpu"] += 1
@@ -179,8 +189,8 @@ class States:
             self.ram_b -= size
             st = (move(state, model.DEV), null)
             self.n["ram"] += 1
-        elif os.path.exists(self.path(k)):
-            state, null = torch.load(self.path(k), weights_only=False)
+        elif loading is not None or os.path.exists(self.path(k)):
+            state, null = loading.get() if loading is not None else self.load(k)
             st, size = (move(state, model.DEV), null), nbytes(state[1])
             self.n["disk"] += 1
         else:
@@ -224,12 +234,19 @@ class Run:
         evicts each state just before it is needed and never hits."""
         tier = lambda k: 0 if k in STATES.gpu else 1 if k in STATES.ram else 2
         order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
+        cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
+                if tier(k) == 2 and os.path.exists(STATES.path(k))]
+        loading = {}  # the next AHEAD cold states, read from disk while the GPU works
         left = collections.Counter(self.keys)
         got = {}
         for i in order:
+            while cold and len(loading) < AHEAD:
+                k = cold.pop(0)
+                loading[k] = STATES.prefetch(k)
             sh = self.shards[i]
             left[self.keys[i]] -= 1
-            state, null = STATES.get(self.keys[i], sh, frozenset(k for k, c in left.items() if c > 0))
+            state, null = STATES.get(self.keys[i], sh, frozenset(k for k, c in left.items() if c > 0),
+                                     loading.pop(self.keys[i], None))
             v = model.scores(state, q) - null
             got[i] = (v / torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
         return [x for i in range(len(self.shards)) for x in got[i]]
