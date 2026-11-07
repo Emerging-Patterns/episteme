@@ -19,7 +19,7 @@ HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-VERSION = "12|11:2.0|%s|v3" % DIR  # what a kept state depends on
+VERSION = "12|11:2.0|%s|v4" % DIR  # what a kept state depends on
 
 tok = AutoTokenizer.from_pretrained(DIR)
 
@@ -100,8 +100,13 @@ def template(text):
 
 def pack(cache):
     """the cache's keys and values as int8, in place: keys with one scale per
-    channel over the tokens, values with one per token (KIVI, 2402.02750)"""
+    channel over the tokens, values with one per token (KIVI, 2402.02750).
+    The linear-attention recurrent states (fp32) are kept in bf16"""
     for layer in cache.layers:
+        states = getattr(layer, "recurrent_states", None)
+        if isinstance(states, dict):
+            layer.recurrent_states = {i: t.to(torch.bfloat16) if torch.is_tensor(t) and t.dtype == torch.float32 else t
+                                      for i, t in states.items()}
         for name, dim in (("keys", -2), ("values", -1)):
             x = getattr(layer, name, None)
             if torch.is_tensor(x) and x.dtype == torch.bfloat16 and x.numel():
@@ -115,6 +120,9 @@ def unpack(cache):
     """a bf16 copy of a packed cache, for one tail pass"""
     c = copy.deepcopy(cache)
     for layer in c.layers:
+        states = getattr(layer, "recurrent_states", None)
+        if isinstance(states, dict):
+            layer.recurrent_states = {i: t.float() if torch.is_tensor(t) else t for i, t in states.items()}
         for name in ("keys", "values"):
             sc = vars(layer).pop(name + "_scale", None)
             if sc is not None:
@@ -191,6 +199,8 @@ def stack(caches):
                 for i, v in fresh.items():
                     if torch.is_tensor(v):
                         fresh[i] = torch.cat([getattr(r, d)[i] for r in rows])
+                        if d == "recurrent_states":
+                            fresh[i] = fresh[i].float()  # kept in bf16 (pack)
                 setattr(layer, d, fresh)
         else:
             for name in ("keys", "values"):
