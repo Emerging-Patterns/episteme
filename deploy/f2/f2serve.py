@@ -12,9 +12,14 @@ The ranking is reciprocal-rank fusion (k = 10) of BM25 (k1 1.2, b 0.75,
 lowercase words, light suffix stemming) and the attention score minus the
 same score for the question "N/A", over sqrt(paragraph characters).
 
-A shard's state (model.prefill) is kept on the GPU (CACHE_GB), then in
-host RAM (RAM_GB), then on disk under F2_STATES, least recently used
-first out; a miss everywhere is a prefill.
+A shard's state (model.prefill, its keys and values int8) is kept on the
+GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk under F2_STATES; a
+miss everywhere is a prefill. A run scores the shards whose state is on the
+GPU first, then those in RAM, then the rest, which a reader thread loads
+from disk up to AHEAD ahead; eviction takes the least recently used state
+the run does not read later. A run bigger than the tiers so hits what they
+hold, where a fixed order under plain LRU evicts each state just before it
+is needed and never hits.
 
 Host copies are plain pageable memory, never pinned: PyTorch's caching
 host allocator keeps every freed pinned block, so a pinned RAM tier grew
@@ -28,7 +33,7 @@ Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), SAVES (4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time

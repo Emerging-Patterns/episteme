@@ -19,7 +19,7 @@ HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-VERSION = "12|11:2.0|%s|v2" % DIR  # what a kept state depends on
+VERSION = "12|11:2.0|%s|v3" % DIR  # what a kept state depends on
 
 tok = AutoTokenizer.from_pretrained(DIR)
 
@@ -98,6 +98,30 @@ def template(text):
     return s[:cut], s[cut:]
 
 
+def pack(cache):
+    """the cache's keys and values as int8, in place: keys with one scale per
+    channel over the tokens, values with one per token (KIVI, 2402.02750)"""
+    for layer in cache.layers:
+        for name, dim in (("keys", -2), ("values", -1)):
+            x = getattr(layer, name, None)
+            if torch.is_tensor(x) and x.dtype == torch.bfloat16 and x.numel():
+                sc = x.float().abs().amax(dim, keepdim=True).clamp(min=1e-8) / 127
+                setattr(layer, name, (x.float() / sc).round().to(torch.int8))
+                setattr(layer, name + "_scale", sc)
+    return cache
+
+
+def unpack(cache):
+    """a bf16 copy of a packed cache, for one tail pass"""
+    c = copy.deepcopy(cache)
+    for layer in c.layers:
+        for name in ("keys", "values"):
+            sc = vars(layer).pop(name + "_scale", None)
+            if sc is not None:
+                setattr(layer, name, (getattr(layer, name).float() * sc).to(torch.bfloat16))
+    return c
+
+
 @torch.no_grad()
 def prefill(shard):
     """a shard's state: (prompt ids, cache, paragraph token spans, question template)"""
@@ -117,7 +141,7 @@ def prefill(shard):
         ta = bisect.bisect_left(starts, base + a)
         tb = bisect.bisect_left(starts, base + b)
         spans.append((ta, max(tb, ta + 1)))
-    return ids, cache, spans, tail
+    return ids, pack(cache), spans, tail
 
 
 @torch.no_grad()
@@ -128,7 +152,7 @@ def scores(state, question):
     t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
     nq = len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
     attention("eager")
-    o = M(input_ids=torch.tensor([t_ids], device=DEV), past_key_values=copy.deepcopy(cache),
+    o = M(input_ids=torch.tensor([t_ids], device=DEV), past_key_values=unpack(cache),
           use_cache=True, output_attentions=True, logits_to_keep=1)
     attention("sdpa")
     A = [x for x in o.attentions if x is not None][AT][0].float()  # heads, tail tokens, all tokens
