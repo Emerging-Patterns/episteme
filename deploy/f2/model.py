@@ -148,10 +148,12 @@ def prefill(shard):
 @torch.no_grad()
 def question_tail(tail, question):
     """the tail's input embeddings on the device and the question's token
-    count: every shard of a run shares them, so they are made once"""
+    count: every shard of a run shares them, so they are made once. Only the
+    question's own tokens are read, and the model is causal, so the tail is
+    cut after them: the tokens that follow cannot change those rows"""
     t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
     nq = len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
-    return M.model.embed_tokens(torch.tensor([t_ids])), nq
+    return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
 
 
 @torch.no_grad()
