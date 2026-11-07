@@ -364,6 +364,50 @@ def Read.notice.names(names: List<&2, Name>) -> List<&2, Value.Json>:
 def Read.notice(names: List<&2, Name>, question: String) -> Value.Json:
   Json.obj([("question", Json.str(question)), ("shards", Json.arr(Read.notice.names(names)))])
 
+# --- the named read ---
+
+# a call to a reader: the path posted to and its body
+type Call is Data:
+  Call{path: String, body: Value.Json}
+
+# whether a parsed notice answer says the reader ranked the run
+def Read.ranked.of(got: Maybe<&2, Value.Json>) -> Bool:
+  match got:
+    case None{}:
+      False{}
+    case Some{js}:
+      Maybe.default(&2, Bool, Json.as_bool(Json.get(js, "ranked")), False{})
+
+# Read.ranked once its status is known to be 200 or not
+def Read.ranked.if(ok: Bool, text: String) -> Bool:
+  match ok:
+    case True{}:
+      Read.ranked.of(Json.parse(text))
+    case False{}:
+      False{}
+
+# whether the answer to a run notice, by its status and body, says the
+# reader ranked the whole run: a 200 whose JSON ranked is true
+def Read.ranked(+status: U32, text: String) -> Bool:
+  Read.ranked.if(U32.is_eq(status, 200), text)
+
+# the body of POST <url>/v1/episteme/read: the question and a shard's own
+# name, for a reader that ranked the run
+def Read.named(nm: Name, question: String) -> Value.Json:
+  match nm:
+    case Name{source, n}:
+      Json.obj([("question", Json.str(question)), ("source", Json.str(source)),
+        ("n", Json.num(U32.show(n)))])
+
+# the call that reads the run's shard sh, named nm, on an instance's slot:
+# by name when the instance ranked the run, else the chat request
+def Read.call(ranked: Bool, slot: U32, sh: S.Shard, nm: Name, question: String) -> Call:
+  match ranked:
+    case True{}:
+      Call{"/v1/episteme/read", Read.named(nm, question)}
+    case False{}:
+      Call{"/v1/chat/completions", Read.request(slot, sh, question)}
+
 # nm when it is the one, else what later finds
 def Read.name.if(hit: Bool, nm: Name, later: Unit -> Name) -> Name:
   match hit:

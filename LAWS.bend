@@ -130,6 +130,7 @@ import ./laws/RecordLineRoundTrips.bend as RecordLineRoundTrips
 import ./laws/RecordsSplitOnlyWhenTooBig.bend as RecordsSplitOnlyWhenTooBig
 import ./laws/ReplyIsOkOrFailed.bend as ReplyIsOkOrFailed
 import ./laws/ReplyReadsLabelsAndTimings.bend as ReplyReadsLabelsAndTimings
+import ./laws/RankedReadNamesShard.bend as RankedReadNamesShard
 import ./laws/RequestAdmitsOnlyLabels.bend as RequestAdmitsOnlyLabels
 import ./laws/RunNoticeNamesShards.bend as RunNoticeNamesShards
 import ./laws/ResolveCountsUnknownLabels.bend as ResolveCountsUnknownLabels

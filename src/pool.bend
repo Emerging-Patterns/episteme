@@ -5,10 +5,13 @@
 # its queue and closes it, so every worker stops when it drains. IO: the
 # trusted shell around Read.failed and Read.ordered.
 #
-# Trusted, not proved: `Pool.run(pool, ss, q)` checks each instance's health
-# in order, skipping one that fails with the stderr line `skipping <url>:
-# <why>`, and answers none when none is healthy (`Pool.run` then stops with
-# exit 2). It reads in two passes.
+# Trusted, not proved: `Pool.try(pool, ranked, names, ss, q)` checks each
+# instance's health in order, skipping one that fails with the stderr line
+# `skipping <url>: <why>`, and answers none when none is healthy (`Pool.run`
+# then stops with exit 2). It reads in two passes. A worker reads the run's
+# shard numbered k with `Read.call(r, slot, shard, Read.name(names, k, 1), q)`
+# (laws/RankedReadNamesShard.bend), r true exactly when its instance's URL is
+# among ranked, the instances that ranked the run from its notice.
 # A pass fills one `Chan` queue with its shards and closes it, then starts one
 # worker per slot of the pass's instances (`IO.fork`, each with its own
 # `id_slot`); each worker reads shards until the queue is drained (so a faster
@@ -35,29 +38,48 @@ import ./read.bend as Rd
 import ./reader.bend as Rr
 import ./store.bend as St
 
-# a worker: its number, its instance and its slot there
+# a worker: its number, its instance, its slot there and whether the
+# instance ranked the run
 type Worker is Data:
-  Worker{id: U32, url: String, slot: U32}
+  Worker{id: U32, url: String, slot: U32, ranked: Bool}
 
 # the workers of cnt more slots of the instance at url, from slot on,
 # each numbered id + its slot
-def Pool.slots(cnt: Nat, +url: String, +slot: U32, +id: U32) -> List<&2, Worker>:
+def Pool.slots(cnt: Nat, +url: String, +slot: U32, +id: U32, +ranked: Bool) -> List<&2, Worker>:
   match cnt:
     case 0n:
       []
     case 1n+m:
-      Worker{U32.add(id, slot), url, slot} <> Pool.slots(m, url, U32.inc(slot), id)
+      Worker{U32.add(id, slot), url, slot, ranked} <> Pool.slots(m, url, U32.inc(slot), id, ranked)
+
+# True on a hit, else what later finds
+def Pool.ranked.if(hit: Bool, later: Unit -> Bool) -> Bool:
+  match hit:
+    case True{}:
+      True{}
+    case False{}:
+      later(Unit{})
+
+# whether url is among the instances that ranked the run
+def Pool.ranked(urls: List<&2, String>, +url: String) -> Bool:
+  match urls:
+    case Nil{}:
+      False{}
+    case Con{u, rest}:
+      Pool.ranked.if(String.eq(u, url), _v => Pool.ranked(rest, url))
 
 # the workers of the instances, one per slot, numbered from id
-def Pool.workers(insts: List<&2, St.Slot>, +id: U32) -> List<&2, Worker>:
+def Pool.workers(insts: List<&2, St.Slot>, +id: U32, +ranked: List<&2, String>) -> List<&2, Worker>:
   match insts:
     case Nil{}:
       []
     case Con{inst, rest}:
       match inst:
         case St.Slot{+url, +n}:
-          List.append(&2, Worker, Pool.slots(U32.to_nat(n), url, 0, id),
-            Pool.workers(rest, U32.add(id, n)))
+          List.append(&2, Worker,
+            Pool.slots(U32.to_nat(n), url, 0, id,
+              Pool.ranked(ranked, url)),
+            Pool.workers(rest, U32.add(id, n), ranked))
 
 # an instance kept when healthy, else skipped with a line on stderr
 def Pool.keep(got: Maybe<&2, String>, inst: St.Slot, rest: List<&2, St.Slot>) -> IO(List<&2, St.Slot>):
@@ -85,15 +107,23 @@ def Pool.healthy(insts: List<&2, St.Slot>) -> IO(List<&2, St.Slot>):
             Pool.keep(got, inst, more)
 
 # a shard read by worker wk, the read sent; False when the queue is drained
-def Pool.step(got: Maybe<&1, S.Shard>, wk: Worker, +outs: Chan(Rd.Read), +question: String) -> IO(Bool):
+def Pool.step(
+  got: Maybe<&1, S.Shard>,
+  wk: Worker,
+  +outs: Chan(Rd.Read),
+  +question: String,
+  +names: List<&2, Rd.Name>
+) -> IO(Bool):
   match got:
     case None{}:
       IO.pure(Bool, False{})
-    case Some{sh}:
+    case Some{+sh}:
       match wk:
-        case Worker{_id, url, slot}:
+        case Worker{_id, url, slot, ranked}:
+          +num = Rd.Read.n(sh)
           do IO<Bool>:
-            rd : Rd.Read <- Rr.Reader.call(url, slot, sh, question)
+            rd : Rd.Read <- Rr.Reader.call(url,
+              Rd.Read.call(ranked, slot, sh, Rd.Read.name(names, num, 1), question), num)
             _sent : Result<&1, &1, Rd.Read, Unit> <- Chan.send(Rd.Read, outs, rd)
             return True{}
 
@@ -112,7 +142,8 @@ def Pool.work(
   +wk: Worker,
   +jobs: Chan(S.Shard),
   +outs: Chan(Rd.Read),
-  +question: String
+  +question: String,
+  +names: List<&2, Rd.Name>
 ) -> IO(Unit):
   match cnt:
     case 0n:
@@ -120,8 +151,8 @@ def Pool.work(
     case 1n+more:
       do IO<Unit>:
         got : Maybe<&1, S.Shard> <- Chan.recv(S.Shard, jobs)
-        go : Bool <- Pool.step(got, wk, outs, question)
-        Pool.again(go, _u => Pool.work(more, wk, jobs, outs, question))
+        go : Bool <- Pool.step(got, wk, outs, question, names)
+        Pool.again(go, _u => Pool.work(more, wk, jobs, outs, question, names))
 
 # the read ahead of done, when one came
 def Pool.done(got: Maybe<&1, Rd.Read>, done: List<&2, Rd.Read>) -> List<&2, Rd.Read>:
@@ -157,15 +188,16 @@ def Pool.fork(
   +cnt: Nat,
   +jobs: Chan(S.Shard),
   +outs: Chan(Rd.Read),
-  +question: String
+  +question: String,
+  +names: List<&2, Rd.Name>
 ) -> IO(List<&2, Chan(Unit)>):
   match ws:
     case Nil{}:
       IO.pure(List<&2, Chan(Unit)>, [])
     case Con{wk, rest}:
       do IO<List<&2, Chan(Unit)>>:
-        ch : Chan(Unit) <- IO.fork(Unit, Pool.work(cnt, wk, jobs, outs, question))
-        more : List<&2, Chan(Unit)> <- Pool.fork(rest, cnt, jobs, outs, question)
+        ch : Chan(Unit) <- IO.fork(Unit, Pool.work(cnt, wk, jobs, outs, question, names))
+        more : List<&2, Chan(Unit)> <- Pool.fork(rest, cnt, jobs, outs, question, names)
         return ch <> more
 
 # wait for every worker to stop
@@ -180,7 +212,12 @@ def Pool.join(chs: List<&2, Chan(Unit)>) -> IO(Unit):
 
 # one pass: the shards on a queue, filled and closed, read by the workers
 # ws; one read per shard, in the order they finished
-def Pool.pass(ws: List<&2, Worker>, +ss: List<&2, S.Shard>, +question: String) -> IO(List<&2, Rd.Read>):
+def Pool.pass(
+  ws: List<&2, Worker>,
+  +ss: List<&2, S.Shard>,
+  +question: String,
+  +names: List<&2, Rd.Name>
+) -> IO(List<&2, Rd.Read>):
   +cnt = List.length(&2, S.Shard, ss)
   +room = U32.inc(U32.from_nat(cnt))
   do IO<List<&2, Rd.Read>>:
@@ -188,7 +225,7 @@ def Pool.pass(ws: List<&2, Worker>, +ss: List<&2, S.Shard>, +question: String) -
     +outs : Chan(Rd.Read) <- Chan.new(Rd.Read, room)
     Pool.queue(ss, jobs)
     Chan.close(S.Shard, jobs)
-    chs : List<&2, Chan(Unit)> <- Pool.fork(ws, cnt, jobs, outs, question)
+    chs : List<&2, Chan(Unit)> <- Pool.fork(ws, cnt, jobs, outs, question, names)
     reads : List<&2, Rd.Read> <- Pool.gather(cnt, outs, [])
     Pool.join(chs)
     return reads
@@ -208,7 +245,7 @@ def Pool.other(ws: List<&2, Worker>, +url: String) -> List<&2, Worker>:
       []
     case Con{+wk, rest}:
       match wk:
-        case Worker{_id, +wurl, _slot}:
+        case Worker{_id, +wurl, _slot, _ranked}:
           Pool.other.if(String.eq(wurl, url), wk, Pool.other(rest, url))
 
 # the workers of the second pass for shards failed on url: those of the
@@ -272,28 +309,35 @@ def Pool.retry(
   +ws: List<&2, Worker>,
   +ss: List<&2, S.Shard>,
   +bad: List<&2, Rd.Read>,
-  +question: String
+  +question: String,
+  +names: List<&2, Rd.Name>
 ) -> IO(List<&2, Rd.Read>):
   match insts:
     case Nil{}:
       IO.pure(List<&2, Rd.Read>, [])
     case Con{+url, rest}:
       do IO<List<&2, Rd.Read>>:
-        got : List<&2, Rd.Read> <- Pool.pass(Pool.second(Pool.other(ws, url), ws), Pool.redo(ss, bad, url), question)
-        more : List<&2, Rd.Read> <- Pool.retry(rest, ws, ss, bad, question)
+        got : List<&2, Rd.Read> <- Pool.pass(Pool.second(Pool.other(ws, url), ws),
+          Pool.redo(ss, bad, url), question, names)
+        more : List<&2, Rd.Read> <- Pool.retry(rest, ws, ss, bad, question, names)
         return List.append(&2, Rd.Read, got, more)
 
 # the two passes with the workers ws; none with no worker. The second
 # pass's reads come first, so Read.ordered takes them
-def Pool.start(ws: List<&2, Worker>, +ss: List<&2, S.Shard>, +question: String) -> IO(Maybe<&2, List<&2, Rd.Read>>):
+def Pool.start(
+  ws: List<&2, Worker>,
+  +ss: List<&2, S.Shard>,
+  +question: String,
+  +names: List<&2, Rd.Name>
+) -> IO(Maybe<&2, List<&2, Rd.Read>>):
   match ws:
     case Nil{}:
       IO.pure(Maybe<&2, List<&2, Rd.Read>>, None{})
     case Con{+wk, +rest}:
       do IO<Maybe<&2, List<&2, Rd.Read>>>:
-        +first : List<&2, Rd.Read> <- Pool.pass(wk <> rest, ss, question)
+        +first : List<&2, Rd.Read> <- Pool.pass(wk <> rest, ss, question, names)
         +bad : List<&2, Rd.Read> = Rd.Read.failed(first)
-        again : List<&2, Rd.Read> <- Pool.retry(Pool.insts(bad, []), wk <> rest, ss, bad, question)
+        again : List<&2, Rd.Read> <- Pool.retry(Pool.insts(bad, []), wk <> rest, ss, bad, question, names)
         return Some{List.append(&2, Rd.Read, again, first)}
 
 # the refusal when no reader instance is healthy
@@ -303,10 +347,16 @@ def Pool.none() -> String:
 # read every shard with the pool's healthy instances, skipping the others
 # with a line on stderr; a failed read is read again on another instance.
 # None when no instance is healthy
-def Pool.try(insts: List<&2, St.Slot>, +ss: List<&2, S.Shard>, +question: String) -> IO(Maybe<&2, List<&2, Rd.Read>>):
+def Pool.try(
+  insts: List<&2, St.Slot>,
+  +ranked: List<&2, String>,
+  +names: List<&2, Rd.Name>,
+  +ss: List<&2, S.Shard>,
+  +question: String
+) -> IO(Maybe<&2, List<&2, Rd.Read>>):
   do IO<Maybe<&2, List<&2, Rd.Read>>>:
     ok : List<&2, St.Slot> <- Pool.healthy(insts)
-    Pool.start(Pool.workers(ok, 1), ss, question)
+    Pool.start(Pool.workers(ok, 1, ranked), ss, question, names)
 
 # the reads, or stop with exit 2 when there are none
 def Pool.got(got: Maybe<&2, List<&2, Rd.Read>>) -> IO(List<&2, Rd.Read>):
@@ -319,5 +369,5 @@ def Pool.got(got: Maybe<&2, List<&2, Rd.Read>>) -> IO(List<&2, Rd.Read>):
 # Pool.try, stopping with exit 2 when no instance is healthy
 def Pool.run(insts: List<&2, St.Slot>, +ss: List<&2, S.Shard>, +question: String) -> IO(List<&2, Rd.Read>):
   do IO<List<&2, Rd.Read>>:
-    got : Maybe<&2, List<&2, Rd.Read>> <- Pool.try(insts, ss, question)
+    got : Maybe<&2, List<&2, Rd.Read>> <- Pool.try(insts, [], [], ss, question)
     Pool.got(got)

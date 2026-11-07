@@ -17,9 +17,10 @@
 # `--json` read holds `"shard"`, its place in the run, then `"source"` and
 # `"n"`. With none it asks no reader; else it first sends every instance of
 # the configured pool the run notice `Read.notice(names, question)` (the
-# run's shards' own names in run order; `Reader.notice`, its answer
-# ignored, laws/RunNoticeNamesShards.bend), then `Pool.run` reads them with
-# the configured pool. Each shard's read (`Read.ordered`, shard order,
+# run's shards' own names in run order; `Reader.notice`,
+# laws/RunNoticeNamesShards.bend), then `Pool.try` reads them with the
+# configured pool, by name on the instances whose answer was ranked
+# (laws/RankedReadNamesShard.bend). Each shard's read (`Read.ordered`, shard order,
 # laws/EveryShardIsRead.bend) is resolved with `Excerpt.resolve` on its labels
 # (laws/ReplyIsOkOrFailed.bend), and the per-shard lists go to `Excerpt.merge`
 # in that order. Without `--json` it prints `Excerpt.render` of the merged
@@ -107,24 +108,34 @@ def Ask.pool(cfg: St.Config) -> List<&2, St.Slot>:
     case St.Config{_tokens, _per, pool, _budget}:
       pool
 
-# the run notice sent to every instance of the pool, in order
-def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json) -> IO(Unit):
+# url ahead of urls when it ranked the run
+def Ask.ranked(ranked: Bool, url: String, urls: List<&2, String>) -> List<&2, String>:
+  match ranked:
+    case True{}:
+      url <> urls
+    case False{}:
+      urls
+
+# the run notice sent to every instance of the pool, in order; answers the
+# instances that ranked the run
+def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json) -> IO(List<&2, String>):
   match insts:
     case Nil{}:
-      IO.pure(Unit, Unit{})
+      IO.pure(List<&2, String>, [])
     case Con{inst, rest}:
       match inst:
-        case St.Slot{url, _n}:
-          do IO<Unit>:
-            Rr.Reader.notice(url, body)
-            Ask.notice(rest, body)
+        case St.Slot{+url, _n}:
+          do IO<List<&2, String>>:
+            ranked : Bool <- Rr.Reader.notice(url, body)
+            more : List<&2, String> <- Ask.notice(rest, body)
+            return Ask.ranked(ranked, url, more)
 
 # the reads of the shards; no reads, and no reader asked, when there are
 # none; None when no reader instance is healthy
 def Ask.read(
   +ss: List<&2, S.Shard>,
   +pool: List<&2, St.Slot>,
-  names: List<&2, Rd.Name>,
+  +names: List<&2, Rd.Name>,
   +question: String
 ) -> IO(Maybe<&2, List<&2, Rd.Read>>):
   match ss:
@@ -132,8 +143,8 @@ def Ask.read(
       IO.pure(Maybe<&2, List<&2, Rd.Read>>, Some{[]})
     case Con{_s, _rest}:
       do IO<Maybe<&2, List<&2, Rd.Read>>>:
-        Ask.notice(pool, Rd.Read.notice(names, question))
-        Pl.Pool.try(pool, ss, question)
+        ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question))
+        Pl.Pool.try(pool, ranked, names, ss, question)
 
 # write each source's excerpts to <source>.md under dir
 def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(Unit):

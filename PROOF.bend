@@ -94,6 +94,7 @@ import ./proofs/RecordLineRoundTrips.bend as PRecordLineRoundTrips
 import ./proofs/RecordsSplitOnlyWhenTooBig.bend as PRecordsSplitOnlyWhenTooBig
 import ./proofs/ReplyIsOkOrFailed.bend as PReplyIsOkOrFailed
 import ./proofs/ReplyReadsLabelsAndTimings.bend as PReplyReadsLabelsAndTimings
+import ./proofs/RankedReadNamesShard.bend as PRankedReadNamesShard
 import ./proofs/RequestAdmitsOnlyLabels.bend as PRequestAdmitsOnlyLabels
 import ./proofs/RunNoticeNamesShards.bend as PRunNoticeNamesShards
 import ./proofs/ResolveCountsUnknownLabels.bend as PResolveCountsUnknownLabels

@@ -6,9 +6,11 @@
 # every instance of the pool, so a reader that ranks across shards (deploy/f2)
 # knows the run's whole
 # shard set and fills one budget for it, rather than one per source. The
-# answer is never read: a reader without that endpoint (llama-server answers
-# 404) reads the run exactly as before, and every label still comes from a
-# read of its own shard (laws/RequestAdmitsOnlyLabels.bend).
+# answer says only whether the reader ranked the run: one that did is then
+# asked for each shard by name (laws/RankedReadNamesShard.bend), and a reader
+# without that endpoint (llama-server answers 404) reads the run exactly as
+# before. Every label still comes from a read of its own shard
+# (laws/RequestAdmitsOnlyLabels.bend).
 import Base
 import ../src/read.bend as Rd
 import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json

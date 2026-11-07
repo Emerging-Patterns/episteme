@@ -28,7 +28,7 @@ Flakes see only files git tracks: `git add` a new file before `nix flake check`.
 - **Ground on the fleet's current origin/main** (ezsys, ezhttp, ezjson, shake, bolt), not the `ez` on PATH, `~/.bend/current` or cached skills. Bend is 2.0.38, pinned in `flake.nix`; run everything through `nix develop -c`.
 - **Keep it simple.** Every addition must earn its place by a measured result; the default answer to a new mechanism is no. Readers output labels only, never text. No summaries anywhere. No embeddings.
 - **No corpus or chat text in the repo**, the skill included, and nothing about one person's deployment (hosts, GPUs, paths, services). Data lives under `EPISTEME_HOME`.
-- **Readers.** A reader answers `/health` and `/v1/chat/completions` per shard with labels only (laws/RequestAdmitsOnlyLabels.bend), and may use the run notice `POST /v1/episteme/run` (laws/RunNoticeNamesShards.bend). `deploy/f2/` is the default reader; `deploy/reader.sh` starts a llama-server one. Stop a reader by PID after checking `/proc/<pid>/cmdline`, never with `pkill -f`.
+- **Readers.** A reader answers `/health` and `/v1/chat/completions` per shard with labels only (laws/RequestAdmitsOnlyLabels.bend), and may use the run notice `POST /v1/episteme/run` (laws/RunNoticeNamesShards.bend); one that answers it `"ranked": true` is then read by name with `POST /v1/episteme/read` (laws/RankedReadNamesShard.bend). `deploy/f2/` is the default reader; `deploy/reader.sh` starts a llama-server one. Stop a reader by PID after checking `/proc/<pid>/cmdline`, never with `pkill -f`.
 - **Sizes.** Ingested paragraphs never exceed `PARA_MAX = 4000` characters (`Para.max()`); shard size must be at least `2 * PARA_MAX` characters.
 
 ## Docs

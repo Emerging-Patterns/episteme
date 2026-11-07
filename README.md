@@ -27,7 +27,7 @@ Every question (`ask`, `serve` or `eval`) appends one JSON line to `$EPISTEME_HO
 
 ## Readers
 
-A reader is any HTTP server that answers `GET /health` and an OpenAI-style `POST /v1/chat/completions` for one shard with `{"ids": ["p3", ...]}`, the labels of the paragraphs that bear on the question; `config.json`'s `pool` lists them with a number of parallel slots each. Before a question's reads, `ask` posts the run's shard names to `POST /v1/episteme/run`; a reader may ignore it.
+A reader is any HTTP server that answers `GET /health` and an OpenAI-style `POST /v1/chat/completions` for one shard with `{"ids": ["p3", ...]}`, the labels of the paragraphs that bear on the question; `config.json`'s `pool` lists them with a number of parallel slots each. Before a question's reads, `ask` posts the run's shard names to `POST /v1/episteme/run`; a reader may ignore it, or rank the whole run and answer `{"ranked": true}`, and is then read by name (`POST /v1/episteme/read`) instead of being sent each shard.
 
 - `deploy/f2/` is the default reader: BM25 fused with attention read out of Qwen3.5-0.8B (layers 0 to 11), ranking a question's whole run and filling one token budget. It needs one CUDA GPU with about 10 GB; see its `f2serve.py` header for setup.
 - `deploy/reader.sh` runs llama-server with any instruction model as a generating reader.

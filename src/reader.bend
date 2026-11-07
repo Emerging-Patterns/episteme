@@ -2,17 +2,18 @@
 # chat completions on one of its slots, and its health check. IO: the
 # trusted shell around Read.request and Read.reply.
 #
-# Trusted, not proved: `Reader.call(url, slot, s, q)` POSTs
-# `Read.request(slot, s, q)` to `<url>/v1/chat/completions` with ezhttp's
-# `http.post_opts`, a 600000 ms timeout, and answers `Read.reply` of the
-# status and body, or a failed read naming the transport error (`Client.Err`).
+# Trusted, not proved: `Reader.call(url, Read.Call{path, body}, k)` POSTs
+# body to `<url><path>` with ezhttp's `http.post_opts`, a 600000 ms timeout,
+# and answers `Read.reply` of the status and body for the run's shard k, or
+# a failed read naming the transport error (`Client.Err`).
 # `Reader.health(url)` GETs `<url>/health` with a 10000 ms timeout; any answer
 # but a 200 is a reason.
 #
 # Trusted, not proved: `Reader.notice(url, body)` POSTs body (a
 # `Read.notice`) to `<url>/v1/episteme/run` with a 3600000 ms timeout and
-# ignores the answer, whatever it is: a reader that ranks a run may first
-# read its cold shards, and one without the endpoint answers 404.
+# answers `Read.ranked` of the status and body, and False on a transport
+# error: a reader that ranks a run may first read its cold shards, and one
+# without the endpoint answers 404.
 #
 # Why it is trusted: It is HTTP through ezhttp's client, which no law reaches;
 # ezhttp's own gate trusts its wire effect (on its src/client.bend and
@@ -39,14 +40,16 @@ def Reader.took(res: Client.Response, shard: U32, inst: String) -> Rd.Read:
     case Client.Response{status, _headers, _reason, bytes}:
       Rd.Read.reply(shard, inst, status, Ez.body_text(bytes))
 
-# ask the instance at url, on its slot, which paragraphs of a shard bear on
-# the question
-def Reader.call(+url: String, slot: U32, +sh: S.Shard, question: String) -> IO(Rd.Read):
-  do IO<Rd.Read>:
-    res : Client.Response <- Ez.http.post_opts(url ++ "/v1/chat/completions",
-      [Http.H{"Content-Type", "application/json"}],
-      Ez.text_body(Json.print(Rd.Read.request(slot, sh, question))), Reader.timeout())
-    return Reader.took(res, Rd.Read.n(sh), url)
+# make a read's call (Read.call) on the instance at url: which paragraphs of
+# the run's shard numbered shard bear on the question
+def Reader.call(+url: String, call: Rd.Call, +shard: U32) -> IO(Rd.Read):
+  match call:
+    case Rd.Call{path, body}:
+      do IO<Rd.Read>:
+        res : Client.Response <- Ez.http.post_opts(url ++ path,
+          [Http.H{"Content-Type", "application/json"}],
+          Ez.text_body(Json.print(body)), Reader.timeout())
+        return Reader.took(res, shard, url)
 
 # None when a health response is 200, else why not
 def Reader.healthy(res: Client.Response) -> Maybe<&2, String>:
@@ -69,10 +72,20 @@ def Reader.health(url: String) -> IO(Maybe<&2, String>):
 def Reader.notice_timeout() -> U32:
   3600000
 
-# tell the instance at url which shards a run reads; the answer is ignored
-def Reader.notice(+url: String, +body: Value.Json) -> IO(Unit):
-  do IO<Unit>:
-    _res : Client.Response <- Ez.http.post_opts(url ++ "/v1/episteme/run",
+# whether a notice's response says the instance ranked the run
+# (Read.ranked); a transport error says it did not
+def Reader.ranked(res: Client.Response) -> Bool:
+  match res:
+    case Client.Err{_why}:
+      False{}
+    case Client.Response{status, _headers, _reason, bytes}:
+      Rd.Read.ranked(status, Ez.body_text(bytes))
+
+# tell the instance at url which shards a run reads; answers whether it
+# ranked the run, so its reads can name their shards
+def Reader.notice(+url: String, +body: Value.Json) -> IO(Bool):
+  do IO<Bool>:
+    res : Client.Response <- Ez.http.post_opts(url ++ "/v1/episteme/run",
       [Http.H{"Content-Type", "application/json"}],
       Ez.text_body(Json.print(body)), Reader.notice_timeout())
-    return Unit{}
+    return Reader.ranked(res)
