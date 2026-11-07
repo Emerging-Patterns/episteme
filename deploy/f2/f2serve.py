@@ -58,8 +58,11 @@ def stem(w):
     return w
 
 
+STEMS = {}  # word -> stem(word): a run's paragraphs hold millions of words, few distinct
+
+
 def words(s):
-    return [stem(w) for w in re.findall(r"[a-z0-9]+", s.lower())]
+    return [STEMS.get(w) or STEMS.setdefault(w, stem(w)) for w in re.findall(r"[a-z0-9]+", s.lower())]
 
 
 def key(text):
