@@ -7,7 +7,7 @@ A shard's state is the model's cache after the prompt up to the question.
 A question's score for each paragraph is the attention its tokens pay to
 the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens."""
-import bisect, copy, os, torch
+import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb, repeat_kv
 import store
@@ -144,15 +144,24 @@ def prefill(shard):
     return ids, pack(cache), spans, tail
 
 
+@functools.lru_cache(maxsize=8)
+@torch.no_grad()
+def question_tail(tail, question):
+    """the tail's input embeddings on the device and the question's token
+    count: every shard of a run shares them, so they are made once"""
+    t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
+    nq = len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+    return M.model.embed_tokens(torch.tensor([t_ids])), nq
+
+
 @torch.no_grad()
 def scores(state, question):
     """per paragraph: the mean over the question's tokens of the attention
     heads 3 and 4 of layer 11 pay to its line, summed over the two heads"""
     ids, cache, spans, tail = state
-    t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
-    nq = len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+    emb, nq = question_tail(tail, question)
     attention("eager")
-    o = M(input_ids=torch.tensor([t_ids], device=DEV), past_key_values=unpack(cache),
+    o = M(inputs_embeds=emb, past_key_values=unpack(cache),
           use_cache=True, output_attentions=True, logits_to_keep=1)
     attention("sdpa")
     A = [x for x in o.attentions if x is not None][AT][0].float()  # heads, tail tokens, all tokens
