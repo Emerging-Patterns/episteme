@@ -1,5 +1,7 @@
 """The attention ranker: Qwen3.5-0.8B cut to layers 0-11, with layer 11's
 query scale doubled (its q_norm, stored as 1 + w, becomes 2 (1 + w) - 1).
+Layer 11 is the last and only its attention weights are read, so it keeps
+no values and computes no output or MLP.
 
 A shard's state is the model's cache after the prompt up to the question.
 A question's score for each paragraph is the attention its tokens pay to
@@ -7,6 +9,7 @@ the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens."""
 import bisect, copy, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb, repeat_kv
 import store
 
 DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
@@ -16,9 +19,41 @@ HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-VERSION = "12|11:2.0|%s|v1" % DIR  # what a kept state depends on
+VERSION = "12|11:2.0|%s|v2" % DIR  # what a kept state depends on
 
 tok = AutoTokenizer.from_pretrained(DIR)
+
+
+class Zero(torch.nn.Module):
+    """layer 11's MLP: its output feeds nothing that is read"""
+
+    def forward(self, x):
+        return torch.zeros_like(x)
+
+
+def last(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
+    """layer 11's attention, cut to what scores reads: its keys go to the
+    cache with no values, and when a tail is read (eager) its attention
+    weights are those of the stock eager path; the output is zeros, since
+    no layer follows and the logits are never read"""
+    shape = (*hidden_states.shape[:-1], -1, self.head_dim)
+    key = self.k_norm(self.k_proj(hidden_states).view(shape)).transpose(1, 2)
+    cos, sin = position_embeddings
+    weights = None
+    if self.config._attn_implementation == "eager":
+        q, _gate = torch.chunk(self.q_proj(hidden_states).view(*shape[:-1], self.head_dim * 2), 2, dim=-1)
+        q = self.q_norm(q.view(shape)).transpose(1, 2)
+        q, key = apply_rotary_pos_emb(q, key, cos, sin)
+    else:
+        q, key = None, apply_rotary_pos_emb(key, key, cos, sin)[1]
+    if past_key_values is not None:
+        key = past_key_values.update(key, key[..., :0], self.layer_idx)[0]
+    if q is not None:
+        weights = torch.matmul(q, repeat_kv(key, self.num_key_value_groups).transpose(2, 3)) * self.scaling
+        if attention_mask is not None:
+            weights = weights + attention_mask
+        weights = torch.nn.functional.softmax(weights, dim=-1, dtype=torch.float32).to(q.dtype)
+    return torch.zeros_like(hidden_states), weights
 
 
 def load():
@@ -36,7 +71,10 @@ def load():
     emb.register_forward_hook(lambda mod, inp, out: out.to(DEV))
     orig = emb.forward
     emb.forward = lambda ids: orig(ids.cpu())
-    w = m.model.layers[SCALED].self_attn.q_norm.weight
+    top = m.model.layers[SCALED]
+    top.self_attn.forward = last.__get__(top.self_attn)
+    top.mlp = Zero()
+    w = top.self_attn.q_norm.weight
     with torch.no_grad():
         w.copy_((1 + w.float()) * 2.0 - 1)
     full = [i for i, t in enumerate(cfg.layer_types) if t == "full_attention"]
