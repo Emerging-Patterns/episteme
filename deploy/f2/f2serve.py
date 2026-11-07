@@ -16,14 +16,18 @@ The ranking is reciprocal-rank fusion (k = 10) of BM25 (k1 1.2, b 0.75,
 lowercase words, light suffix stemming) and the attention score minus the
 same score for the question "N/A", over sqrt(paragraph characters).
 
-A shard's state (model.prefill, its keys and values int8) is kept on the
-GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk under F2_STATES; a
-miss everywhere is a prefill. A run scores the shards whose state is on the
-GPU first, then those in RAM, then the rest, which a reader thread loads
-from disk up to AHEAD ahead; eviction takes the least recently used state
-the run does not read later. A run bigger than the tiers so hits what they
-hold, where a fixed order under plain LRU evicts each state just before it
-is needed and never hits.
+A shard's state (model.prefill: its keys and values int8, its
+linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
+RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
+A run scores the shards whose state is on the GPU first, then those in RAM,
+then the rest, which a reader thread loads from disk up to AHEAD ahead,
+BATCH shards to a tail pass (model.scores_batch); eviction takes the least
+recently used state the run does not read later. A run bigger than the
+tiers so hits what they hold, where a fixed order under plain LRU evicts
+each state just before it is needed and never hits. RAM keeps the host copy
+of a state it hands to the GPU, and of one read from disk while it has
+room; it evicts those copies first, and a state leaving the GPU with a host
+copy is dropped, not copied back.
 
 Host copies are plain pageable memory, never pinned: PyTorch's caching
 host allocator keeps every freed pinned block, so a pinned RAM tier grew
@@ -35,6 +39,9 @@ Setup: a Python 3.12 venv with requirements.txt, and the weights:
   huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
 Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
+MALLOC_MMAP_THRESHOLD_=1048576 returns freed host states to the OS, and
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 backs them with huge pages, which
+makes a copy off the GPU ~30% faster.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
