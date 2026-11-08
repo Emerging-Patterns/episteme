@@ -61,9 +61,9 @@ import ../honcho.bend as H
 import ../store.bend as St
 import ../ingest.bend as In
 import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
-import 0xedb2120a04a47dc18c3a756ec7c62750/main.bend as Ez
-import 0xedb2120a04a47dc18c3a756ec7c62750/src/http.bend as Http
-import 0xedb2120a04a47dc18c3a756ec7c62750/src/client.bend as Client
+import 0x7367809738fddd234b8d2bed772ad2cf/main.bend as Ez
+import 0x7367809738fddd234b8d2bed772ad2cf/src/http.bend as Http
+import 0x7367809738fddd234b8d2bed772ad2cf/src/client.bend as Client
 import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
 
 # how far a run got: the cursor, the records read and not yet appended
