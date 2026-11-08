@@ -2,10 +2,10 @@
   description = "episteme: primary-source Q&A over raw records, in Bend 2";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  # bendlang/bend's flake at the commit that packages 2.0.38 (the v2.0.38 tag
-  # may still package 2.0.37)
+  # bendlang/bend's flake at the commit that packages 2.0.40 (the v2.0.40 tag
+  # may still package 2.0.39)
   inputs.bend = {
-    url = "github:bendlang/bend/042e797ebd1cfc060603e2682879909fe86fa8c2";
+    url = "github:bendlang/bend/222de9901d4e3551c2b347da02e02a10098a28b2";
     inputs.nixpkgs.follows = "nixpkgs";
   };
   inputs.ez = {

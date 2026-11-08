@@ -1,0 +1,11 @@
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    uses: Emerging-Patterns/actions/.github/workflows/nix-flake-check.yml@feaa011dafd85fecb67aa058fbcf6424cf605e86
