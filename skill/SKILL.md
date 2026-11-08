@@ -1,6 +1,6 @@
 ---
 name: episteme
-description: Answer from the primary record with verbatim, cited excerpts. Use when a question turns on what an ingested book actually says, what was decided or said in an earlier Claude Code session or Honcho chat, why a repo changed (its git history), or what the user says they mean to do (their intent file). Triggers include "what did we decide about X", "when did we change Y and why", "find where the book says Z", "what did I say about W". Not for questions the current repo or conversation already answers.
+description: Answer from the primary record with verbatim, cited excerpts. Use when a question turns on what an ingested book actually says, what was decided or said in an earlier Claude Code session or Honcho chat, why a repo changed (its git history), or what the user says they mean to do (their intent file). Triggers include "what did we decide about X", "when did we change Y and why", "find where the book says Z", "what did I say about W", and "which design principles apply to this code" over a corpus of design books. Not for questions the current repo or conversation already answers.
 ---
 
 # episteme
@@ -37,6 +37,17 @@ episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>
 - **Cost is the shards read.** A reader scans every shard the filter hits; a shard it has not seen before takes about a second, and a big chat project is hundreds of shards. Pick the fewest sources that can hold the answer; `episteme sources` shows how many shards each has.
 - **For chats or git about recent work, pass `--since`** (UTC). It reads only shards holding a record at or after that time and drops older excerpts, which often cuts a chat project by half or more. It is for chat and git only: book excerpts carry no real date (a book without a year in its id is dated by its ingest time).
 - Ask one question at a time, in plain words; put the names and terms the record would use into it.
+
+## Principles for code
+
+To ground a design or refactor in a corpus of design books, ask in two passes:
+
+1. **Describe the code, don't paste it.** Say its shape in the words a design book would use: what it stores, which combinations cannot happen, what every caller has to check. A raw snippet matches the books' code samples on tokens like `bool` and `int`, not the prose that states a principle.
+2. **Ask broadly** over the corpus (`--filter book:<corpus>/`): "Which design principles apply to <the description>?" Note the principles that recur and which book each comes from.
+3. **Follow up narrowly** on one principle, filtered to that one book (`--filter book:<corpus>/<book>`): how to apply it, where its author says it does not apply, what it costs. The limits often come only in this pass.
+4. **Weigh it against the code.** Two books can point opposite ways (split a module, or keep what shares one piece of knowledge together); the excerpts give the arguments, the code decides. Cite the passages behind the choice.
+
+Excerpts come in record order, not by relevance, so read the whole result before picking.
 
 ## Reading the output
 
