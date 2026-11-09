@@ -2,8 +2,8 @@
 import Base
 import ../src/shard.bend as S
 import ../src/read.bend as Rd
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 import ../laws/RankedReadNamesShard.bend as Laws
 
 # a ranked flag that is there, else false, is the specification's

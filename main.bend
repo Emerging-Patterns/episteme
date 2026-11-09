@@ -50,13 +50,13 @@ import ./src/ask.bend as A
 import ./src/gold.bend as G
 import ./src/eval.bend as Ev
 import ./src/tool.bend as T
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
-import 0x6b75cc24ae78878f45f867de73d7929d/main.bend as Mcp
-import 0x6b75cc24ae78878f45f867de73d7929d/src/rpc.bend as Rpc
-import 0x6b75cc24ae78878f45f867de73d7929d/src/server.bend as Server
-import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
-import 0x5a44d8a54be79db966199d0fa91fe8e6/main.bend as Shake
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
+import ezmcp@0.2.0.0/main.bend as Mcp
+import ezmcp@0.2.0.0/src/rpc.bend as Rpc
+import ezmcp@0.2.0.0/src/server.bend as Server
+import ezsys@0.1.0.0/main.bend as Sys
+import shake@0.8.0.0/main.bend as Shake
 
 # the package version marker
 def version() -> String:

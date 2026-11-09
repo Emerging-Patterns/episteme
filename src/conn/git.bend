@@ -66,7 +66,7 @@ import ../chat.bend as C
 import ../git.bend as G
 import ../store.bend as St
 import ../ingest.bend as In
-import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
+import ezsys@0.1.0.0/main.bend as Sys
 
 # how far a run got: the cursor, the records read and not yet appended
 # (newest repo first), their code points, the records appended, the

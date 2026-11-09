@@ -5,8 +5,8 @@ import Base
 import ./para.bend as P
 import ./excerpt.bend as E
 import ./read.bend as Rd
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # one question's result: its id, its gold spans recalled and in all, the
 # code points of its excerpts' paragraphs, its unknown labels and failed

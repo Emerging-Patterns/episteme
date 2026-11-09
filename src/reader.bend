@@ -22,11 +22,11 @@
 import Base
 import ./shard.bend as S
 import ./read.bend as Rd
-import 0x7367809738fddd234b8d2bed772ad2cf/main.bend as Ez
-import 0x7367809738fddd234b8d2bed772ad2cf/src/http.bend as Http
-import 0x7367809738fddd234b8d2bed772ad2cf/src/client.bend as Client
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezhttp@0.23.0.0/main.bend as Ez
+import ezhttp@0.23.0.0/src/http.bend as Http
+import ezhttp@0.23.0.0/src/client.bend as Client
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # how long one call may take, in milliseconds
 def Reader.timeout() -> U32:

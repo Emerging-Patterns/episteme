@@ -27,13 +27,13 @@
 # first gold span stops a run whose offsets are not code-point offsets.
 import Base
 import ./store.bend as St
-import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
+import ezsys@0.1.0.0/main.bend as Sys
 import 0x856d414a32087762da315b6efc605eaa/yaml.bend as Y
 import 0x856d414a32087762da315b6efc605eaa/value.bend as V
 import 0x856d414a32087762da315b6efc605eaa/token.bend as T
 import 0x1dd647736fb09289bc1eed9825ef1113/sqlite.bend as Sql
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # a canon question: its id, its text, its answer and its gold chunk ids
 type Q is Data:

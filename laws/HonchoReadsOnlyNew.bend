@@ -6,7 +6,7 @@
 # model does is src/conn/honcho.bend's assumption.
 import Base
 import ../src/honcho.bend as H
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # LAW: a read of xs ++ ys from the count of xs gives exactly ys, across
 # pages

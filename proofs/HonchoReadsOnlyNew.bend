@@ -1,7 +1,7 @@
 # proofs of laws/HonchoReadsOnlyNew.bend
 import Base
 import ../src/honcho.bend as H
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/src/value.bend as Value
 import ../laws/HonchoReadsOnlyNew.bend as Laws
 import ./lemmas/BoolFacts.bend as M1
 import ./lemmas/NatArithmetic.bend as M2
