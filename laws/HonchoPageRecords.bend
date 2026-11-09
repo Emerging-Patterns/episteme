@@ -2,7 +2,7 @@ import Base
 import ../src/para.bend as P
 import ../src/record.bend as R
 import ../src/honcho.bend as H
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # the records of a page's JSON text, none when it has no items array
 def hon.page(text: String) -> List<&2, R.Record>:

@@ -2,8 +2,8 @@
 # pack, and its JSON line. Pure: no IO.
 import Base
 import ./para.bend as P
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # one record: its id, its ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`,
 # so string order is time order), its source, its author, the thread and

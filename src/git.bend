@@ -4,7 +4,7 @@
 import Base
 import ./record.bend as R
 import ./chat.bend as C
-import 0x8abe7473e8854cc69c687ee77b7d72e3/src/clock.bend as Clock
+import ezsys@0.1.0.0/src/clock.bend as Clock
 
 # a commit as git log gives it: its hash, its author time in seconds since
 # 1970-01-01T00:00:00Z, its author's name, its message and its numstat

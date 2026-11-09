@@ -58,9 +58,9 @@ import ./record.bend as R
 import ./shard.bend as S
 import ./para.bend as P
 import ./filter.bend as F
-import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezsys@0.1.0.0/main.bend as Sys
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 
 # a reader instance: its URL and its slot count
 type Slot is Data:

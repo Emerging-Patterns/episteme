@@ -1,8 +1,8 @@
 # proofs of laws/RunNoticeNamesShards.bend
 import Base
 import ../src/read.bend as Rd
-import 0xa81e161008ecc2f297c0a3065cb9b188/main.bend as Json
-import 0xa81e161008ecc2f297c0a3065cb9b188/src/value.bend as Value
+import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.2.0.0/src/value.bend as Value
 import ../laws/RunNoticeNamesShards.bend as Laws
 
 # the code's name objects are the specification's

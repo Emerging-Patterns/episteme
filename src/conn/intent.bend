@@ -30,7 +30,7 @@ import ../record.bend as R
 import ../intent.bend as I
 import ../store.bend as St
 import ../ingest.bend as In
-import 0x8abe7473e8854cc69c687ee77b7d72e3/main.bend as Sys
+import ezsys@0.1.0.0/main.bend as Sys
 
 # "" after creating the file empty when it is missing (errno 2), else stop
 # naming the failure

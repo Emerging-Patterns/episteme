@@ -28,13 +28,7 @@ kind = "hub"
 "int.bend" = "5588aa776b7883a661b30489bccc7f2bf54ee0e333d363eaa33804cb1b130fcf"
 [packages.0x5a44d8a54be79db966199d0fa91fe8e6]
 [packages.0x5a44d8a54be79db966199d0fa91fe8e6.source]
-kind = "git"
-url = "https://github.com/Emerging-Patterns/shake"
-rev = "309348a37e5e4e91b010625ce4271e5449f5b5ba"
-entry = "main.bend"
-root = "."
-narHash = "sha256-KLx6LZAdjyITKvGboTSI65aMYWZB8EG5Oh+9iRUZm/U="
-tag = "v0.8.0"
+kind = "hub"
 [packages.0x5a44d8a54be79db966199d0fa91fe8e6.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "main.bend" = "4b2d0dd0ef5b7b123ce033a0943ef3955bb65e79082d8978784e2bf08f4a06fe"
@@ -43,13 +37,7 @@ LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "src/cli.bend" = "db1d66785516b6aa33fb694c288adbadb6876d1ce4e3b9d5d4fcb045645723cc"
 [packages.0x6b75cc24ae78878f45f867de73d7929d]
 [packages.0x6b75cc24ae78878f45f867de73d7929d.source]
-kind = "git"
-url = "https://github.com/Emerging-Patterns/ezmcp"
-rev = "1b36fad305df29fcfdcaa7406790e2a52dd3fbf7"
-entry = "main.bend"
-root = "."
-narHash = "sha256-qVn6MGvfG9rPUZHLFcp1mHObOOOLr08bGTKfRkng5sI="
-tag = "v0.2.0"
+kind = "hub"
 [packages.0x6b75cc24ae78878f45f867de73d7929d.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "main.bend" = "2fb81661674bd39809d08e789a56d3288009b3c72263e9588c9a3d5960c4e559"
@@ -65,13 +53,7 @@ LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "src/web.bend" = "548a90e2ed724879289178e78bca97079bf69694dd87b449839d81dd6ac19f81"
 [packages.0x7367809738fddd234b8d2bed772ad2cf]
 [packages.0x7367809738fddd234b8d2bed772ad2cf.source]
-kind = "git"
-url = "https://github.com/Emerging-Patterns/ezhttp"
-rev = "d4a66871b286cba2d530b02a4320b45d6327b32a"
-entry = "main.bend"
-root = "."
-narHash = "sha256-/OGzic9Jiv1uvmV9LSgC7InFljkvwaRCGpiWnMiqRPQ="
-tag = "v0.23.0"
+kind = "hub"
 [packages.0x7367809738fddd234b8d2bed772ad2cf.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "main.bend" = "a92e09a02c50285c1f99cce3779c2b29ae88a1222cb73abf55518f7d4db7690b"
@@ -115,13 +97,7 @@ LICENSE = "c6273324dfad426e6642b106cfabf5a32ea65b5f352f76cff751c1716c929274"
 "yaml11.bend" = "5b2d9ba5ba6ea284fa832d337d4c5a49f46643e9fc5cee364c0810829b959e30"
 [packages.0x8abe7473e8854cc69c687ee77b7d72e3]
 [packages.0x8abe7473e8854cc69c687ee77b7d72e3.source]
-kind = "git"
-url = "https://github.com/Emerging-Patterns/ezsys"
-rev = "69dcef850175ade4144ca01dec97720ae5199dab"
-entry = "main.bend"
-root = "."
-narHash = "sha256-N+CwX+C6iYxBlsyDY2J16xBnViHv769CoeixotQ8VPg="
-tag = "v0.1.0"
+kind = "hub"
 [packages.0x8abe7473e8854cc69c687ee77b7d72e3.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "main.bend" = "172fd00bf5fd2dc5c8f253924d826f47931396b5a374598ccd4267a172111fdb"
@@ -147,13 +123,7 @@ kind = "hub"
 "effs/dns.js" = "3abdd6528b6c8b885639b81a2542fdfb2668af78e2a16c70b45b94dfc50d1010"
 [packages.0xa81e161008ecc2f297c0a3065cb9b188]
 [packages.0xa81e161008ecc2f297c0a3065cb9b188.source]
-kind = "git"
-url = "https://github.com/Emerging-Patterns/ezjson"
-rev = "fbae34db74596ddca4ec29409825926246d22cec"
-entry = "main.bend"
-root = "."
-narHash = "sha256-bOtXnTBW1oDQOGlFpEKxNklcUY1WmPt5y8HWWQY8sK4="
-tag = "v1.2.0"
+kind = "hub"
 [packages.0xa81e161008ecc2f297c0a3065cb9b188.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "main.bend" = "030530d356d712d66fc58daa6bf81c81379d3132547b7e7a42de436c374e9e27"
@@ -167,6 +137,11 @@ LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
 "bend-kit-bytes@0.3.2.0" = "0x185ae03c75e3e75be1171471f68b43cb"
 "bend-kit-dns@0.6.0.2" = "0x9bf2c4100bf9328348d215e7ae1657de"
 "bend-kit-wire@0.4.6.1" = "0x1afdf90dbe41c30b1df4594db039b02a"
+"ezhttp@0.23.0.0" = "0x7367809738fddd234b8d2bed772ad2cf"
+"ezjson@1.2.0.0" = "0xa81e161008ecc2f297c0a3065cb9b188"
+"ezmcp@0.2.0.0" = "0x6b75cc24ae78878f45f867de73d7929d"
+"ezsys@0.1.0.0" = "0x8abe7473e8854cc69c687ee77b7d72e3"
+"shake@0.8.0.0" = "0x5a44d8a54be79db966199d0fa91fe8e6"
 [tools]
 [tools.bolt]
 git = "https://github.com/Emerging-Patterns/bolt"
