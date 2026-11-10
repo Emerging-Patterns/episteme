@@ -7,7 +7,9 @@
 # `--filter` values, refused with the refusal text on stderr and exit 2, and
 # `--since` as said below; then the config, `Store.ready(cap)`, which stops
 # with exit 1 and names `episteme ingest` when the shards are behind the log
-# (src/ingest.bend; ask never syncs), and `Store.shards(cap, f)`, the shards
+# (src/ingest.bend; ask never syncs), and `Store.light(cap, f)`, the shards
+# `Store.shards(cap, f)` answers, a frozen shard of a source with a sizes
+# file left unread (see below): the shards
 # of the sources the filter picks (each such shard's `sources` is its one
 # source, laws/ShardHoldsOneSource.bend, so these are the shards `Filter.hits`
 # keeps), source directories in name order and each source's in ascending
@@ -47,6 +49,26 @@
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
 #
+# Trusted, not proved: A question without `--since` does not read a frozen
+# shard's file before the reads when its source has a sizes file
+# (`Store.light`): the shard stands in the run with its number, source and
+# code points and no items, and telemetry takes its paragraph count from the
+# sizes file. When every instance of the pool ranked the run, each reads by
+# name and no request holds a shard's text, so after the reads `Ask.load`
+# reads from their files exactly the unread shards whose read named labels
+# (a failed read names none), stopping with `<path> is no shard` on one that
+# does not parse, and `Read.ordered`, `Excerpt.resolve` and the merge run on
+# those; a shard that stays unread had no label to resolve, so the excerpts,
+# the reads and the telemetry line are those of reading every file first.
+# When some instance did not rank the run (it will be sent shard text), or
+# with `--since` (the cut reads the records' times), every shard is read
+# before the reads, as `Store.shards` does. A frozen shard file that is no
+# shard so stops only a question that reads it.
+#
+# Why it is trusted: It is IO sequencing; a ranked instance's request holds
+# no shard text by laws/RankedReadNamesShard.bend, and resolving no labels
+# keeps no paragraph (laws/ResolveKeepsNamedParagraphs.bend).
+#
 # Trusted, not proved: `episteme ask --since <date>` reads the value with
 # `Filter.since.arg`, after `Filter.check` passes and before any other step; a
 # refusal goes to stderr with exit 2. A since read narrows the run above in
@@ -72,7 +94,9 @@
 # refusal are the refusal's (exit 1 when the shards are behind the log,
 # with no shards; exit 2 when no reader is healthy, with no reads) or else
 # `Read.code` of the reads and "", and its sources are every shard
-# `Store.shards` answers for the filter, before the since. A failed open or
+# `Store.shards` answers for the filter, before the since; the line is
+# `Tele.line.with`, an unread shard's paragraph count the one its source's
+# sizes file holds (laws/TelemetryLineOfARun.bend). A failed open or
 # write is said on stderr (`episteme: telemetry: ...`) and the question goes
 # on; telemetry never changes what a question answers or its exit code.
 #
@@ -130,21 +154,196 @@ def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json) -> IO(List<&2, Strin
             more : List<&2, String> <- Ask.notice(rest, body)
             return Ask.ranked(ranked, url, more)
 
-# the reads of the shards; no reads, and no reader asked, when there are
-# none; None when no reader instance is healthy
+# a shard numbered num
+def Ask.renum(sh: S.Shard, num: U32) -> S.Shard:
+  match sh:
+    case S.Shard{_n, items, sources, chars, frozen}:
+      S.Shard{num, items, sources, chars, frozen}
+
+# whether an unread shard is read now: it has a file, and every shard is
+# wanted or its read named labels
+def Ask.wanted(path: String, every: Bool, labels: List<&2, String>) -> Bool:
+  match path:
+    case SNil{}:
+      False{}
+    case SCon{_head, _tail}:
+      match every:
+        case True{}:
+          True{}
+        case False{}:
+          match labels:
+            case Nil{}:
+              False{}
+            case Con{_label, _rest}:
+              True{}
+
+# sh, or the shard in its file under sh's run number when need
+def Ask.load.if(need: Bool, +sh: S.Shard, +path: String) -> IO(S.Shard):
+  match need:
+    case False{}:
+      IO.pure(S.Shard, sh)
+    case True{}:
+      do IO<S.Shard>:
+        got : S.Shard <- St.Store.shard(path)
+        return Ask.renum(got, Rd.Read.n(sh))
+
+# a shard of the run, read from its file when Ask.wanted
+def Ask.load.one(+sh: S.Shard, +path: String, every: Bool, rs: List<&2, Rd.Read>) -> IO(S.Shard):
+  Ask.load.if(Ask.wanted(path, every, Rd.Read.labels(Rd.Read.find(Rd.Read.n(sh), rs))), sh, path)
+
+# the run's shards beside their files ("" for one already read), each
+# unread one read now when every, else when its read in rs named labels;
+# a shard with no file beside it is left as it is
+def Ask.load(
+  ss: List<&2, S.Shard>,
+  paths: List<&2, String>,
+  +every: Bool,
+  +rs: List<&2, Rd.Read>
+) -> IO(List<&2, S.Shard>):
+  match ss paths:
+    case Con{sh, rest} Con{path, more}:
+      do IO<List<&2, S.Shard>>:
+        one : S.Shard <- Ask.load.one(sh, path, every, rs)
+        others : List<&2, S.Shard> <- Ask.load(rest, more, every, rs)
+        return one <> others
+    case Con{sh, rest} Nil{}:
+      IO.pure(List<&2, S.Shard>, sh <> rest)
+    case Nil{} _:
+      IO.pure(List<&2, S.Shard>, [])
+
+# whether every instance of the pool is among the urls that ranked the run
+def Ask.every(insts: List<&2, St.Slot>, +ranked: List<&2, String>) -> Bool:
+  match insts:
+    case Nil{}:
+      True{}
+    case Con{inst, rest}:
+      match inst:
+        case St.Slot{url, _n}:
+          Bool.and(Pl.Pool.ranked(ranked, url), Ask.every(rest, ranked))
+
+# the reads, none when there are none
+def Ask.named(got: Maybe<&2, List<&2, Rd.Read>>) -> List<&2, Rd.Read>:
+  match got:
+    case None{}:
+      []
+    case Some{rs}:
+      rs
+
+# a run's reads (None when no reader instance is healthy) beside its
+# shards, those the excerpts need read from their files
+type Reads is Data:
+  Reads{got: Maybe<&2, List<&2, Rd.Read>>, hits: List<&2, S.Shard>}
+
+# read the shards with the pool. When every instance ranked the run, each
+# reads by name and needs no shard's text, so the unread shards are read
+# from their files only afterwards, and only those whose read named labels;
+# else every unread shard is read first
+def Ask.read.by(
+  ranked_all: Bool,
+  +ss: List<&2, S.Shard>,
+  paths: List<&2, String>,
+  +pool: List<&2, St.Slot>,
+  +ranked: List<&2, String>,
+  +names: List<&2, Rd.Name>,
+  +question: String
+) -> IO(Reads):
+  match ranked_all:
+    case True{}:
+      do IO<Reads>:
+        +got : Maybe<&2, List<&2, Rd.Read>> <- Pl.Pool.try(pool, ranked, names, ss, question)
+        hits : List<&2, S.Shard> <- Ask.load(ss, paths, False{}, Ask.named(got))
+        return Reads{got, hits}
+    case False{}:
+      do IO<Reads>:
+        +hits : List<&2, S.Shard> <- Ask.load(ss, paths, True{}, [])
+        got : Maybe<&2, List<&2, Rd.Read>> <- Pl.Pool.try(pool, ranked, names, hits, question)
+        return Reads{got, hits}
+
+# the reads of the shards, beside the files of the unread ones; no reads,
+# and no reader asked, when there are none; None when no reader instance is
+# healthy
 def Ask.read(
   +ss: List<&2, S.Shard>,
+  paths: List<&2, String>,
   +pool: List<&2, St.Slot>,
   +names: List<&2, Rd.Name>,
   +question: String
-) -> IO(Maybe<&2, List<&2, Rd.Read>>):
+) -> IO(Reads):
   match ss:
     case Nil{}:
-      IO.pure(Maybe<&2, List<&2, Rd.Read>>, Some{[]})
+      IO.pure(Reads, Reads{Some{[]}, []})
     case Con{_s, _rest}:
-      do IO<Maybe<&2, List<&2, Rd.Read>>>:
-        ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question))
-        Pl.Pool.try(pool, ranked, names, ss, question)
+      do IO<Reads>:
+        +ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question))
+        Ask.read.by(Ask.every(pool, ranked), ss, paths, pool, ranked, names, question)
+
+# the shards of lights, in order
+def Ask.shards(ls: List<&2, St.Light>) -> List<&2, S.Shard>:
+  match ls:
+    case Nil{}:
+      []
+    case Con{light, rest}:
+      match light:
+        case St.Light{shard, _sized, _path}:
+          shard <> Ask.shards(rest)
+
+# a light's paragraph count: the one it holds, else its shard's
+def Ask.count(sized: Maybe<&2, Nat>, shard: S.Shard) -> Nat:
+  match sized:
+    case Some{paras}:
+      paras
+    case None{}:
+      Rd.Read.paras(shard)
+
+# the paragraph counts of lights, in order
+def Ask.counts(ls: List<&2, St.Light>) -> List<&2, Nat>:
+  match ls:
+    case Nil{}:
+      []
+    case Con{light, rest}:
+      match light:
+        case St.Light{shard, sized, _path}:
+          Ask.count(sized, shard) <> Ask.counts(rest)
+
+# the files of lights, in order, "" for a shard that was read
+def Ask.paths(ls: List<&2, St.Light>) -> List<&2, String>:
+  match ls:
+    case Nil{}:
+      []
+    case Con{light, rest}:
+      match light:
+        case St.Light{_shard, _sized, path}:
+          path <> Ask.paths(rest)
+
+# the lights a question starts from: with a since every shard is read,
+# because the since is cut on the records' times; with none, Store.light
+def Ask.lights(since: Maybe<&2, String>, cap: U32, +filter: List<&2, F.Sel>) -> IO(List<&2, St.Light>):
+  match since:
+    case None{}:
+      St.Store.light(cap, filter)
+    case Some{_at}:
+      do IO<List<&2, St.Light>>:
+        ss : List<&2, S.Shard> <- St.Store.shards(cap, filter)
+        return St.Store.light.loaded(ss)
+
+# the paragraph counts of the run's shards ss: with no since the run reads
+# every shard the filter hits, so they are those of all; with one every
+# shard was read and they are counted
+def Ask.hp(since: Maybe<&2, String>, ap: List<&2, Nat>, ss: List<&2, S.Shard>) -> List<&2, Nat>:
+  match since:
+    case None{}:
+      ap
+    case Some{_at}:
+      T.Tele.counts(ss)
+
+# the files of the run's shards: those of the lights with no since, none
+# with one (every shard was read)
+def Ask.files.of(since: Maybe<&2, String>, ls: List<&2, St.Light>) -> List<&2, String>:
+  match since:
+    case None{}:
+      Ask.paths(ls)
+    case Some{_at}:
+      []
 
 # write each source's excerpts to <source>.md under dir
 def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(Unit):
@@ -302,8 +501,21 @@ def Ask.came(
 # shard the filter hits, the shards it read, numbered for the run, and
 # their own names
 type Ran is Data:
-  Ran{all: List<&2, S.Shard>, hits: List<&2, S.Shard>, names: List<&2, Rd.Name>,
-    res: Result<&2, &2, Refusal, Got>}
+  Ran{all: List<&2, S.Shard>, ap: List<&2, Nat>, hits: List<&2, S.Shard>, hp: List<&2, Nat>,
+    names: List<&2, Rd.Name>, res: Result<&2, &2, Refusal, Got>}
+
+# the run of reads that came back beside what telemetry needs
+def Ask.ran(
+  reads: Reads,
+  all: List<&2, S.Shard>,
+  ap: List<&2, Nat>,
+  hp: List<&2, Nat>,
+  since: Maybe<&2, String>,
+  +names: List<&2, Rd.Name>
+) -> Ran:
+  match reads:
+    case Reads{got, +hits}:
+      Ran{all, ap, hits, hp, names, Ask.came(got, hits, since, names)}
 
 # the shards' reads when the shards are not behind the log, else the
 # refusal and its exit code 1
@@ -317,15 +529,16 @@ def Ask.reads(
 ) -> IO(Ran):
   match behind:
     case Some{why}:
-      IO.pure(Ran, Ran{[], [], [], Fail{Refusal{1, why}}})
+      IO.pure(Ran, Ran{[], [], [], [], [], Fail{Refusal{1, why}}})
     case None{}:
       do IO<Ran>:
-        +all : List<&2, S.Shard> <- St.Store.shards(cap, filter)
+        +ls : List<&2, St.Light> <- Ask.lights(since, cap, filter)
+        +all : List<&2, S.Shard> = Ask.shards(ls)
+        +ap : List<&2, Nat> = Ask.counts(ls)
         +ss : List<&2, S.Shard> = F.Filter.recent(since, all)
-        +hits : List<&2, S.Shard> = Ask.number(ss, 1)
         +names : List<&2, Rd.Name> = Ask.names(ss)
-        got : Maybe<&2, List<&2, Rd.Read>> <- Ask.read(hits, Ask.pool(cfg), names, question)
-        return Ran{all, hits, names, Ask.came(got, hits, since, names)}
+        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.files.of(since, ls), Ask.pool(cfg), names, question)
+        return Ask.ran(reads, all, ap, Ask.hp(since, ap, ss), since, names)
 
 # a result's exit code: its refusal's, else Read.code of its reads
 def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
@@ -404,10 +617,10 @@ def Ask.logged(
   ms: Nat
 ) -> IO(Result<&2, &2, Refusal, Got>):
   match ran:
-    case Ran{all, hits, names, +res}:
+    case Ran{all, ap, hits, hp, names, +res}:
       do IO<Result<&2, &2, Refusal, Got>>:
-        Ask.tele(T.Tele.line(ts, via, question, filter, since, ms, Ask.code(res), Ask.why(res),
-          all, hits, names, Ask.rs(res), Ask.xs(res)))
+        Ask.tele(T.Tele.line.with(ts, via, question, filter, since, ms, Ask.code(res), Ask.why(res),
+          all, ap, hits, hp, names, Ask.rs(res), Ask.xs(res)))
         return res
 
 # a question over the shards a passed filter hits, with the settings cfg:
