@@ -49,7 +49,7 @@
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
 #
-# Trusted, not proved: A question without `--since` does not read a frozen
+# Trusted, not proved: A question does not read a frozen
 # shard's file before the reads when its source has a sizes file
 # (`Store.light`): the shard stands in the run with its number, source and
 # code points and no items, and telemetry takes its paragraph count from the
@@ -60,10 +60,9 @@
 # does not parse, and `Read.ordered`, `Excerpt.resolve` and the merge run on
 # those; a shard that stays unread had no label to resolve, so the excerpts,
 # the reads and the telemetry line are those of reading every file first.
-# When some instance did not rank the run (it will be sent shard text), or
-# with `--since` (the cut reads the records' times), every shard is read
-# before the reads, as `Store.shards` does. A frozen shard file that is no
-# shard so stops only a question that reads it.
+# When some instance did not rank the run (it will be sent shard text),
+# every shard of the run is read before the reads. A frozen shard file that
+# is no shard so stops only a question that reads it.
 #
 # Why it is trusted: It is IO sequencing; a ranked instance's request holds
 # no shard text by laws/RankedReadNamesShard.bend, and resolving no labels
@@ -72,13 +71,19 @@
 # Trusted, not proved: `episteme ask --since <date>` reads the value with
 # `Filter.since.arg`, after `Filter.check` passes and before any other step; a
 # refusal goes to stderr with exit 2. A since read narrows the run above in
-# two places: the shards are `Filter.recent(since, Store.shards(cap, f))`, so
+# two places: the shards are those `Filter.recent(since, Store.shards(cap,
+# f))` keeps (`Ask.recent`: a shard that was read is kept by `Filter.fresh`,
+# an unread one when the latest record ts its sizes file holds is at or
+# after the since, which is the same test, since some record of a shard is
+# at or after a time exactly when its latest is), so
 # only those are numbered, read and named, and the merged excerpts are
 # `Filter.after(since, ...)` before they are delivered or written. Without
 # `--since` the run is the one above (laws/NoSinceChangesNothing.bend), and
 # `episteme eval` always runs without one.
 #
-# Why it is trusted: It is argument passing and IO sequencing over
+# Why it is trusted: The latest-ts test equals `Filter.fresh` only because
+# string order on `ts` is a total order, which no law here proves. Else it is
+# argument passing and IO sequencing over
 # laws/SinceKeepsRecentShards.bend, laws/SinceDropsOldExcerpts.bend and
 # laws/NoSinceChangesNothing.bend and the run above; `tests/smoke.sh` checks a
 # malformed value (exit 2), a since after every record (no shard read, no
@@ -284,7 +289,7 @@ def Ask.shards(ls: List<&2, St.Light>) -> List<&2, S.Shard>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{shard, _sized, _path}:
+        case St.Light{shard, _sized, _path, _last}:
           shard <> Ask.shards(rest)
 
 # a light's paragraph count: the one it holds, else its shard's
@@ -302,7 +307,7 @@ def Ask.counts(ls: List<&2, St.Light>) -> List<&2, Nat>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{shard, sized, _path}:
+        case St.Light{shard, sized, _path, _last}:
           Ask.count(sized, shard) <> Ask.counts(rest)
 
 # the files of lights, in order, "" for a shard that was read
@@ -312,38 +317,44 @@ def Ask.paths(ls: List<&2, St.Light>) -> List<&2, String>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{_shard, _sized, path}:
+        case St.Light{_shard, _sized, path, _last}:
           path <> Ask.paths(rest)
 
-# the lights a question starts from: with a since every shard is read,
-# because the since is cut on the records' times; with none, Store.light
-def Ask.lights(since: Maybe<&2, String>, cap: U32, +filter: List<&2, F.Sel>) -> IO(List<&2, St.Light>):
-  match since:
-    case None{}:
-      St.Store.light(cap, filter)
-    case Some{_at}:
-      do IO<List<&2, St.Light>>:
-        ss : List<&2, S.Shard> <- St.Store.shards(cap, filter)
-        return St.Store.light.loaded(ss)
+# whether a light is of a shard holding a record at or after since: an
+# unread shard by its latest record ts, one that was read by Filter.fresh
+def Ask.fresh(path: String, last: String, shard: S.Shard, since: String) -> Bool:
+  match path:
+    case SNil{}:
+      F.Filter.fresh(shard, since)
+    case SCon{_head, _tail}:
+      String.is_ge(last, since)
 
-# the paragraph counts of the run's shards ss: with no since the run reads
-# every shard the filter hits, so they are those of all; with one every
-# shard was read and they are counted
-def Ask.hp(since: Maybe<&2, String>, ap: List<&2, Nat>, ss: List<&2, S.Shard>) -> List<&2, Nat>:
-  match since:
-    case None{}:
-      ap
-    case Some{_at}:
-      T.Tele.counts(ss)
+# light ahead of rest when keep
+def Ask.recent.if(keep: Bool, light: St.Light, rest: List<&2, St.Light>) -> List<&2, St.Light>:
+  match keep:
+    case True{}:
+      light <> rest
+    case False{}:
+      rest
 
-# the files of the run's shards: those of the lights with no since, none
-# with one (every shard was read)
-def Ask.files.of(since: Maybe<&2, String>, ls: List<&2, St.Light>) -> List<&2, String>:
-  match since:
-    case None{}:
-      Ask.paths(ls)
-    case Some{_at}:
+# the lights, in order, of shards holding a record at or after since
+def Ask.recent.go(ls: List<&2, St.Light>, +since: String) -> List<&2, St.Light>:
+  match ls:
+    case Nil{}:
       []
+    case Con{light, rest}:
+      match light:
+        case St.Light{+shard, sized, +path, +last}:
+          Ask.recent.if(Ask.fresh(path, last, shard, since), St.Light{shard, sized, path, last},
+            Ask.recent.go(rest, since))
+
+# the lights a question with this since reads: all of them without one
+def Ask.recent(since: Maybe<&2, String>, ls: List<&2, St.Light>) -> List<&2, St.Light>:
+  match since:
+    case None{}:
+      ls
+    case Some{+at}:
+      Ask.recent.go(ls, at)
 
 # write each source's excerpts to <source>.md under dir
 def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(Unit):
@@ -532,13 +543,12 @@ def Ask.reads(
       IO.pure(Ran, Ran{[], [], [], [], [], Fail{Refusal{1, why}}})
     case None{}:
       do IO<Ran>:
-        +ls : List<&2, St.Light> <- Ask.lights(since, cap, filter)
-        +all : List<&2, S.Shard> = Ask.shards(ls)
-        +ap : List<&2, Nat> = Ask.counts(ls)
-        +ss : List<&2, S.Shard> = F.Filter.recent(since, all)
+        +ls : List<&2, St.Light> <- St.Store.light(cap, filter)
+        +kept : List<&2, St.Light> = Ask.recent(since, ls)
+        +ss : List<&2, S.Shard> = Ask.shards(kept)
         +names : List<&2, Rd.Name> = Ask.names(ss)
-        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.files.of(since, ls), Ask.pool(cfg), names, question)
-        return Ask.ran(reads, all, ap, Ask.hp(since, ap, ss), since, names)
+        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question)
+        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), since, names)
 
 # a result's exit code: its refusal's, else Read.code of its reads
 def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
