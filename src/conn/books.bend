@@ -2,8 +2,9 @@
 # directory <root>/<corpus>/text/, root $EPISTEME_BOOKS or
 # ~/.local/share/canonagents; each <book>.txt there, in name order, is cut
 # at the offsets of its <book>.heads.json (every level), or of its
-# <book>.pages.json when it has no headings, into one record per span,
-# the text before the first cut its own record. IO: the trusted shell.
+# <book>.pages.json when it has no headings, into spans, the text before
+# the first cut its own span; a span is one record, or several when it is
+# long. IO: the trusted shell.
 #
 # Trusted, not proved: `episteme ingest books <corpus>...` reads its cursor
 # with `Store.cursor("books")` (one `<corpus>/<book>.txt` per line), then the
@@ -13,20 +14,29 @@
 # the cursor with that book added. A book is cut at the `offset` of every
 # entry of `<book>.heads.json`, or, when it has none, at every number of
 # `<book>.pages.json`, sorted and each once, keeping those past 0 and inside
-# the text. Each span from one cut to the next, the first from 0, is one
-# record by `Record.make` (none when it has no paragraph): id
-# `book:<corpus>/<book>@<start>`, source `book:<corpus>/<book>`, author
-# `<book>`, ts `<year>-01-01T00:00:00.000Z` when the book id ends in exactly
-# four digits and the ingest time otherwise, and its paragraphs moved by the
+# the text. Each span from one cut to the next, the first from 0, has its
+# paragraphs by `Record.make` (no record when it has none), moved by the
 # span's start with `Record.shift`, so their offsets are code-point offsets
-# into the whole book file. Spans start at distinct offsets, so ids are
-# distinct and never empty, and a book is given once: its records and the
-# cursor that lists it are in one batch.
+# into the whole book file, and cut into the groups of `Para.groups` at
+# `Books.piece` code points. Each group is one record, numbering its
+# paragraphs from 1: a span that stays under that size is one record, and a
+# long stretch with no heading or page inside it is several, where one
+# record as long as the stretch would be stored whole in every shard that
+# holds a piece of it. A record's id is `book:<corpus>/<book>@<start>`,
+# start the span's start for its first group and the offset of the group's
+# first paragraph for a later one, its source `book:<corpus>/<book>`, its
+# author `<book>`, its ts `<year>-01-01T00:00:00.000Z` when the book id ends
+# in exactly four digits and the ingest time otherwise. Spans start at
+# distinct offsets and a later group starts past its span's start and before
+# the next span, so ids are distinct and never empty, and a book is given
+# once: its records and the cursor that lists it are in one batch.
 #
 # Why it is trusted: It reads canon files and the clock, which no law reaches;
-# the paragraph offsets rest on laws/ShiftMovesOffsets.bend. The smoke test
+# the paragraph offsets rest on laws/ShiftMovesOffsets.bend and the groups on
+# laws/GroupsKeepEveryParagraph.bend. The smoke test
 # checks a whole-file offset on the fixture.
 import Base
+import ../para.bend as P
 import ../record.bend as R
 import ../store.bend as St
 import ../ingest.bend as In
@@ -153,29 +163,77 @@ def Books.ts(book: String, now: String) -> String:
   Maybe.default(&2, String,
     Books.year.if(Books.trail(book, "")), now)
 
-# the record of a span, its paragraph offsets moved to whole-book offsets
-def Books.record(+corpus: String, +book: String, +ts: String, span: Span) -> Maybe<&2, R.Record>:
-  match span:
-    case Span{+at, body}:
-      Maybe.map(&2, R.Record, R.Record, rec => R.Record.shift(rec, at),
-        R.Record.make("book:" ++ corpus ++ "/" ++ book ++ "@" ++ U32.show(at),
-          ts, "book:" ++ corpus ++ "/" ++ book, book, "", "", body, ""))
+# the code points of paragraph text a record of a long span is closed at
+def Books.piece() -> Nat:
+  20000n
 
-# the record ahead of rest, when there is one
-def Books.some(got: Maybe<&2, R.Record>, rest: List<&2, R.Record>) -> List<&2, R.Record>:
+# where a group's record starts: the span's start for a span's first
+# group, else the start of the group's first paragraph
+def Books.start(first: Bool, +at: U32, group: List<&2, P.Para>) -> U32:
+  match first:
+    case True{}:
+      at
+    case False{}:
+      match group:
+        case Nil{}:
+          at
+        case Con{para, _rest}:
+          match para:
+            case P.Para{_n, start, _end, _text}:
+              start
+
+# one record per group of a span's paragraphs, in order, each numbering its
+# paragraphs from 1
+def Books.parts(
+  gs: List<&2, List<&2, P.Para>>,
+  first: Bool,
+  +source: String,
+  +book: String,
+  +ts: String,
+  +at: U32
+) -> List<&2, R.Record>:
+  match gs:
+    case Nil{}:
+      []
+    case Con{+group, rest}:
+      R.Record{source ++ "@" ++ U32.show(Books.start(first, at, group)), ts,
+        source, book, "", "", P.Para.number(group, 1), ""}
+        <> Books.parts(rest, False{}, source, book, ts, at)
+
+# the records of a made span: its paragraphs in the groups of Para.groups
+def Books.pieces(
+  got: Maybe<&2, R.Record>,
+  +source: String,
+  +book: String,
+  +ts: String,
+  +at: U32
+) -> List<&2, R.Record>:
   match got:
     case None{}:
-      rest
+      []
     case Some{rec}:
-      rec <> rest
+      match rec:
+        case R.Record{_id, _ts, _source, _author, _thread, _parent, paras, _ptr}:
+          Books.parts(P.Para.groups(paras, Books.piece(), 0n), True{}, source,
+            book, ts, at)
 
-# the records of spans, in order; a span with no paragraph makes none
+# the records of a span, their paragraph offsets moved to whole-book
+# offsets; a span with no paragraph makes none
+def Books.record(+corpus: String, +book: String, +ts: String, span: Span) -> List<&2, R.Record>:
+  match span:
+    case Span{+at, body}:
+      +source = "book:" ++ corpus ++ "/" ++ book
+      Books.pieces(Maybe.map(&2, R.Record, R.Record, rec => R.Record.shift(rec, at),
+        R.Record.make(source ++ "@" ++ U32.show(at), ts, source, book, "", "", body, "")),
+        source, book, ts, at)
+
+# the records of spans, in order
 def Books.records(+corpus: String, +book: String, +ts: String, spans: List<&2, Span>) -> List<&2, R.Record>:
   match spans:
     case Nil{}:
       []
     case Con{span, rest}:
-      Books.some(Books.record(corpus, book, ts, span),
+      List.append(&2, R.Record, Books.record(corpus, book, ts, span),
         Books.records(corpus, book, ts, rest))
 
 # a book's records, from its text and its parsed headings and pages

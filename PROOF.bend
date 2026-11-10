@@ -46,6 +46,7 @@ import ./proofs/GitMoreCountsDropped.bend as PGitMoreCountsDropped
 import ./proofs/GitReadsPastTips.bend as PGitReadsPastTips
 import ./proofs/GitRecordFields.bend as PGitRecordFields
 import ./proofs/GitTimesAreUtc.bend as PGitTimesAreUtc
+import ./proofs/GroupsKeepEveryParagraph.bend as PGroupsKeepEveryParagraph
 import ./proofs/HitsCountRecalled.bend as PHitsCountRecalled
 import ./proofs/HonchoAlonePasses.bend as PHonchoAlonePasses
 import ./proofs/HonchoCursorReadsBack.bend as PHonchoCursorReadsBack
