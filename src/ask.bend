@@ -289,7 +289,7 @@ def Ask.shards(ls: List<&2, St.Light>) -> List<&2, S.Shard>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{shard, _sized, _path, _last}:
+        case St.Light{shard, _sized, _path, _last, _recs}:
           shard <> Ask.shards(rest)
 
 # a light's paragraph count: the one it holds, else its shard's
@@ -307,7 +307,7 @@ def Ask.counts(ls: List<&2, St.Light>) -> List<&2, Nat>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{shard, sized, _path, _last}:
+        case St.Light{shard, sized, _path, _last, _recs}:
           Ask.count(sized, shard) <> Ask.counts(rest)
 
 # the files of lights, in order, "" for a shard that was read
@@ -317,7 +317,7 @@ def Ask.paths(ls: List<&2, St.Light>) -> List<&2, String>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{_shard, _sized, path, _last}:
+        case St.Light{_shard, _sized, path, _last, _recs}:
           path <> Ask.paths(rest)
 
 # whether a light is of a shard holding a record at or after since: an
@@ -344,8 +344,8 @@ def Ask.recent.go(ls: List<&2, St.Light>, +since: String) -> List<&2, St.Light>:
       []
     case Con{light, rest}:
       match light:
-        case St.Light{+shard, sized, +path, +last}:
-          Ask.recent.if(Ask.fresh(path, last, shard, since), St.Light{shard, sized, path, last},
+        case St.Light{+shard, sized, +path, +last, recs}:
+          Ask.recent.if(Ask.fresh(path, last, shard, since), St.Light{shard, sized, path, last, recs},
             Ask.recent.go(rest, since))
 
 # the lights a question with this since reads: all of them without one

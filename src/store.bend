@@ -41,8 +41,9 @@
 # user to run `episteme ingest --reshard`, when the directory holds files but
 # no `tail.json`; `Store.shards` stops the same way on such a directory.
 # After a source's shards `Store.put_shards` writes `sizes` in its
-# directory: a JSON array of `[chars, paras, last]`, one for each frozen
-# shard in number order, `last` the latest `ts` among its records (a frozen
+# directory: a JSON array of `[chars, paras, last, recs]`, one for each
+# frozen shard in number order, `last` the latest `ts` among its records and
+# `recs` how many records start in it (a frozen
 # shard never changes, laws/FreezingIsStable.bend, so neither do these). It appends the sizes of the frozen shards just
 # written when the file held one for every frozen shard before them, and
 # else reads the directory's frozen shards and writes all of theirs, so a
@@ -768,10 +769,25 @@ def Store.put.go(ss: List<&2, S.Shard>, +dir: String, +covered: U32) -> IO(Unit)
         Store.save(dir ++ "/" ++ Store.file(sh), Store.content(sh, covered))
         Store.put.go(rest, dir, covered)
 
-# a frozen shard's size: its code points, its paragraphs, and the latest
-# ts among its records ("" when it holds none)
+# a frozen shard's size: its code points, its paragraphs, the latest ts
+# among its records ("" when it holds none), and how many records start in
+# it (its items from a record's first paragraph)
 type Sz is Data:
-  Sz{chars: U32, paras: U32, last: String}
+  Sz{chars: U32, paras: U32, last: String, recs: U32}
+
+# 1 for an item from its record's first paragraph, else 0
+def Store.start(it: S.Item) -> U32:
+  match it:
+    case S.Item{_rec, from, _upto}:
+      Bool.pick(U32, U32.is_eq(from, 1), 1, 0)
+
+# how many records start among items
+def Store.starts(its: List<&2, S.Item>) -> U32:
+  match its:
+    case Nil{}:
+      0
+    case Con{it, rest}:
+      U32.add(Store.start(it), Store.starts(rest))
 
 # the later of two ts: string order is time order
 def Store.later(+one: String, +two: String) -> String:
@@ -806,36 +822,55 @@ def Store.sizes.of(ss: List<&2, S.Shard>) -> List<&2, Sz>:
       []
     case Con{+sh, rest}:
       match sh:
-        case S.Shard{_n, items, _sources, chars, frozen}:
-          Store.sizes.if(frozen, Sz{chars, U32.from_nat(Store.paras(sh)), Store.last(items, "")},
+        case S.Shard{_n, +items, _sources, chars, frozen}:
+          Store.sizes.if(frozen,
+            Sz{chars, U32.from_nat(Store.paras(sh)), Store.last(items, ""), Store.starts(items)},
             Store.sizes.of(rest))
 
-# sizes as JSON values, each [chars, paras, last]
+# sizes as JSON values, each [chars, paras, last, recs]
 def Store.sizes.json(szs: List<&2, Sz>) -> List<&2, Value.Json>:
   match szs:
     case Nil{}:
       []
     case Con{sz, rest}:
       match sz:
-        case Sz{chars, paras, last}:
-          Json.arr([Json.num(U32.show(chars)), Json.num(U32.show(paras)), Json.str(last)])
-            <> Store.sizes.json(rest)
+        case Sz{chars, paras, last, recs}:
+          Json.arr([Json.num(U32.show(chars)), Json.num(U32.show(paras)), Json.str(last),
+            Json.num(U32.show(recs))]) <> Store.sizes.json(rest)
 
-# a size of its three values, or None when one is missing
-def Store.sz.all(chars: Maybe<&2, U32>, paras: Maybe<&2, U32>, last: Maybe<&2, String>) -> Maybe<&2, Sz>:
-  match chars paras last:
-    case Some{c} Some{p} Some{t}:
-      Some{Sz{c, p, t}}
-    case _ _ _:
+# a size of its four values, or None when one is missing
+def Store.sz.all(
+  chars: Maybe<&2, U32>,
+  paras: Maybe<&2, U32>,
+  last: Maybe<&2, String>,
+  recs: Maybe<&2, U32>
+) -> Maybe<&2, Sz>:
+  match chars paras last recs:
+    case Some{c} Some{p} Some{t} Some{r}:
+      Some{Sz{c, p, t, r}}
+    case _ _ _ _:
       None{}
+
+# a size of the values after its third, or None
+def Store.sz.fourth(
+  first: Value.Json,
+  second: Value.Json,
+  third: Value.Json,
+  rest: List<&2, Value.Json>
+) -> Maybe<&2, Sz>:
+  match rest:
+    case Nil{}:
+      None{}
+    case Con{fourth, _more}:
+      Store.sz.all(Json.as_u32(first), Json.as_u32(second), Json.as_str(third), Json.as_u32(fourth))
 
 # a size of the values after its second, or None
 def Store.sz.third(first: Value.Json, second: Value.Json, rest: List<&2, Value.Json>) -> Maybe<&2, Sz>:
   match rest:
     case Nil{}:
       None{}
-    case Con{third, _more}:
-      Store.sz.all(Json.as_u32(first), Json.as_u32(second), Json.as_str(third))
+    case Con{third, more}:
+      Store.sz.fourth(first, second, third, more)
 
 # a size of the values after its first, or None
 def Store.sz.rest(first: Value.Json, rest: List<&2, Value.Json>) -> Maybe<&2, Sz>:
@@ -845,7 +880,7 @@ def Store.sz.rest(first: Value.Json, rest: List<&2, Value.Json>) -> Maybe<&2, Sz
     case Con{second, more}:
       Store.sz.third(first, second, more)
 
-# a size of the items of [chars, paras, last], or None
+# a size of the items of [chars, paras, last, recs], or None
 def Store.sz.of(got: Maybe<&2, List<&2, Value.Json>>) -> Maybe<&2, Sz>:
   match got:
     case None{}:
@@ -1000,9 +1035,9 @@ def Store.shards(chars: U32, +sels: List<&2, F.Sel>) -> IO(List<&2, S.Shard>):
 # sizes file is not read: shard holds its number, its source, its code
 # points and no items, sized its paragraph count and path its file. A
 # shard that was read has no count and no path. last is an unread shard's
-# latest record ts
+# latest record ts and recs how many records start in it
 type Light is Data:
-  Light{shard: S.Shard, sized: Maybe<&2, Nat>, path: String, last: String}
+  Light{shard: S.Shard, sized: Maybe<&2, Nat>, path: String, last: String, recs: U32}
 
 # shards that were read, as lights
 def Store.light.loaded(ss: List<&2, S.Shard>) -> List<&2, Light>:
@@ -1010,7 +1045,7 @@ def Store.light.loaded(ss: List<&2, S.Shard>) -> List<&2, Light>:
     case Nil{}:
       []
     case Con{sh, rest}:
-      Light{sh, None{}, "", ""} <> Store.light.loaded(rest)
+      Light{sh, None{}, "", "", 0} <> Store.light.loaded(rest)
 
 # the number of a frozen shard's file name <n>.json, or 0
 def Store.shard.num(+name: String) -> U32:
@@ -1019,9 +1054,9 @@ def Store.shard.num(+name: String) -> U32:
 # the light of the frozen shard in the file name, from its size
 def Store.light.one(+name: String, sz: Sz, dir: String, src: String) -> Light:
   match sz:
-    case Sz{chars, paras, last}:
+    case Sz{chars, paras, last, recs}:
       Light{S.Shard{Store.shard.num(name), [], [src], chars, True{}}, Some{U32.to_nat(paras)},
-        dir ++ "/" ++ name, last}
+        dir ++ "/" ++ name, last, recs}
 
 # the lights of the frozen shards in the named files, beside their sizes
 def Store.light.frozen(names: List<&2, String>, szs: List<&2, Sz>, +dir: String, +src: String) -> List<&2, Light>:
@@ -1061,7 +1096,7 @@ def Store.light.pick(
     case True{}:
       do IO<List<&2, Light>>:
         tail : S.Shard <- Store.shard.named(True{}, dir ++ "/tail.json")
-        return List.append(&2, Light, Store.light.frozen(frozen, szs, dir, src), [Light{tail, None{}, "", ""}])
+        return List.append(&2, Light, Store.light.frozen(frozen, szs, dir, src), [Light{tail, None{}, "", "", 0}])
     case False{}:
       do IO<List<&2, Light>>:
         ss : List<&2, S.Shard> <- Store.shards.go(files, dir)
