@@ -51,12 +51,14 @@ makes a copy off the GPU ~30% faster.
 
 Under a cgroup memory.high (a systemd unit's MemoryHigh=) the RAM tier is
 cut to that limit less HEADROOM_GB: a process over memory.high is throttled
-until it barely answers (a 24 GB tier under a 27 GiB limit stalled the
+until it barely answers, and it also evicts whenever the process's resident
+memory is within MARGIN_GB of the limit, since what the process holds beyond
+the tier varies (a 24 GB tier under a 27 GiB limit stalled the
 reader once two large sources were loaded, 2026-11-10: the process held
 about 6 GB beyond its tier).
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -74,6 +76,9 @@ SHARD_BUDGET = float(os.environ.get("SHARD_BUDGET", "120"))
 CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
 HEADROOM = float(os.environ.get("HEADROOM_GB", "8")) * 1e9
+MARGIN = float(os.environ.get("MARGIN_GB", "2")) * 1e9
+HIGH = None  # this process's memory.high in bytes, set at startup
+PAGE = os.sysconf("SC_PAGE_SIZE")
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
@@ -121,6 +126,18 @@ def under(ram, high, headroom):
     for everything else the process holds (the weights' host side, Python,
     term counts, states on their way to disk)"""
     return ram if high is None else max(0.0, min(ram, high - headroom))
+
+
+def resident():
+    """this process's resident bytes"""
+    return int(open("/proc/self/statm").read().split()[1]) * PAGE
+
+
+def tight():
+    """whether the process is within MARGIN of its memory.high: what it
+    holds beyond the RAM tier is not constant (it was 6 GB one day and 8 GB
+    under other sources), so the tier also gives way to what is measured"""
+    return HIGH is not None and resident() > HIGH - MARGIN
 
 
 def stem(w):
@@ -247,7 +264,7 @@ class States:
         victim: the RAM tier is spent on states the GPU lacks"""
         self.ram[k] = (st, size)
         self.ram_b += size
-        while self.ram_b > RAM_BYTES and self.ram:
+        while (self.ram_b > RAM_BYTES or tight()) and len(self.ram) > 1:
             k2 = next((x for x in self.ram if x in self.gpu and x != k), None)
             (_, s2) = self.ram.pop(k2 if k2 is not None else self.victim(self.ram, keep))
             self.ram_b -= s2
@@ -255,7 +272,7 @@ class States:
     def spare(self, k, st, size):
         """a host copy of a state going to the GPU kept in RAM, if RAM has the
         room without evicting: its later eviction from the GPU then copies nothing"""
-        if self.ram_b + size <= RAM_BYTES:
+        if self.ram_b + size <= RAM_BYTES and not tight():
             self.ram[k] = (st, size)
             self.ram_b += size
 
@@ -503,7 +520,8 @@ def warm():
 
 
 if __name__ == "__main__":
-    RAM_BYTES = under(RAM_BYTES, memory_high(), HEADROOM)
+    HIGH = memory_high()
+    RAM_BYTES = under(RAM_BYTES, HIGH, HEADROOM)
     warm()
     print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB" % (PORT, RAM_BYTES / 1e9), flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
