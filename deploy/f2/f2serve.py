@@ -45,8 +45,14 @@ MALLOC_MMAP_THRESHOLD_=1048576 returns freed host states to the OS, and
 GLIBC_TUNABLES=glibc.malloc.hugetlb=1 backs them with huge pages, which
 makes a copy off the GPU ~30% faster.
 
+Under a cgroup memory.high (a systemd unit's MemoryHigh=) the RAM tier is
+cut to that limit less HEADROOM_GB: a process over memory.high is throttled
+until it barely answers (a 24 GB tier under a 27 GiB limit stalled the
+reader once two large sources were loaded, 2026-11-10: the process held
+about 6 GB beyond its tier).
+
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -63,6 +69,7 @@ BUDGET = float(os.environ.get("BUDGET", "4000"))
 SHARD_BUDGET = float(os.environ.get("SHARD_BUDGET", "120"))
 CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
+HEADROOM = float(os.environ.get("HEADROOM_GB", "8")) * 1e9
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
@@ -71,6 +78,25 @@ NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.25"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
+
+
+def memory_high():
+    """this process's cgroup memory.high in bytes, or None when there is no
+    limit or no cgroup v2 file to read"""
+    try:
+        rel = open("/proc/self/cgroup").read().strip().rsplit("::", 1)[1]
+        text = open("/sys/fs/cgroup" + rel + "/memory.high").read().strip()
+        return None if text == "max" else float(text)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def under(ram, high, headroom):
+    """the RAM tier that stays under a memory.high: above it the kernel
+    throttles the process until it barely runs, so the tier leaves headroom
+    for everything else the process holds (the weights' host side, Python,
+    term counts, states on their way to disk)"""
+    return ram if high is None else max(0.0, min(ram, high - headroom))
 
 
 def stem(w):
@@ -455,6 +481,7 @@ def warm():
 
 
 if __name__ == "__main__":
+    RAM_BYTES = under(RAM_BYTES, memory_high(), HEADROOM)
     warm()
-    print("f2 reader on 127.0.0.1:%d" % PORT, flush=True)
+    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB" % (PORT, RAM_BYTES / 1e9), flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
