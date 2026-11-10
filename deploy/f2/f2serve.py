@@ -24,7 +24,11 @@ RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
 A run scores the shards whose state is on the GPU first, then those in RAM,
 then the rest, which a reader thread loads from disk up to AHEAD ahead,
 BATCH shards to a tail pass (model.scores_batch); eviction takes the least
-recently used state the run does not read later. A run bigger than the
+recently used state the run does not read later. The GPU lock is held for
+one batch at a time, so a second question's batches come between a long
+run's (a first question over a large source prefills for minutes) and
+neither waits for the other to end; each run still scores every shard it
+names. A run bigger than the
 tiers so hits what they hold, where a fixed order under plain LRU evicts
 each state just before it is needed and never hits. RAM keeps the host copy
 of a state it hands to the GPU, and of one read from disk while it has
@@ -77,7 +81,27 @@ BATCH = int(os.environ.get("BATCH", "4"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.25"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
-GPU = threading.Lock()
+GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
+META = threading.RLock()  # TERMS and RUNS
+WANT = [0]  # runs waiting for or holding the GPU lock
+
+
+class Turn:
+    """the GPU lock for one batch. A run that sees another waiting when it
+    lets go sleeps a moment, so the lock goes round instead of back to it"""
+
+    def __enter__(self):
+        with META:
+            WANT[0] += 1
+        GPU.acquire()
+
+    def __exit__(self, *exc):
+        GPU.release()
+        with META:
+            WANT[0] -= 1
+            others = WANT[0] > 0
+        if others:
+            time.sleep(0.002)
 
 
 def memory_high():
@@ -284,13 +308,16 @@ TERMS = collections.OrderedDict()  # shard key -> each paragraph's term counts
 def terms(k, sh):
     """the term counts of a shard's paragraphs, kept for the TERMS_MAX
     shards used last: a question re-reads the shards the last one did"""
-    if k in TERMS:
-        TERMS.move_to_end(k)
-        return TERMS[k]
-    TERMS[k] = [collections.Counter(words(sh["text"][x:y])) for x, y, _ in sh["spans"]]
-    while len(TERMS) > TERMS_MAX:
-        TERMS.popitem(last=False)
-    return TERMS[k]
+    with META:
+        if k in TERMS:
+            TERMS.move_to_end(k)
+            return TERMS[k]
+    counts = [collections.Counter(words(sh["text"][x:y])) for x, y, _ in sh["spans"]]
+    with META:
+        TERMS[k] = counts
+        while len(TERMS) > TERMS_MAX:
+            TERMS.popitem(last=False)
+    return counts
 
 
 class Run:
@@ -322,32 +349,26 @@ class Run:
         the tiers then hits what they hold, where a fixed order under LRU
         evicts each state just before it is needed and never hits."""
         tier = lambda k: 0 if k in STATES.gpu else 1 if k in STATES.ram else 2
-        order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
-        cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
-                if tier(k) == 2 and os.path.exists(STATES.path(k))]
+        with Turn():
+            order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
+            cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
+                    if tier(k) == 2 and os.path.exists(STATES.path(k))]
         loading = {}  # the next AHEAD cold states, read from disk while the GPU works
         left = collections.Counter(self.keys)
-        got, batch = {}, []
-
-        def flush():
-            if not batch:
-                return
-            for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
-                got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
-            batch.clear()
-
-        for i in order:
-            while cold and len(loading) < AHEAD:
-                k = cold.pop(0)
-                loading[k] = STATES.prefetch(k)
-            sh = self.shards[i]
-            left[self.keys[i]] -= 1
-            keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
-            state, null = STATES.get(self.keys[i], sh, keep, loading.pop(self.keys[i], None))
-            batch.append((i, self.keys[i], state, null))
-            if len(batch) == BATCH:
-                flush()
-        flush()
+        got = {}
+        for at in range(0, len(order), BATCH):
+            with Turn():  # one batch: another run's batch may come between two of this one's
+                batch = []
+                for i in order[at:at + BATCH]:
+                    while cold and len(loading) < AHEAD:
+                        k = cold.pop(0)
+                        loading[k] = STATES.prefetch(k)
+                    left[self.keys[i]] -= 1
+                    keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
+                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None))
+                    batch.append((i, self.keys[i], state, null))
+                for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
+                    got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
         return [x for i in range(len(self.shards)) for x in got[i]]
 
     def spread(self, fused):
@@ -387,37 +408,38 @@ RUNS = collections.OrderedDict()  # question -> ({shard key: label numbers}, {(s
 
 def notice(question, names):
     """rank the run's shards; answers how many of the names the store holds"""
-    with GPU:
+    with META:
         found = [((nm["source"], int(nm["n"])), STORE.shard(nm["source"], int(nm["n"]))) for nm in names]
-        found = [(nm, s) for nm, s in found if s]
-        shards = [s for _, s in found]
-        RUNS[question] = (Run(shards).pick(question, BUDGET) if shards else {},
-                          {nm: key(s["text"]) for nm, s in found})
+    found = [(nm, s) for nm, s in found if s]
+    shards = [s for _, s in found]
+    picks = Run(shards).pick(question, BUDGET) if shards else {}
+    with META:
+        RUNS[question] = (picks, {nm: key(s["text"]) for nm, s in found})
         while len(RUNS) > 64:
             RUNS.popitem(last=False)
-        return len(shards)
+    return len(shards)
 
 
 def answer(text, question):
     """a shard's labels by its text: its share of the run, else ranked alone"""
-    with GPU:
-        k = key(text)
+    k = key(text)
+    with META:
         picks, _ = RUNS.get(question, ({}, {}))
-        if k in picks:
-            return picks[k]
-        return Run([parse(text)]).pick(question, SHARD_BUDGET)[k]
+    if k in picks:
+        return picks[k]
+    return Run([parse(text)]).pick(question, SHARD_BUDGET)[k]
 
 
 def answer_named(source, n, question):
     """a shard's labels by its own name: its share of the run, else ranked
     alone from the store; None when the store has no such shard"""
-    with GPU:
+    with META:
         picks, names = RUNS.get(question, ({}, {}))
         k = names.get((source, n))
         if k in picks:
             return picks[k]
         sh = STORE.shard(source, n)
-        return None if sh is None else Run([sh]).pick(question, SHARD_BUDGET)[key(sh["text"])]
+    return None if sh is None else Run([sh]).pick(question, SHARD_BUDGET)[key(sh["text"])]
 
 
 class Handler(BaseHTTPRequestHandler):
