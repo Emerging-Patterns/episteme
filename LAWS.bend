@@ -82,6 +82,7 @@ import ./laws/GitMoreCountsDropped.bend as GitMoreCountsDropped
 import ./laws/GitReadsPastTips.bend as GitReadsPastTips
 import ./laws/GitRecordFields.bend as GitRecordFields
 import ./laws/GitTimesAreUtc.bend as GitTimesAreUtc
+import ./laws/GroupsKeepEveryParagraph.bend as GroupsKeepEveryParagraph
 import ./laws/HitsCountRecalled.bend as HitsCountRecalled
 import ./laws/HonchoAlonePasses.bend as HonchoAlonePasses
 import ./laws/HonchoCursorReadsBack.bend as HonchoCursorReadsBack

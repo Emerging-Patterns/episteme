@@ -236,3 +236,43 @@ def Para.split(+text: String) -> List<&2, Para>:
   +cap = U32.to_nat(Para.max())
   Para.number(Para.go(text, cap,
     Scan{0, Shut{}, Line{text, 0, 0n, cap, True{}}}), 1)
+
+# the code points of a paragraph's text
+def Para.size(para: Para) -> Nat:
+  match para:
+    case Para{_n, _start, _end, text}:
+      String.length(text)
+
+# para ahead of the groups gs: a group of its own when new or when there is
+# no group yet, else the first of the first group
+def Para.join(new: Bool, para: Para, gs: List<&2, List<&2, Para>>) -> List<&2, List<&2, Para>>:
+  match new:
+    case True{}:
+      [para] <> gs
+    case False{}:
+      match gs:
+        case Nil{}:
+          [[para]]
+        case Con{group, rest}:
+          (para <> group) <> rest
+
+# what the open group holds after a paragraph brought it to size: nothing
+# when that closed it
+def Para.held(full: Bool, size: Nat) -> Nat:
+  match full:
+    case True{}:
+      0n
+    case False{}:
+      size
+
+# ps in consecutive groups, in order: a group is closed after the paragraph
+# that brings its texts to cap code points or more. used is what the open
+# group holds so far
+def Para.groups(ps: List<&2, Para>, +cap: Nat, +used: Nat) -> List<&2, List<&2, Para>>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{+para, rest}:
+      +size = Nat.add(used, Para.size(para))
+      +full = Nat.is_le(cap, size)
+      Para.join(full, para, Para.groups(rest, cap, Para.held(full, size)))
