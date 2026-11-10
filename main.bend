@@ -169,6 +169,36 @@ def stat.shards(ss: List<&2, S.Shard>, sts: List<&2, Stat>) -> List<&2, Stat>:
         case S.Shard{_n, items, sources, _chars, _frozen}:
           stat.shards(rest, stat.sources(sources, stat.items(items, sts)))
 
+# the first source of a shard's sources, "" when it has none
+def stat.source(srcs: List<&2, String>) -> String:
+  match srcs:
+    case Nil{}:
+      ""
+    case Con{src, _rest}:
+      src
+
+# the counts of one light added: a shard that was read by its items, an
+# unread one (a frozen shard of one source) by what its source's sizes file
+# holds
+def stat.light(sized: Maybe<&2, Nat>, +shard: S.Shard, recs: U32, sts: List<&2, Stat>) -> List<&2, Stat>:
+  match sized:
+    case None{}:
+      stat.shards([shard], sts)
+    case Some{paras}:
+      match shard:
+        case S.Shard{_n, _items, sources, _chars, _frozen}:
+          stat.put(sts, stat.source(sources), recs, U32.from_nat(paras), 1)
+
+# the counts of lights added
+def stat.lights(ls: List<&2, St.Light>, sts: List<&2, Stat>) -> List<&2, Stat>:
+  match ls:
+    case Nil{}:
+      sts
+    case Con{light, rest}:
+      match light:
+        case St.Light{shard, sized, _path, _last, recs}:
+          stat.lights(rest, stat.light(sized, shard, recs, sts))
+
 # the table of sources when the shards are not behind the log, else the
 # refusal
 def sources.of(behind: Maybe<&2, String>, +cap: U32) -> IO(Result<&2, &2, String, String>):
@@ -177,8 +207,8 @@ def sources.of(behind: Maybe<&2, String>, +cap: U32) -> IO(Result<&2, &2, String
       IO.pure(Result<&2, &2, String, String>, Fail{why})
     case None{}:
       do IO<Result<&2, &2, String, String>>:
-        ss : List<&2, S.Shard> <- St.Store.shards(cap, St.Store.every())
-        return Done{"source records paragraphs shards\n" ++ stat.lines(stat.shards(ss, []))}
+        ls : List<&2, St.Light> <- St.Store.light(cap, St.Store.every())
+        return Done{"source records paragraphs shards\n" ++ stat.lines(stat.lights(ls, []))}
 
 # each source with its records, paragraphs and shards, or the refusal when
 # the shards are behind the log
