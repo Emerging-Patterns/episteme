@@ -61,7 +61,7 @@ env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
-import collections, copy, hashlib, json, math, os, re, sys, threading, time
+import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -133,11 +133,30 @@ def resident():
     return int(open("/proc/self/statm").read().split()[1]) * PAGE
 
 
+TRIMMED = [0.0]  # when freed memory was last handed back to the system
+
+
+def trim():
+    """hand the allocator's freed memory back to the system, at most once
+    every 5 s: a state's small tensors (its linear-attention states, under
+    the mmap threshold) are freed into malloc's arenas, which keep them, so
+    the process grew by gigabytes as states came and went"""
+    if time.time() - TRIMMED[0] > 5:
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
+        TRIMMED[0] = time.time()
+
+
 def tight():
-    """whether the process is within MARGIN of its memory.high: what it
-    holds beyond the RAM tier is not constant (it was 6 GB one day and 8 GB
-    under other sources), so the tier also gives way to what is measured"""
-    return HIGH is not None and resident() > HIGH - MARGIN
+    """whether the process is within MARGIN of its memory.high, after
+    handing freed memory back: what it holds beyond the RAM tier is not
+    constant, so the tier also gives way to what is measured"""
+    if HIGH is None or resident() <= HIGH - MARGIN:
+        return False
+    trim()
+    return resident() > HIGH - MARGIN
 
 
 def stem(w):
