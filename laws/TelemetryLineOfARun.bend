@@ -16,6 +16,11 @@
 #
 # A shard with no read is not ok, with ms and labels 0. The example pins
 # the field names and their order.
+#
+# The paragraph counts are given to `Tele.line.with` beside the shards, so
+# that a frozen shard the question did not read from its file is listed with
+# the count its source's sizes file holds (src/store.bend); `Tele.line` is
+# that line with every count taken from the shard itself.
 import Base
 import ../src/para.bend as P
 import ../src/record.bend as R
@@ -46,4 +51,25 @@ law tele_example:
       [tele.shard(3)], [tele.shard(1)], [Rd.Name{"book:x/y", 3}], [tele.read()],
       [E.Ex{tele.rec(), [P.Para{2, 12, 15, "abc"}]}])
     == "{\"ts\":\"2026-11-03T00:00:00.000Z\",\"via\":\"ask\",\"question\":\"q?\",\"filter\":[\"book:x/\"],\"since\":null,\"ms\":9,\"code\":0,\"refused\":\"\",\"sources\":[{\"source\":\"book:x/y\",\"shards\":1,\"chars\":40,\"paras\":2}],\"shards\":[{\"source\":\"book:x/y\",\"n\":3,\"chars\":40,\"paras\":2,\"ok\":true,\"ms\":7,\"labels\":1,\"out_paras\":1,\"out_chars\":3}],\"in_chars\":40,\"excerpts\":1,\"out_chars\":3}"
+    : String}
+
+# LAW: Tele.line is Tele.line.with given each shard's own paragraph count,
+# for the shards the filter hits and for those the run read
+law tele_counts:
+  for ts: String
+  for via: String
+  for question: String
+  for filter: List<&2, F.Sel>
+  for since: Maybe<&2, String>
+  for ms: Nat
+  for code: U32
+  for why: String
+  for +all: List<&2, S.Shard>
+  for +hits: List<&2, S.Shard>
+  for names: List<&2, Rd.Name>
+  for +rs: List<&2, Rd.Read>
+  for +xs: List<&2, E.Ex>
+  {T.Tele.line(ts, via, question, filter, since, ms, code, why, all, hits, names, rs, xs)
+    == T.Tele.line.with(ts, via, question, filter, since, ms, code, why, all, T.Tele.counts(all),
+      hits, T.Tele.counts(hits), names, rs, xs)
     : String}

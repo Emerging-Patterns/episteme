@@ -79,16 +79,29 @@ def Tele.add(+src: String, +chars: U32, +paras: Nat, szs: List<&2, Size>) -> Lis
         case Size{+tsrc, shs, cs, ps}:
           Tele.add.if(String.eq(src, tsrc), src, chars, paras, Size{tsrc, shs, cs, ps}, rest)
 
-# each source's size, in the shards' order; a source's shards come
-# together, as Store.shards answers them
-def Tele.sizes(ss: List<&2, S.Shard>) -> List<&2, Size>:
+# how many paragraphs each shard holds, in order
+def Tele.counts(ss: List<&2, S.Shard>) -> List<&2, Nat>:
   match ss:
     case Nil{}:
       []
-    case Con{+sh, rest}:
-      match sh:
-        case S.Shard{_n, _items, sources, chars, _frozen}:
-          Tele.add(Tele.source(sources), chars, Rd.Read.paras(sh), Tele.sizes(rest))
+    case Con{sh, rest}:
+      Rd.Read.paras(sh) <> Tele.counts(rest)
+
+# a shard of paras paragraphs added to the sizes szs of the shards after it
+def Tele.put(sh: S.Shard, +paras: Nat, szs: List<&2, Size>) -> List<&2, Size>:
+  match sh:
+    case S.Shard{_n, _items, sources, chars, _frozen}:
+      Tele.add(Tele.source(sources), chars, paras, szs)
+
+# each source's size, in the shards' order, the shards beside their
+# paragraph counts ps; a source's shards come together, as Store.shards
+# answers them
+def Tele.sizes(ss: List<&2, S.Shard>, ps: List<&2, Nat>) -> List<&2, Size>:
+  match ss ps:
+    case Con{sh, rest} Con{paras, more}:
+      Tele.put(sh, paras, Tele.sizes(rest, more))
+    case _ _:
+      []
 
 # a size as JSON
 def Tele.size(sz: Size) -> Value.Json:
@@ -137,28 +150,34 @@ def Tele.chars.of(sh: S.Shard) -> U32:
       chars
 
 # Tele.shard of the shard named source and n
-def Tele.shard.at(source: String, num: U32, +sh: S.Shard, +rs: List<&2, Rd.Read>) -> Value.Json:
+def Tele.shard.at(source: String, num: U32, +sh: S.Shard, paras: Nat, +rs: List<&2, Rd.Read>) -> Value.Json:
   +got = Rd.Read.find(Rd.Read.n(sh), rs)
   name : List<&1, String & Value.Json> = [("source", Json.str(source)), ("n", Tele.u32(num)),
-    ("chars", Tele.u32(Tele.chars.of(sh))), ("paras", Tele.nat(Rd.Read.paras(sh)))]
+    ("chars", Tele.u32(Tele.chars.of(sh))), ("paras", Tele.nat(paras))]
   Json.obj(List.append(&1, String & Value.Json, name,
     List.append(&1, String & Value.Json, Tele.read(got),
       Tele.out(E.Excerpt.resolve(sh, Rd.Read.labels(got))))))
 
 # a shard of the run as JSON: its own name, what went in (its code points
-# and paragraphs), its read, and what came out (the paragraphs its labels
-# kept and their code points)
-def Tele.shard(+sh: S.Shard, nm: Rd.Name, +rs: List<&2, Rd.Read>) -> Value.Json:
+# and its paragraph count paras), its read, and what came out (the
+# paragraphs its labels kept and their code points)
+def Tele.shard(+sh: S.Shard, paras: Nat, nm: Rd.Name, +rs: List<&2, Rd.Read>) -> Value.Json:
   match nm:
     case Rd.Name{source, num}:
-      Tele.shard.at(source, num, sh, rs)
+      Tele.shard.at(source, num, sh, paras, rs)
 
-# the run's shards as JSON, beside their own names, in run order
-def Tele.shards(hits: List<&2, S.Shard>, names: List<&2, Rd.Name>, +rs: List<&2, Rd.Read>) -> List<&2, Value.Json>:
-  match hits names:
-    case Con{sh, more} Con{nm, rest}:
-      Tele.shard(sh, nm, rs) <> Tele.shards(more, rest, rs)
-    case _ _:
+# the run's shards as JSON, beside their paragraph counts and their own
+# names, in run order
+def Tele.shards(
+  hits: List<&2, S.Shard>,
+  ps: List<&2, Nat>,
+  names: List<&2, Rd.Name>,
+  +rs: List<&2, Rd.Read>
+) -> List<&2, Value.Json>:
+  match hits ps names:
+    case Con{sh, more} Con{paras, later} Con{nm, rest}:
+      Tele.shard(sh, paras, nm, rs) <> Tele.shards(more, later, rest, rs)
+    case _ _ _:
       []
 
 # the code points of shards
@@ -174,10 +193,13 @@ def Tele.chars(ss: List<&2, S.Shard>) -> Nat:
 # a question's telemetry line: when it was asked and by which command
 # (via), the question, its filter and since, its milliseconds, its exit
 # code and refusal ("" when it ran), the size of every source the filter
-# hits (all, before the since), each shard the run read (hits, numbered
-# for the run, beside names, with reads rs), and the run's totals: code
-# points in, excerpts and code points out
-def Tele.line(
+# hits (all, before the since, beside their paragraph counts ap), each
+# shard the run read (hits, numbered for the run, beside their paragraph
+# counts hp and names, with reads rs), and the run's totals: code points
+# in, excerpts and code points out. The counts are given, not counted, so
+# a shard the question did not load is listed with the count its source's
+# size index holds
+def Tele.line.with(
   ts: String,
   via: String,
   question: String,
@@ -187,7 +209,9 @@ def Tele.line(
   code: U32,
   why: String,
   all: List<&2, S.Shard>,
+  ap: List<&2, Nat>,
   +hits: List<&2, S.Shard>,
+  hp: List<&2, Nat>,
   names: List<&2, Rd.Name>,
   +rs: List<&2, Rd.Read>,
   +xs: List<&2, E.Ex>
@@ -196,8 +220,27 @@ def Tele.line(
     ("question", Json.str(question)), ("filter", Json.arr(Tele.sels(filter))),
     ("since", Tele.since(since)), ("ms", Tele.nat(ms)), ("code", Tele.u32(code)),
     ("refused", Json.str(why)),
-    ("sources", Json.arr(Tele.size.all(Tele.sizes(all)))),
-    ("shards", Json.arr(Tele.shards(hits, names, rs))),
+    ("sources", Json.arr(Tele.size.all(Tele.sizes(all, ap)))),
+    ("shards", Json.arr(Tele.shards(hits, hp, names, rs))),
     ("in_chars", Tele.nat(Tele.chars(hits))),
     ("excerpts", Tele.nat(List.length(&2, E.Ex, xs))),
     ("out_chars", Tele.nat(Sc.Score.chars(xs)))]))
+
+# Tele.line.with, each shard's paragraphs counted from the shard
+def Tele.line(
+  ts: String,
+  via: String,
+  question: String,
+  filter: List<&2, F.Sel>,
+  since: Maybe<&2, String>,
+  ms: Nat,
+  code: U32,
+  why: String,
+  +all: List<&2, S.Shard>,
+  +hits: List<&2, S.Shard>,
+  names: List<&2, Rd.Name>,
+  +rs: List<&2, Rd.Read>,
+  +xs: List<&2, E.Ex>
+) -> String:
+  Tele.line.with(ts, via, question, filter, since, ms, code, why, all, Tele.counts(all),
+    hits, Tele.counts(hits), names, rs, xs)
