@@ -14,7 +14,9 @@ with SHARD_BUDGET.
 
 The ranking is reciprocal-rank fusion (k = 10) of BM25 (k1 1.2, b 0.75,
 lowercase words, light suffix stemming) and the attention score minus the
-same score for the question "N/A", over sqrt(paragraph characters).
+same score for the question "N/A", over sqrt(paragraph characters). Each
+paragraph's fused score then gains NEIGHBOUR times the better of its two
+neighbours' in the shard.
 
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
@@ -44,7 +46,7 @@ GLIBC_TUNABLES=glibc.malloc.hugetlb=1 backs them with huge pages, which
 makes a copy off the GPU ~30% faster.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, hashlib, json, math, os, re, sys, threading, time
@@ -65,6 +67,7 @@ SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
 BATCH = int(os.environ.get("BATCH", "4"))
+NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.25"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()
@@ -321,6 +324,17 @@ class Run:
         flush()
         return [x for i in range(len(self.shards)) for x in got[i]]
 
+    def spread(self, fused):
+        """each paragraph's fused score plus NEIGHBOUR times the better of
+        its two neighbours' in the same shard: a paragraph next to a strong
+        one is likelier to bear on the question than one that stands alone"""
+        out = list(fused)
+        for i, p in enumerate(self.paras):
+            near = [fused[j] for j in (i - 1, i + 1) if 0 <= j < len(fused) and self.paras[j][0] == p[0]]
+            if near:
+                out[i] += NEIGHBOUR * max(near)
+        return out
+
     def pick(self, q, budget):
         """shard key -> label numbers, best first until the budget"""
         def ranks(s):
@@ -329,6 +343,7 @@ class Run:
                 r[i] = k
             return r
         fused = [1 / (10 + x) + 1 / (10 + y) for x, y in zip(ranks(self.bm25(q)), ranks(self.attention(q)))]
+        fused = self.spread(fused)
         out, used = {k: [] for k in self.keys}, 0.0
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
             cost = self.paras[i][2] / CHARS_PER_TOKEN
