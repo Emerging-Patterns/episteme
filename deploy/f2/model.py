@@ -9,7 +9,9 @@ the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens."""
 import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb, repeat_kv
+from transformers.cache_utils import DynamicLayer
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 import store
 
 DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
@@ -24,6 +26,25 @@ VERSION = "12|11:2.0|%s|v4" % DIR  # what a kept state depends on
 tok = AutoTokenizer.from_pretrained(DIR)
 
 
+def grouped(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
+    """the stock eager attention without its copies: that repeats each
+    key-value head's keys and values once for every query head that shares
+    them (four here), which for a cached shard is most of the bytes a pass
+    moves. The query heads of a group are instead the rows of one product
+    with the group's keys, and their weights the rows of one with its values"""
+    b, heads, t, d = query.shape
+    kv = heads // module.num_key_value_groups
+    w = torch.matmul(query.reshape(b, kv, -1, d), key.transpose(2, 3)).view(b, heads, t, -1) * scaling
+    if attention_mask is not None:
+        w = w + attention_mask
+    w = torch.nn.functional.softmax(w, dim=-1, dtype=torch.float32).to(query.dtype)
+    out = torch.matmul(w.view(b, kv, -1, w.shape[-1]), value).view(b, heads, t, d)
+    return out.transpose(1, 2).contiguous(), w
+
+
+ALL_ATTENTION_FUNCTIONS.register("grouped", grouped)
+
+
 class Zero(torch.nn.Module):
     """layer 11's MLP: its output feeds nothing that is read"""
 
@@ -33,14 +54,14 @@ class Zero(torch.nn.Module):
 
 def last(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
     """layer 11's attention, cut to what scores reads: its keys go to the
-    cache with no values, and when a tail is read (eager) its attention
+    cache with no values, and when a tail is read (grouped) its attention
     weights are those of the stock eager path; the output is zeros, since
     no layer follows and the logits are never read"""
     shape = (*hidden_states.shape[:-1], -1, self.head_dim)
     key = self.k_norm(self.k_proj(hidden_states).view(shape)).transpose(1, 2)
     cos, sin = position_embeddings
     weights = None
-    if self.config._attn_implementation == "eager":
+    if self.config._attn_implementation != "sdpa":
         q, _gate = torch.chunk(self.q_proj(hidden_states).view(*shape[:-1], self.head_dim * 2), 2, dim=-1)
         q = self.q_norm(q.view(shape)).transpose(1, 2)
         q, key = apply_rotary_pos_emb(q, key, cos, sin)
@@ -49,7 +70,9 @@ def last(self, hidden_states, position_embeddings, attention_mask, past_key_valu
     if past_key_values is not None:
         key = past_key_values.update(key, key[..., :0], self.layer_idx)[0]
     if q is not None:
-        weights = torch.matmul(q, repeat_kv(key, self.num_key_value_groups).transpose(2, 3)) * self.scaling
+        b, heads, t, d = q.shape
+        kv = heads // self.num_key_value_groups  # as grouped: no copy of the keys per query head
+        weights = torch.matmul(q.reshape(b, kv, -1, d), key.transpose(2, 3)).view(b, heads, t, -1) * self.scaling
         if attention_mask is not None:
             weights = weights + attention_mask
         weights = torch.nn.functional.softmax(weights, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -116,20 +139,6 @@ def pack(cache):
     return cache
 
 
-def unpack(cache):
-    """a bf16 copy of a packed cache, for one tail pass"""
-    c = copy.deepcopy(cache)
-    for layer in c.layers:
-        states = getattr(layer, "recurrent_states", None)
-        if isinstance(states, dict):
-            layer.recurrent_states = {i: t.float() if torch.is_tensor(t) else t for i, t in states.items()}
-        for name in ("keys", "values"):
-            sc = vars(layer).pop(name + "_scale", None)
-            if sc is not None:
-                setattr(layer, name, (getattr(layer, name).float() * sc).to(torch.bfloat16))
-    return c
-
-
 @torch.no_grad()
 def prefill(shard):
     """a shard's state: (prompt ids, cache, paragraph token spans, question template)"""
@@ -164,30 +173,30 @@ def question_tail(tail, question):
     return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
 
 
-@torch.no_grad()
-def scores(state, question):
-    """per paragraph: the mean over the question's tokens of the attention
-    heads 3 and 4 of layer 11 pay to its line, summed over the two heads"""
-    ids, cache, spans, tail = state
-    emb, nq = question_tail(tail, question)
-    attention("eager")
-    o = M(inputs_embeds=emb, past_key_values=unpack(cache),
-          use_cache=True, output_attentions=True, logits_to_keep=1)
-    attention("sdpa")
-    A = [x for x in o.attentions if x is not None][AT][0].float()  # heads, tail tokens, all tokens
-    cum = torch.nn.functional.pad(A[:, :, :len(ids)].cumsum(-1), (1, 0))
-    cs = torch.tensor([s for s, e in spans])
-    ce = torch.tensor([e for s, e in spans])
-    mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()  # skip the role tokens
-    return mass[HEADS[0]] + mass[HEADS[1]]
+class Roomy(DynamicLayer):
+    """a full-attention layer of a stacked cache: its keys and values sit in
+    buffers with room after them for the tail's, which update writes there.
+    The stock layer appends by copying the whole cache, once a layer, for a
+    tail of some twenty tokens; that copying was the largest part of a pass"""
+
+    def update(self, key_states, value_states, *args, **kwargs):
+        end = self.used + key_states.shape[-2]
+        self.keys[..., self.used:end, :] = key_states
+        self.values[..., self.used:end, :] = value_states
+        self.used = end
+        return self.keys[..., :end, :], self.values[..., :end, :]
+
+    def get_seq_length(self):
+        return self.used
 
 
-def stack(caches):
+def stack(caches, room):
     """one bf16 cache for several shards' packed caches, the caches left as
     they are: the linear-attention states stacked, the full-attention keys and
-    values dequantized into one buffer right-padded with zeros to the longest
-    shard. The layers are shallow copies with fresh tensors, so the tail pass
-    that grows them touches no shard's own state"""
+    values dequantized into one buffer, right-padded with zeros to the longest
+    shard and then by room more tokens for the tail (Roomy). The layers are
+    fresh objects with fresh tensors, so the tail pass touches no shard's own
+    state"""
     out = copy.copy(caches[0])
     out.layers = [copy.copy(layer) for layer in caches[0].layers]
     top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
@@ -203,13 +212,17 @@ def stack(caches):
                             fresh[i] = fresh[i].float()  # kept in bf16 (pack)
                 setattr(layer, d, fresh)
         else:
+            layer = out.layers[li] = Roomy()
+            layer.is_initialized, layer.dtype, layer.used = True, torch.bfloat16, top
             for name in ("keys", "values"):
-                vars(layer).pop(name + "_scale", None)
                 x0 = getattr(rows[0], name)
-                buf = torch.zeros((len(rows), *x0.shape[1:-2], top, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
+                layer.device = x0.device
+                buf = torch.zeros((len(rows), *x0.shape[1:-2], top + room, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
                 for b, r in enumerate(rows):
                     x, sc = getattr(r, name), vars(r).get(name + "_scale")
-                    buf[b, ..., :x.shape[-2], :] = (x[0].float() * sc[0]).to(torch.bfloat16) if sc is not None else x[0]
+                    # int8 times its fp32 scale, rounded to bf16 as it is written: the same bits as
+                    # (x.float() * sc).to(bf16), in two passes over the data instead of four
+                    buf[b, ..., :x.shape[-2], :] = torch.mul(x[0], sc[0]) if sc is not None else x[0]
                 setattr(layer, name, buf)
     return out, top
 
@@ -221,15 +234,15 @@ def scores_batch(states, question):
     row's question positions start at its own shard's length"""
     emb, nq = question_tail(states[0][3], question)
     lens = [len(s[0]) for s in states]
-    cache, top = stack([s[1] for s in states])
     n, t = len(states), emb.shape[1]
+    cache, top = stack([s[1] for s in states], t)
     ln = torch.tensor(lens, device=DEV)
     pos = ln[:, None] + torch.arange(t, device=DEV)[None]
     j = torch.arange(top + t, device=DEV)[None, None]
     row = torch.arange(t, device=DEV)[None, :, None]
     ok = (j < ln[:, None, None]) | ((j >= top) & (j - top <= row))
     mask = torch.zeros(ok.shape, dtype=torch.bfloat16, device=DEV).masked_fill(~ok, torch.finfo(torch.bfloat16).min)
-    attention("eager")
+    attention("grouped")
     o = M(inputs_embeds=emb.expand(n, -1, -1), past_key_values=cache, position_ids=pos,
           attention_mask={"full_attention": mask[:, None], "linear_attention": None},
           use_cache=True, output_attentions=True, logits_to_keep=1)
@@ -243,3 +256,9 @@ def scores_batch(states, question):
         mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()
         out.append(mass[HEADS[0]] + mass[HEADS[1]])
     return out
+
+
+def scores(state, question):
+    """per paragraph: the mean over the question's tokens of the attention
+    heads 3 and 4 of layer 11 pay to its line, summed over the two heads"""
+    return scores_batch([state], question)[0]
