@@ -17,10 +17,9 @@ lowercase words, light suffix stemming), and the attention score minus the
 same score for the question "N/A", over sqrt(paragraph characters). Each is
 put in standard units over the run's paragraphs (less its mean, over its
 standard deviation) and the fused score is BM25's plus WEIGHT times the
-attention's. Scores keep what ranks drop, how far ahead a paragraph is:
-one that a channel singles out stays ahead of one it merely ranks next
-(reciprocal-rank fusion does not). Each paragraph's fused score then gains
-NEIGHBOUR times the better of its two neighbours' in the shard.
+attention's, so a paragraph a channel singles out stays ahead of one it
+merely ranks next. Each paragraph's fused score then gains NEIGHBOUR times
+the better of its two neighbours' in the shard.
 
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
@@ -40,9 +39,8 @@ room; it evicts those copies first, and a state leaving the GPU with a host
 copy is dropped, not copied back.
 
 Host copies are plain pageable memory, never pinned: PyTorch's caching
-host allocator keeps every freed pinned block, so a pinned RAM tier grew
-far past RAM_GB (50 GB RSS against RAM_GB 24 on a 642-shard book question,
-2026-11-03). At most SAVES new states wait for the disk writer; a prefill
+host allocator keeps every freed pinned block, so a pinned RAM tier grows
+far past RAM_GB. At most SAVES new states wait for the disk writer; a prefill
 past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
 
 Setup: a Python 3.12 venv with requirements.txt, and the weights:
@@ -57,9 +55,7 @@ Under a cgroup memory.high (a systemd unit's MemoryHigh=) the RAM tier is
 cut to that limit less HEADROOM_GB: a process over memory.high is throttled
 until it barely answers, and it also evicts whenever the process's resident
 memory is within MARGIN_GB of the limit, since what the process holds beyond
-the tier varies (a 24 GB tier under a 27 GiB limit stalled the
-reader once two large sources were loaded, 2026-11-10: the process held
-about 6 GB beyond its tier).
+the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
@@ -73,7 +69,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # A tail pass takes temporaries whose sizes follow the batch's longest shard
 # and the question's length, so no two passes ask for the same blocks; the
 # stock allocator keeps each size it has handed out and the card fills with
-# blocks nothing uses (a 12 GB card at 11.5 GB with 7 GB in use, BATCH 8).
+# blocks nothing uses.
 # Expandable segments hand a freed block's pages to the next size.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch

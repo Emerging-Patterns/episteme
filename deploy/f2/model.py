@@ -27,11 +27,10 @@ tok = AutoTokenizer.from_pretrained(DIR)
 
 
 def grouped(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
-    """the stock eager attention without its copies: that repeats each
-    key-value head's keys and values once for every query head that shares
-    them (four here), which for a cached shard is most of the bytes a pass
-    moves. The query heads of a group are instead the rows of one product
-    with the group's keys, and their weights the rows of one with its values"""
+    """the stock eager attention's weights and output, with no copy of a
+    key-value head's keys and values for each query head that shares them
+    (four here): the query heads of a group are the rows of one product with
+    the group's keys, and their weights the rows of one with its values"""
     b, heads, t, d = query.shape
     kv = heads // module.num_key_value_groups
     w = torch.matmul(query.reshape(b, kv, -1, d), key.transpose(2, 3)).view(b, heads, t, -1) * scaling
@@ -175,9 +174,8 @@ def question_tail(tail, question):
 
 class Roomy(DynamicLayer):
     """a full-attention layer of a stacked cache: its keys and values sit in
-    buffers with room after them for the tail's, which update writes there.
-    The stock layer appends by copying the whole cache, once a layer, for a
-    tail of some twenty tokens; that copying was the largest part of a pass"""
+    buffers with room after them for the tail's, which update writes there
+    (the stock layer appends by copying the whole cache)"""
 
     def update(self, key_states, value_states, *args, **kwargs):
         end = self.used + key_states.shape[-2]
@@ -220,8 +218,7 @@ def stack(caches, room):
                 buf = torch.zeros((len(rows), *x0.shape[1:-2], top + room, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
                 for b, r in enumerate(rows):
                     x, sc = getattr(r, name), vars(r).get(name + "_scale")
-                    # int8 times its fp32 scale, rounded to bf16 as it is written: the same bits as
-                    # (x.float() * sc).to(bf16), in two passes over the data instead of four
+                    # int8 times its fp32 scale, rounded to bf16 as it is written
                     buf[b, ..., :x.shape[-2], :] = torch.mul(x[0], sc[0]) if sc is not None else x[0]
                 setattr(layer, name, buf)
     return out, top
