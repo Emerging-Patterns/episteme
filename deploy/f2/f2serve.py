@@ -27,8 +27,9 @@ A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
 RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
 A run scores the shards whose state is on the GPU first, then those in RAM,
-then the rest, which a reader thread loads from disk up to AHEAD ahead,
-BATCH shards to a tail pass (model.scores_batch); eviction takes the least
+then the rest; a reader thread stages the states the GPU lacks up to AHEAD
+ahead (read from disk if RAM lacks them, laid in a pinned slab and sent to
+the GPU on its own stream) while the GPU scores, BATCH shards to a tail pass (model.scores_batch); eviction takes the least
 recently used state the run does not read later. The GPU lock is held for
 one batch at a time, so a second question's batches come between a long
 run's (a first question over a large source prefills for minutes) and
@@ -44,7 +45,8 @@ of a state it hands to the GPU, and of one read from disk while it has
 room; it evicts those copies first, and a state leaving the GPU with a host
 copy is dropped, not copied back.
 
-Host copies are plain pageable memory, never pinned: PyTorch's caching
+Host copies are plain pageable memory, never pinned (only the SLABS slabs
+a state passes through on its way to the GPU are): PyTorch's caching
 host allocator keeps every freed pinned block, so a pinned RAM tier grows
 far past RAM_GB. At most SAVES new states wait for the disk writer; a prefill
 past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
@@ -64,7 +66,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, itertools, json, math, os, re, sys, threading, time
@@ -93,6 +95,8 @@ HIGH = None  # this process's memory.high in bytes, set at startup
 PAGE = os.sysconf("SC_PAGE_SIZE")
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
+SLABS = int(os.environ.get("SLABS", "12"))
+SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
@@ -268,6 +272,7 @@ class States:
         self.gpu_b = self.ram_b = 0
         self.n = collections.Counter()
         self.used = {}  # GPU key -> the run that read it last
+        self.slabs = self.stream = None  # the pinned slabs and the stream of lift, made at its first use
         os.makedirs(STATES_DIR, exist_ok=True)
         self.writer = ThreadPool(1)
         self.reader = ThreadPool(1)
@@ -329,9 +334,60 @@ class States:
     def load(self, k):
         return torch.load(self.path(k), weights_only=False, map_location="cpu")
 
+    def lift(self, state):
+        """a copy of a state on the GPU and the event that says it has
+        arrived, made on the reader thread: its tensors are laid end to end
+        in a pinned slab and sent as one transfer on the thread's own
+        stream, so the transfer runs while the GPU scores other shards. The
+        slabs are a fixed pool (SLABS of SLAB_MB), taken in turn, each only
+        once its last transfer is done; a state too large for a slab is
+        copied the plain way"""
+        ts = [v for v, _ in tensors(state[1])]
+        sizes = [v.numel() * v.element_size() for v in ts]
+        offs, at = [], 0
+        for b in sizes:
+            offs.append(at)
+            at += (b + 7) // 8 * 8
+        if at > SLAB_BYTES or not torch.cuda.is_available():
+            return copy_to(state, model.DEV), None
+        if self.slabs is None:
+            self.slabs = collections.deque([torch.empty(SLAB_BYTES, dtype=torch.uint8).pin_memory(), None]
+                                           for _ in range(SLABS))
+            self.stream = torch.cuda.Stream()
+        slab = self.slabs[0]
+        self.slabs.rotate(-1)
+        if slab[1] is not None:
+            slab[1].synchronize()
+        for v, off, b in zip(ts, offs, sizes):
+            if b:
+                slab[0][off:off + b].copy_(v.contiguous().view(-1).view(torch.uint8))
+        with torch.cuda.stream(self.stream):
+            there = slab[0][:at].to(model.DEV, non_blocking=True)
+            slab[1] = torch.cuda.Event()
+            slab[1].record(self.stream)
+        views = iter(there[off:off + b].view(v.dtype).view(v.shape) for v, off, b in zip(ts, offs, sizes))
+        c = copy.copy(state[1])
+        c.layers = [copy.copy(layer) for layer in state[1].layers]
+        for layer in c.layers:
+            for name, v in list(vars(layer).items()):
+                if torch.is_tensor(v):
+                    setattr(layer, name, next(views))
+                elif isinstance(v, dict):
+                    setattr(layer, name, {i: next(views) if torch.is_tensor(t) else t for i, t in v.items()})
+        return (state[0], c) + tuple(state[2:]), slab[1]
+
+    def stage(self, k):
+        """k's state as the host holds it (from RAM, else read from disk),
+        its null, its copy on the GPU with the event of its arrival, and
+        whether RAM had it"""
+        got = self.ram.get(k)
+        state, null = got[0] if got is not None else self.load(k)
+        return state, null, self.lift(state), got is not None
+
     def prefetch(self, k):
-        """k's state read from disk to the host on the reader thread"""
-        return self.reader.apply_async(self.load, (k,))
+        """k's state staged on the reader thread: read from disk if RAM
+        lacks it, and sent to the GPU, while the GPU scores other shards"""
+        return self.reader.apply_async(self.stage, (k,))
 
     def own(self, k, size, keep, run):
         """whether putting k on the GPU would evict a state this run has
@@ -350,17 +406,20 @@ class States:
             self.used[k] = run
             self.n["gpu"] += 1
             return self.gpu[k][0]
+        staged = loading.get() if loading is not None else None
+        if staged is not None and staged[2][1] is not None:
+            torch.cuda.current_stream().wait_event(staged[2][1])  # nothing here runs before the copy has arrived
         if k in self.ram:
             (state, null), size = self.ram[k]
             self.ram.move_to_end(k)
-            st = (copy_to(state, model.DEV), null)
+            st = (staged[2][0] if staged is not None else copy_to(state, model.DEV), null)
             self.n["ram"] += 1
             if self.own(k, size, keep, run):
                 return st
-        elif loading is not None or os.path.exists(self.path(k)):
-            state, null = loading.get() if loading is not None else self.load(k)
-            st, size = (copy_to(state, model.DEV), null), nbytes(state[1])
-            self.n["disk"] += 1
+        elif staged is not None or os.path.exists(self.path(k)):
+            state, null = staged[:2] if staged is not None else self.load(k)
+            st, size = (staged[2][0] if staged is not None else copy_to(state, model.DEV), null), nbytes(state[1])
+            self.n["ram" if staged is not None and staged[3] else "disk"] += 1
             if self.own(k, size, keep, run):
                 if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
                     self.put_ram(k, (state, null), size, keep)
@@ -432,8 +491,8 @@ class Run:
         with Turn():
             order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
             cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
-                    if tier(k) == 2 and os.path.exists(STATES.path(k))]
-        loading = {}  # the next AHEAD cold states, read from disk while the GPU works
+                    if tier(k) == 1 or tier(k) == 2 and os.path.exists(STATES.path(k))]
+        loading = {}  # the next AHEAD states the GPU lacks, staged for it while it works
         left = collections.Counter(self.keys)
         got = {}
         for at in range(0, len(order), BATCH):
