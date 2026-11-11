@@ -1,6 +1,6 @@
 # episteme
 
-Summary-less RAG, in Bend 2. Retrieval returns the record's own paragraphs, verbatim and cited, never a summary: no chunk summaries at ingest, no embeddings, no generated text anywhere in the retrieval path. The model answering the question reads the original words and cites them.
+Summary-less RAG in Bend 2: retrieval returns verbatim, cited source paragraphs. No embeddings, and no generated text in retrieval.
 
 Books, Claude Code transcripts, Honcho chats, git history and an intent file go into one append-only log, packed into frozen shards (one source per shard). For a question, small local reader models pick the paragraphs that bear on it, and episteme returns them in time order. Readers only name paragraphs; they never write.
 The gate is `nix flake check`; what episteme guarantees is in `laws/`, one file per guarantee.
