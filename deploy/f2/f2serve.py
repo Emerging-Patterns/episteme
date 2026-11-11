@@ -59,7 +59,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
@@ -88,7 +88,7 @@ HIGH = None  # this process's memory.high in bytes, set at startup
 PAGE = os.sysconf("SC_PAGE_SIZE")
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
-TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
+TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
