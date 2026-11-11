@@ -35,7 +35,11 @@ run's (a first question over a large source prefills for minutes) and
 neither waits for the other to end; each run still scores every shard it
 names. A run bigger than the
 tiers so hits what they hold, where a fixed order under plain LRU evicts
-each state just before it is needed and never hits. RAM keeps the host copy
+each state just before it is needed and never hits. When a state in RAM
+is needed and the GPU holds only states this run has read, it is scored
+from a copy that is not kept: promoting it would push one of the run's own
+states back to RAM, and the next question would bring that one up again.
+RAM keeps the host copy
 of a state it hands to the GPU, and of one read from disk while it has
 room; it evicts those copies first, and a state leaving the GPU with a host
 copy is dropped, not copied back.
@@ -63,7 +67,7 @@ env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
-import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
+import collections, copy, ctypes, hashlib, itertools, json, math, os, re, sys, threading, time
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -263,6 +267,7 @@ class States:
         self.gpu, self.ram = collections.OrderedDict(), collections.OrderedDict()
         self.gpu_b = self.ram_b = 0
         self.n = collections.Counter()
+        self.used = {}  # GPU key -> the run that read it last
         os.makedirs(STATES_DIR, exist_ok=True)
         self.writer = ThreadPool(1)
         self.reader = ThreadPool(1)
@@ -284,6 +289,7 @@ class States:
         while self.gpu_b > CACHE_BYTES and len(self.gpu) > 1:
             k2 = self.victim(self.gpu, keep | {k})
             (state, null), s2 = self.gpu.pop(k2)
+            self.used.pop(k2, None)
             self.gpu_b -= s2
             if RAM_BYTES > 0 and k2 not in self.ram:
                 self.put_ram(k2, (move(state, "cpu"), null), s2, keep)
@@ -299,8 +305,15 @@ class States:
             self.ram_b -= s2
 
     def spare(self, k, st, size):
-        """a host copy of a state going to the GPU kept in RAM, if RAM has the
-        room without evicting: its later eviction from the GPU then copies nothing"""
+        """a host copy of a state read from disk kept in RAM, if RAM has the
+        room once it gives up host copies of states the GPU holds: one kept
+        of a state going to the GPU makes its later eviction copy nothing,
+        and one of a state scored in passing saves its next read from disk"""
+        while self.ram_b + size > RAM_BYTES or tight():
+            dup = next((x for x in self.ram if x in self.gpu), None)
+            if dup is None:
+                break
+            self.ram_b -= self.ram.pop(dup)[1]
         if self.ram_b + size <= RAM_BYTES and not tight():
             self.ram[k] = (st, size)
             self.ram_b += size
@@ -320,12 +333,21 @@ class States:
         """k's state read from disk to the host on the reader thread"""
         return self.reader.apply_async(self.load, (k,))
 
-    def get(self, k, shard, keep=frozenset(), loading=None):
+    def own(self, k, size, keep, run):
+        """whether putting k on the GPU would evict a state this run has
+        read: the GPU then holds only the run's own states, and k is scored
+        from a copy that is not kept, the tiers left as they are"""
+        return (run is not None and bool(self.gpu) and self.gpu_b + size > CACHE_BYTES
+                and self.used.get(self.victim(self.gpu, keep | {k})) == run)
+
+    def get(self, k, shard, keep=frozenset(), loading=None, run=None):
         """k's state and null; eviction spares the keys in keep (those the
         run reads later) while any other state is resident. loading is a
-        prefetch of k from disk, if one was started"""
+        prefetch of k from disk, if one was started; run numbers the run
+        that asks"""
         if k in self.gpu:
             self.gpu.move_to_end(k)
+            self.used[k] = run
             self.n["gpu"] += 1
             return self.gpu[k][0]
         if k in self.ram:
@@ -333,11 +355,15 @@ class States:
             self.ram.move_to_end(k)
             st = (copy_to(state, model.DEV), null)
             self.n["ram"] += 1
+            if self.own(k, size, keep, run):
+                return st
         elif loading is not None or os.path.exists(self.path(k)):
             state, null = loading.get() if loading is not None else self.load(k)
             st, size = (copy_to(state, model.DEV), null), nbytes(state[1])
             self.spare(k, (state, null), size)
             self.n["disk"] += 1
+            if self.own(k, size, keep, run):
+                return st
         else:
             state = model.prefill(shard)
             st, size = (state, model.scores(state, "N/A")), nbytes(state[1])
@@ -345,6 +371,7 @@ class States:
             self.slots.acquire()
             self.writer.apply_async(self.save, (k, (host_copy(state), st[1])))
         self.put_gpu(k, st, size, keep)
+        self.used[k] = run
         return st
 
 
@@ -366,11 +393,15 @@ def terms(k, sh):
     return counts
 
 
+SERIAL = itertools.count()  # a number for each run
+
+
 class Run:
     """the paragraphs of some shards, with BM25 statistics over them"""
 
     def __init__(self, shards):
         self.shards = shards
+        self.serial = next(SERIAL)
         self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill
         self.keys = [key(s["text"]) for s in shards]
         self.paras = []  # (shard index, label number, characters, text)
@@ -414,7 +445,7 @@ class Run:
                     keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
                     self.came[self.keys[i] in STATES.gpu and "gpu" or self.keys[i] in STATES.ram and "ram"
                               or os.path.exists(STATES.path(self.keys[i])) and "disk" or "prefill"] += 1
-                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None))
+                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial)
                     batch.append((i, self.keys[i], state, null))
                 for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
                     got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
