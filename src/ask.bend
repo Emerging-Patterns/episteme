@@ -49,11 +49,11 @@
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
 #
-# Trusted, not proved: A question does not read a frozen
-# shard's file before the reads when its source has a sizes file
-# (`Store.light`): the shard stands in the run with its number, source and
-# code points and no items, and telemetry takes its paragraph count from the
-# sizes file. When every instance of the pool ranked the run, each reads by
+# Trusted, not proved: A question does not read a shard's file before the
+# reads when its source directory holds its size (`Store.light`: a frozen
+# shard's in the sizes file, the tail's in the tailsize file): the shard
+# stands in the run with its number, source and code points and no items,
+# and telemetry takes its paragraph count from that file. When every instance of the pool ranked the run, each reads by
 # name and no request holds a shard's text, so after the reads `Ask.load`
 # reads from their files exactly the unread shards whose read named labels
 # (a failed read names none), stopping with `<path> is no shard` on one that
@@ -73,7 +73,7 @@
 # refusal goes to stderr with exit 2. A since read narrows the run above in
 # two places: the shards are those `Filter.recent(since, Store.shards(cap,
 # f))` keeps (`Ask.recent`: a shard that was read is kept by `Filter.fresh`,
-# an unread one when the latest record ts its sizes file holds is at or
+# an unread one when the latest record ts its sizes or tailsize file holds is at or
 # after the since, which is the same test, since some record of a shard is
 # at or after a time exactly when its latest is), so
 # only those are numbered, read and named, and the merged excerpts are
@@ -189,7 +189,7 @@ def Ask.load.if(need: Bool, +sh: S.Shard, +path: String) -> IO(S.Shard):
       IO.pure(S.Shard, sh)
     case True{}:
       do IO<S.Shard>:
-        got : S.Shard <- St.Store.shard(path)
+        got : S.Shard <- St.Store.shard.named(String.ends_with(path, "/tail.json"), path)
         return Ask.renum(got, Rd.Read.n(sh))
 
 # a shard of the run, read from its file when Ask.wanted

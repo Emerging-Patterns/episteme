@@ -14,9 +14,9 @@
 # and `Filter.after(since, xs)` the excerpts it delivers. Shards are packed in
 # ingest order, not time order, so a kept shard may also hold older records;
 # `Filter.after` drops their excerpts. No shard format
-# change: the test reads the shard's items. A question applies it to a frozen
+# change: the test reads the shard's items. A question applies it to a
 # shard it has not read through the latest record `ts` the source's sizes
-# file holds, which is trusted (src/ask.bend), not proved here. Closed examples check a date, a
+# or tailsize file holds, which is trusted (src/ask.bend), not proved here. Closed examples check a date, a
 # time and three malformed values (`2026-10-24T05:06Z`, `2026-1-24`,
 # `yesterday`), and no guarantee rests on them.
 import Base

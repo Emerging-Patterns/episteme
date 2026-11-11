@@ -18,8 +18,8 @@
 # the field names and their order.
 #
 # The paragraph counts are given to `Tele.line.with` beside the shards, so
-# that a frozen shard the question did not read from its file is listed with
-# the count its source's sizes file holds (src/store.bend); `Tele.line` is
+# that a shard the question did not read from its file is listed with
+# the count its source's sizes or tailsize file holds (src/store.bend); `Tele.line` is
 # that line with every count taken from the shard itself.
 import Base
 import ../src/para.bend as P
