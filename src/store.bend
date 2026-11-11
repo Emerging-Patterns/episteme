@@ -4,7 +4,8 @@
 # cursor after it) and then one record per line; the shards of one size
 # are split by source: shards/<chars>/<Shard.dir(source)>/<n>.json when
 # frozen and .../tail.json, {"covered", "shard"}, for the tail and the
-# last batch packed into it, beside .../sizes, the frozen shards' sizes, and shards/<chars>/covered.json, {"covered"},
+# last batch packed into it, beside .../sizes, the frozen shards' sizes,
+# and .../tailsize, the tail's, and shards/<chars>/covered.json, {"covered"},
 # the last batch every source of that size is caught up with;
 # state/<conn>.json caches the batch holding a connector's latest
 # cursor; config.json holds the settings. Numbers in file
@@ -53,9 +54,14 @@
 # the directory has frozen shard files, each frozen shard is left unread
 # (its number from its file name, its source from the directory name, its
 # code points, paragraph count and latest record ts from `sizes`, no items,
-# and its path) and
-# only the tail is read; any other directory is read whole. A missing,
-# unreadable or short `sizes` only costs the reading.
+# and its path); any other directory is read whole. In such a directory the
+# tail is left unread too when `tailsize` holds its size, a JSON array of
+# one `[chars, paras, last, recs]`: its number is one more than the frozen
+# shards' count. `Store.put_shards` writes `tailsize` as `[]` before it
+# writes a source's shards and with the tail's size after them, so the file
+# never holds the size of a tail other than the one in `tail.json`. A
+# missing, unreadable or short `sizes`, or a `tailsize` with no size, only
+# costs the reading.
 # `shards/<chars>/covered.json`, `{"covered": k}`, is the mark: every source
 # is caught up with the log up to batch `k`; `Store.mark` reads it, 0 when it
 # is missing. `Store.shards(chars, f)` reads, in name order, the directories
@@ -827,6 +833,18 @@ def Store.sizes.of(ss: List<&2, S.Shard>) -> List<&2, Sz>:
             Sz{chars, U32.from_nat(Store.paras(sh)), Store.last(items, ""), Store.starts(items)},
             Store.sizes.of(rest))
 
+# the sizes of the shards of ss that are not frozen (the tail), in order
+def Store.tailsz.of(ss: List<&2, S.Shard>) -> List<&2, Sz>:
+  match ss:
+    case Nil{}:
+      []
+    case Con{+sh, rest}:
+      match sh:
+        case S.Shard{_n, +items, _sources, chars, frozen}:
+          Store.sizes.if(Bool.not(frozen),
+            Sz{chars, U32.from_nat(Store.paras(sh)), Store.last(items, ""), Store.starts(items)},
+            Store.tailsz.of(rest))
+
 # sizes as JSON values, each [chars, paras, last, recs]
 def Store.sizes.json(szs: List<&2, Sz>) -> List<&2, Value.Json>:
   match szs:
@@ -923,6 +941,13 @@ def Store.sizes(+dir: String) -> IO(List<&2, Sz>):
     res : Result<&1, &1, U32 & String, String> <- Sys.file.read(dir ++ "/sizes")
     return Store.szs.json(Json.parse(Result.default(&1, &1, U32 & String, String, res, "")))
 
+# a source directory's tailsize file: the size of its tail, or none when
+# the file is missing, is no array or holds no size
+def Store.tailsize(+dir: String) -> IO(List<&2, Sz>):
+  do IO<List<&2, Sz>>:
+    res : Result<&1, &1, U32 & String, String> <- Sys.file.read(dir ++ "/tailsize")
+    return Store.szs.json(Json.parse(Result.default(&1, &1, U32 & String, String, res, "")))
+
 # the number of the first shard of ss, 0 when there is none
 def Store.first(ss: List<&2, S.Shard>) -> U32:
   match ss:
@@ -993,13 +1018,18 @@ def Store.sizes.put(+dir: String, +ss: List<&2, S.Shard>) -> IO(Unit):
 
 # write one source's shards of one size: each frozen one as <n>.json, the
 # tail as tail.json with covered, the last log batch packed, in order, so
-# the tail is written last, and then the sizes file
+# the tail is written last, and then the sizes file. The tailsize file is
+# emptied before the shards are written and holds the tail's size only
+# after them, so it never holds the size of a tail other than the one in
+# tail.json
 def Store.put_shards(chars: U32, src: String, +ss: List<&2, S.Shard>, +covered: U32) -> IO(Unit):
   do IO<Unit>:
     +dir : String <- Store.src(chars, src)
     Store.mkdir(dir)
+    Store.save(dir ++ "/tailsize", "[]\n")
     Store.put.go(ss, dir, covered)
     Store.sizes.put(dir, ss)
+    Store.save(dir ++ "/tailsize", Json.print(Json.arr(Store.sizes.json(Store.tailsz.of(ss)))) ++ "\n")
 
 # the shards in a directory when picked, else none
 def Store.shards.if(picked: Bool, +dir: String) -> IO(List<&2, S.Shard>):
@@ -1082,21 +1112,36 @@ def Store.frozen(names: List<&2, String>) -> List<&2, String>:
     case Con{+name, rest}:
       Store.frozen.if(String.eq(name, "tail.json"), name, Store.frozen(rest))
 
-# a source directory's lights: its frozen shards unread and its tail read
-# when sized, else every shard read
+# a source directory's tail as a light: unread, numbered num, from the size
+# its tailsize file holds; read when the file holds none
+def Store.light.tail(tsz: List<&2, Sz>, num: U32, +dir: String, src: String) -> IO(Light):
+  match tsz:
+    case Nil{}:
+      do IO<Light>:
+        tail : S.Shard <- Store.shard.named(True{}, dir ++ "/tail.json")
+        return Light{tail, None{}, "", "", 0}
+    case Con{sz, _rest}:
+      match sz:
+        case Sz{chars, paras, last, recs}:
+          IO.pure(Light, Light{S.Shard{num, [], [src], chars, False{}}, Some{U32.to_nat(paras)},
+            dir ++ "/tail.json", last, recs})
+
+# a source directory's lights: its frozen shards unread, and its tail too
+# when the directory holds its size, when sized; else every shard read
 def Store.light.pick(
   sized: Bool,
-  frozen: List<&2, String>,
+  +frozen: List<&2, String>,
   szs: List<&2, Sz>,
   files: List<&2, String>,
   +dir: String,
-  src: String
+  +src: String
 ) -> IO(List<&2, Light>):
   match sized:
     case True{}:
       do IO<List<&2, Light>>:
-        tail : S.Shard <- Store.shard.named(True{}, dir ++ "/tail.json")
-        return List.append(&2, Light, Store.light.frozen(frozen, szs, dir, src), [Light{tail, None{}, "", "", 0}])
+        tsz : List<&2, Sz> <- Store.tailsize(dir)
+        tail : Light <- Store.light.tail(tsz, U32.inc(U32.from_nat(List.length(&2, String, frozen))), dir, src)
+        return List.append(&2, Light, Store.light.frozen(frozen, szs, dir, src), [tail])
     case False{}:
       do IO<List<&2, Light>>:
         ss : List<&2, S.Shard> <- Store.shards.go(files, dir)
