@@ -17,7 +17,7 @@ def counts.add(xs: List<&2, Nat>, ys: List<&2, Nat>) -> List<&2, Nat>:
 # unknown labels, failed shards, prompt tokens and prompt milliseconds
 def row.counts(row: Sc.Row) -> List<&2, Nat>:
   match row:
-    case Sc.Row{_id, hit, gold, chars, unknown, failed, _ms, pn, pm}:
+    case Sc.Row{_id, hit, gold, chars, unknown, failed, _ms, pn, pm, _cv, _sp}:
       [1n, hit, gold, chars, unknown, failed, pn, pm]
 
 # the rows' counts summed
@@ -32,7 +32,7 @@ def rows.counts(rows: List<&2, Sc.Row>) -> List<&2, Nat>:
 # labels, failed shards, prompt tokens and prompt milliseconds
 def total.counts(tot: Sc.Total) -> List<&2, Nat>:
   match tot:
-    case Sc.Total{q, hit, gold, chars, unknown, failed, _p50, _mx, pn, pm}:
+    case Sc.Total{q, hit, gold, chars, unknown, failed, _p50, _mx, pn, pm, _cv, _sp}:
       [q, hit, gold, chars, unknown, failed, pn, pm]
 
 # LAW: a run's totals count its questions and sum their counts
@@ -47,19 +47,19 @@ def rows.ok(rows: List<&2, Sc.Row>) -> Bool:
       True{}
     case Con{row, rest}:
       match row:
-        case Sc.Row{_id, hit, gold, _chars, _unknown, _failed, _ms, _pn, _pm}:
+        case Sc.Row{_id, hit, gold, _chars, _unknown, _failed, _ms, _pn, _pm, _cv, _sp}:
           Bool.and(Nat.is_le(hit, gold), rows.ok(rest))
 
 # a total's gold recalled
 def total.hit(tot: Sc.Total) -> Nat:
   match tot:
-    case Sc.Total{_q, hit, _gold, _chars, _unknown, _failed, _p50, _mx, _pn, _pm}:
+    case Sc.Total{_q, hit, _gold, _chars, _unknown, _failed, _p50, _mx, _pn, _pm, _cv, _sp}:
       hit
 
 # a total's gold
 def total.gold(tot: Sc.Total) -> Nat:
   match tot:
-    case Sc.Total{_q, _hit, gold, _chars, _unknown, _failed, _p50, _mx, _pn, _pm}:
+    case Sc.Total{_q, _hit, gold, _chars, _unknown, _failed, _p50, _mx, _pn, _pm, _cv, _sp}:
       gold
 
 # LAW: when no row recalls more than its gold, neither does the run

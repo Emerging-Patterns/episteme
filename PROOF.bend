@@ -15,6 +15,7 @@ import ./proofs/ChatProjectPasses.bend as PChatProjectPasses
 import ./proofs/ChatRecordsKeepEveryBlock.bend as PChatRecordsKeepEveryBlock
 import ./proofs/ChatSourceDirName.bend as PChatSourceDirName
 import ./proofs/ClaudeCursorReadsBack.bend as PClaudeCursorReadsBack
+import ./proofs/CoverageAddsOverExcerpts.bend as PCoverageAddsOverExcerpts
 import ./proofs/CutEndsAtLastFeed.bend as PCutEndsAtLastFeed
 import ./proofs/CutReplyFails.bend as PCutReplyFails
 import ./proofs/DecodeSkipsNonMessages.bend as PDecodeSkipsNonMessages

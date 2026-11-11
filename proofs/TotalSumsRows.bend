@@ -11,7 +11,7 @@ def counts_timed(
   -walls: List<&2, Nat>
 ) -> {Laws.total.counts(Sc.Score.timed(tot, walls)) == Laws.total.counts(tot) : List<&2, Nat>}:
   match tot:
-    case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _pn, _pm}:
+    case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _pn, _pm, _cv, _sp}:
       {==}
 
 # a row added to a total adds its counts
@@ -21,9 +21,9 @@ def counts_add(
 ) -> {Laws.total.counts(Sc.Score.add(row, tot))
   == Laws.counts.add(Laws.row.counts(row), Laws.total.counts(tot)) : List<&2, Nat>}:
   match row:
-    case Sc.Row{_id, _hit, _gold, _chars, _unknown, _failed, _ms, _pn, _pm}:
+    case Sc.Row{_id, _hit, _gold, _chars, _unknown, _failed, _ms, _pn, _pm, _cv, _sp}:
       match tot:
-        case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _tpn, _tpm}:
+        case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _tpn, _tpm, _cv, _sp}:
           {==}
 
 # the sum's counts are the rows' counts summed
@@ -77,7 +77,7 @@ def hit_gold_timed(
 ) -> {(Laws.total.hit(Sc.Score.timed(tot, walls)), Laws.total.gold(Sc.Score.timed(tot, walls)))
   == (Laws.total.hit(tot), Laws.total.gold(tot)) : Nat & Nat}:
   match tot:
-    case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _pn, _pm}:
+    case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _pn, _pm, _cv, _sp}:
       {==}
 
 # a row added to a total adds its gold recalled and gold
@@ -88,9 +88,9 @@ def hit_gold_add(
   == (Nat.add(D1.row.hit(row), Laws.total.hit(tot)),
     Nat.add(D1.row.gold(row), Laws.total.gold(tot))) : Nat & Nat}:
   match row:
-    case Sc.Row{_id, _hit, _gold, _chars, _unknown, _failed, _ms, _pn, _pm}:
+    case Sc.Row{_id, _hit, _gold, _chars, _unknown, _failed, _ms, _pn, _pm, _cv, _sp}:
       match tot:
-        case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _tpn, _tpm}:
+        case Sc.Total{_q, _h, _g, _c, _u, _f, _p, _m, _tpn, _tpm, _cv, _sp}:
           {==}
 
 # True when the first is at most the second
@@ -106,7 +106,7 @@ def row_ok(
   e: {Laws.rows.ok(row <> rest) == True{} : Bool}
 ) -> {Nat.is_le(D1.row.hit(row), D1.row.gold(row)) == True{} : Bool}:
   match row:
-    case Sc.Row{_id, +hit, +gold, _chars, _unknown, _failed, _ms, _pn, _pm}:
+    case Sc.Row{_id, +hit, +gold, _chars, _unknown, _failed, _ms, _pn, _pm, _cv, _sp}:
       M1.and_l(Nat.is_le(hit, gold), Laws.rows.ok(rest), e)
 
 # the rest's ok, from its list's
@@ -116,7 +116,7 @@ def rows_rest_ok(
   e: {Laws.rows.ok(row <> rest) == True{} : Bool}
 ) -> {Laws.rows.ok(rest) == True{} : Bool}:
   match row:
-    case Sc.Row{_id, +hit, +gold, _chars, _unknown, _failed, _ms, _pn, _pm}:
+    case Sc.Row{_id, +hit, +gold, _chars, _unknown, _failed, _ms, _pn, _pm, _cv, _sp}:
       M1.and_r(Nat.is_le(hit, gold), Laws.rows.ok(rest), e)
 
 # the sum recalls at most its gold when each row does

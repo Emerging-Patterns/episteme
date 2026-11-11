@@ -21,7 +21,8 @@
 # 0.
 #
 # Why it is trusted: It is IO sequencing over src/ask.bend's run,
-# laws/HitsCountRecalled.bend, laws/TotalSumsRows.bend,
+# laws/HitsCountRecalled.bend, laws/CoverageAddsOverExcerpts.bend,
+# laws/TotalSumsRows.bend,
 # laws/MedianAndMax.bend, laws/RatioRoundsDown.bend and the store.
 # `tests/smoke.sh` checks a question whose filter hits no shard (0 of 1
 # recalled, the totals row and the report), a line that is no question (exit
@@ -157,12 +158,13 @@ def Eval.refused(qs: List<&2, Q>) -> Maybe<&2, String>:
 # a row, after its progress line on stderr
 def Eval.told(row: Sc.Row) -> IO(Sc.Row):
   match row:
-    case Sc.Row{+id, +hit, +gold, +chars, +unknown, +failed, +ms, +pn, +pm}:
+    case Sc.Row{+id, +hit, +gold, +chars, +unknown, +failed, +ms, +pn, +pm, +cover, +span}:
       do IO<Sc.Row>:
         IO.print_err(String.concat(["eval ", id, ": recalled ", Nat.show(hit), "/",
           Nat.show(gold), ", ", Nat.show(chars), " chars, ", Nat.show(failed),
-          " failed shards, ", Nat.show(unknown), " unknown labels, ", Rd.Read.secs(ms), " s"]))
-        return Sc.Row{id, hit, gold, chars, unknown, failed, ms, pn, pm}
+          " failed shards, ", Nat.show(unknown), " unknown labels, ", Rd.Read.secs(ms), " s, covered ",
+          Nat.show(cover), "/", Nat.show(span)]))
+        return Sc.Row{id, hit, gold, chars, unknown, failed, ms, pn, pm, cover, span}
 
 # a question's row from its run and its wall time, with a progress line
 def Eval.scored(id: String, gold: List<&2, E.Gold>, got: A.Got, ms: Nat) -> IO(Sc.Row):

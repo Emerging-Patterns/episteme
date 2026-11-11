@@ -10,17 +10,18 @@ import ezjson@1.2.0.0/src/value.bend as Value
 
 # one question's result: its id, its gold spans recalled and in all, the
 # code points of its excerpts' paragraphs, its unknown labels and failed
-# shards, its wall milliseconds, and its reads' prompt tokens and their
-# milliseconds
+# shards, its wall milliseconds, its reads' prompt tokens and their
+# milliseconds, and the code points of its gold spans its excerpts return
+# and those spans' code points in all
 type Row is Data:
   Row{id: String, hit: Nat, gold: Nat, chars: Nat, unknown: Nat, failed: Nat,
-    ms: Nat, prompt_n: Nat, prompt_ms: Nat}
+    ms: Nat, prompt_n: Nat, prompt_ms: Nat, cover: Nat, span: Nat}
 
 # a run's totals: its questions, the sums of the rows' counts, and the
 # median and maximum of their wall milliseconds
 type Total is Data:
   Total{questions: Nat, hit: Nat, gold: Nat, chars: Nat, unknown: Nat,
-    failed: Nat, p50: Nat, max: Nat, prompt_n: Nat, prompt_ms: Nat}
+    failed: Nat, p50: Nat, max: Nat, prompt_n: Nat, prompt_ms: Nat, cover: Nat, span: Nat}
 
 # 1 for True, 0 for False
 def Score.one(hit: Bool) -> Nat:
@@ -37,6 +38,77 @@ def Score.hits(gs: List<&2, E.Gold>, +xs: List<&2, E.Ex>) -> Nat:
       0n
     case Con{g, rest}:
       Nat.add(Score.one(E.Excerpt.recalled(g, xs)), Score.hits(rest, xs))
+
+# --- how much of the gold the excerpts return ---
+
+# the later of two offsets
+def Score.later(+one: U32, +two: U32) -> U32:
+  Bool.pick(U32, U32.is_lt(one, two), two, one)
+
+# the earlier of two offsets
+def Score.earlier(+one: U32, +two: U32) -> U32:
+  Bool.pick(U32, U32.is_lt(one, two), one, two)
+
+# the code points from lo up to hi, none when hi is not after lo
+def Score.width(+lo: U32, +hi: U32) -> Nat:
+  Bool.pick(Nat, U32.is_lt(lo, hi), U32.to_nat(U32.sub(hi, lo)), 0n)
+
+# the code points of the span from lo to hi that the paragraphs hold, by
+# their whole-file offsets: for each, the span from the later start to the
+# earlier end
+def Score.laps(+lo: U32, +hi: U32, ps: List<&2, P.Para>) -> Nat:
+  match ps:
+    case Nil{}:
+      0n
+    case Con{pa, rest}:
+      match pa:
+        case P.Para{_n, start, end, _text}:
+          Nat.add(Score.width(Score.later(start, lo), Score.earlier(end, hi)), Score.laps(lo, hi, rest))
+
+# what the paragraphs hold of the span from lo to hi when same, else none
+def Score.cover.if(same: Bool, lo: U32, hi: U32, ps: List<&2, P.Para>) -> Nat:
+  match same:
+    case True{}:
+      Score.laps(lo, hi, ps)
+    case False{}:
+      0n
+
+# the code points of the span from lo to hi of the source src that the
+# excerpts return: those their paragraphs hold, in the excerpts whose
+# record has that source
+def Score.cover.in(+src: String, +lo: U32, +hi: U32, xs: List<&2, E.Ex>) -> Nat:
+  match xs:
+    case Nil{}:
+      0n
+    case Con{x, rest}:
+      match x:
+        case E.Ex{rec, paras}:
+          Nat.add(Score.cover.if(String.eq(E.Excerpt.source(rec), src), lo, hi, paras),
+            Score.cover.in(src, lo, hi, rest))
+
+# the code points of a gold span that the excerpts return
+def Score.cover(gold: E.Gold, xs: List<&2, E.Ex>) -> Nat:
+  match gold:
+    case E.Gold{source, start, end}:
+      Score.cover.in(source, start, end, xs)
+
+# the code points of the gold spans that the excerpts return
+def Score.covered(gs: List<&2, E.Gold>, +xs: List<&2, E.Ex>) -> Nat:
+  match gs:
+    case Nil{}:
+      0n
+    case Con{g, rest}:
+      Nat.add(Score.cover(g, xs), Score.covered(rest, xs))
+
+# the code points of the gold spans
+def Score.span(gs: List<&2, E.Gold>) -> Nat:
+  match gs:
+    case Nil{}:
+      0n
+    case Con{g, rest}:
+      match g:
+        case E.Gold{_source, start, end}:
+          Nat.add(Score.width(start, end), Score.span(rest))
 
 # the code points of the paragraphs' texts
 def Score.para_chars(ps: List<&2, P.Para>) -> Nat:
@@ -74,10 +146,10 @@ def Score.prompt(rs: List<&2, Rd.Read>) -> Nat & Nat:
 # a row with its prompt tokens and milliseconds
 def Score.row.of(row: Row, tot: Nat & Nat) -> Row:
   match row:
-    case Row{id, hit, gold, chars, unknown, failed, ms, _pn, _pm}:
+    case Row{id, hit, gold, chars, unknown, failed, ms, _pn, _pm, cover, span}:
       match tot:
         case (pn, pm):
-          Row{id, hit, gold, chars, unknown, failed, ms, pn, pm}
+          Row{id, hit, gold, chars, unknown, failed, ms, pn, pm, cover, span}
 
 # a question's row from its gold spans, its merged excerpts, its reads, its
 # unknown labels and its wall milliseconds
@@ -90,7 +162,8 @@ def Score.row(
   ms: Nat
 ) -> Row:
   Score.row.of(Row{id, Score.hits(gs, xs), List.length(&2, E.Gold, gs), Score.chars(xs),
-    U32.to_nat(unknown), List.length(&2, Rd.Read, Rd.Read.failed(rs)), ms, 0n, 0n},
+    U32.to_nat(unknown), List.length(&2, Rd.Read, Rd.Read.failed(rs)), ms, 0n, 0n,
+    Score.covered(gs, xs), Score.span(gs)},
     Score.prompt(rs))
 
 # --- the median and the maximum ---
@@ -156,19 +229,19 @@ def Score.p50(ns: List<&2, Nat>) -> Nat:
 # a row's counts added to a total, one more question
 def Score.add(row: Row, tot: Total) -> Total:
   match row:
-    case Row{_id, hit, gold, chars, unknown, failed, _ms, pn, pm}:
+    case Row{_id, hit, gold, chars, unknown, failed, _ms, pn, pm, cover, span}:
       match tot:
-        case Total{q, th, tg, tc, tu, tf, p50, mx, tpn, tpm}:
+        case Total{q, th, tg, tc, tu, tf, p50, mx, tpn, tpm, tcv, tsp}:
           Total{1n+q, Nat.add(hit, th), Nat.add(gold, tg), Nat.add(chars, tc),
             Nat.add(unknown, tu), Nat.add(failed, tf), p50, mx,
-            Nat.add(pn, tpn), Nat.add(pm, tpm)}
+            Nat.add(pn, tpn), Nat.add(pm, tpm), Nat.add(cover, tcv), Nat.add(span, tsp)}
 
 # the rows' counts added up: questions, gold recalled, gold, characters,
 # unknown labels, failed shards, prompt tokens and milliseconds
 def Score.sum(rows: List<&2, Row>) -> Total:
   match rows:
     case Nil{}:
-      Total{0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n}
+      Total{0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n, 0n}
     case Con{r, rest}:
       Score.add(r, Score.sum(rest))
 
@@ -179,14 +252,14 @@ def Score.walls(rows: List<&2, Row>) -> List<&2, Nat>:
       []
     case Con{r, rest}:
       match r:
-        case Row{_id, _hit, _gold, _chars, _unknown, _failed, ms, _pn, _pm}:
+        case Row{_id, _hit, _gold, _chars, _unknown, _failed, ms, _pn, _pm, _cv, _sp}:
           ms <> Score.walls(rest)
 
 # a total with the median and maximum of walls
 def Score.timed(tot: Total, +walls: List<&2, Nat>) -> Total:
   match tot:
-    case Total{q, h, g, c, u, f, _p50, _mx, pn, pm}:
-      Total{q, h, g, c, u, f, Score.p50(walls), Score.max(walls), pn, pm}
+    case Total{q, h, g, c, u, f, _p50, _mx, pn, pm, cv, sp}:
+      Total{q, h, g, c, u, f, Score.p50(walls), Score.max(walls), pn, pm, cv, sp}
 
 # a run's totals: the rows' sums, and their wall times' median and maximum
 def Score.total(+rows: List<&2, Row>) -> Total:
@@ -208,20 +281,22 @@ def Score.tenths(+num: Nat) -> String:
 
 # the header of the totals row
 def Score.header() -> String:
-  "| label | questions | recall | recalled | gold | mean tokens | p50 s | max s | prefill tok/s | failed shards | unknown labels |"
+  "| label | questions | recall | recalled | gold | mean tokens | p50 s | max s | prefill tok/s | failed shards | unknown labels | coverage |"
 
 # the totals as one table row: recall in percent with a tenth, the mean
 # excerpt tokens at per / 100 characters a token, the median and maximum
-# wall seconds with a tenth and the prefill tokens a second
+# wall seconds with a tenth, the prefill tokens a second, and coverage, the
+# share of the gold spans' code points the excerpts return, in percent with
+# a tenth
 def Score.line(label: String, tot: Total, +per: Nat) -> String:
   match tot:
-    case Total{+q, +h, +g, c, u, f, p50, mx, pn, pm}:
+    case Total{+q, +h, +g, c, u, f, p50, mx, pn, pm, cv, sp}:
       String.concat(["| ", label, " | ", Nat.show(q), " | ",
         Score.tenths(Score.ratio(Nat.mul(1000n, h), g)), "% | ", Nat.show(h), " | ",
         Nat.show(g), " | ", Nat.show(Score.ratio(Nat.mul(100n, c), Nat.mul(per, q))),
         " | ", Score.tenths(Nat.div(p50, 100n)), " | ", Score.tenths(Nat.div(mx, 100n)),
         " | ", Nat.show(Score.ratio(Nat.mul(1000n, pn), pm)), " | ", Nat.show(f),
-        " | ", Nat.show(u), " |"])
+        " | ", Nat.show(u), " | ", Score.tenths(Score.ratio(Nat.mul(1000n, cv), sp)), "% |"])
 
 # a Nat as a JSON number
 def Score.num(num: Nat) -> Value.Json:
@@ -230,12 +305,13 @@ def Score.num(num: Nat) -> Value.Json:
 # a row as JSON
 def Score.row.json(row: Row) -> Value.Json:
   match row:
-    case Row{id, hit, gold, chars, unknown, failed, ms, pn, pm}:
+    case Row{id, hit, gold, chars, unknown, failed, ms, pn, pm, cover, span}:
       Json.obj([("id", Json.str(id)), ("recalled", Score.num(hit)),
         ("gold", Score.num(gold)), ("excerpt_chars", Score.num(chars)),
         ("unknown_labels", Score.num(unknown)), ("failed_shards", Score.num(failed)),
         ("wall_ms", Score.num(ms)), ("prompt_n", Score.num(pn)),
-        ("prompt_ms", Score.num(pm))])
+        ("prompt_ms", Score.num(pm)), ("covered_chars", Score.num(cover)),
+        ("gold_chars", Score.num(span))])
 
 # rows as JSON
 def Score.rows.json(rows: List<&2, Row>) -> List<&2, Value.Json>:
@@ -248,14 +324,16 @@ def Score.rows.json(rows: List<&2, Row>) -> List<&2, Value.Json>:
 # the totals as JSON, with the ratios the row prints
 def Score.total.json(tot: Total, +per: Nat) -> Value.Json:
   match tot:
-    case Total{+q, +h, +g, c, u, f, p50, mx, +pn, +pm}:
+    case Total{+q, +h, +g, c, u, f, p50, mx, +pn, +pm, +cv, +sp}:
       Json.obj([("questions", Score.num(q)), ("recalled", Score.num(h)),
         ("gold", Score.num(g)), ("recall_permille", Score.num(Score.ratio(Nat.mul(1000n, h), g))),
         ("mean_excerpt_tokens", Score.num(Score.ratio(Nat.mul(100n, c), Nat.mul(per, q)))),
         ("p50_wall_ms", Score.num(p50)), ("max_wall_ms", Score.num(mx)),
         ("prompt_n", Score.num(pn)), ("prompt_ms", Score.num(pm)),
         ("prefill_tps", Score.num(Score.ratio(Nat.mul(1000n, pn), pm))),
-        ("failed_shards", Score.num(f)), ("unknown_labels", Score.num(u))])
+        ("failed_shards", Score.num(f)), ("unknown_labels", Score.num(u)),
+        ("covered_chars", Score.num(cv)), ("gold_chars", Score.num(sp)),
+        ("coverage_permille", Score.num(Score.ratio(Nat.mul(1000n, cv), sp)))])
 
 # the report: the label, every row and the totals, as one JSON object
 def Score.report(label: String, +rows: List<&2, Row>, +per: Nat) -> String:

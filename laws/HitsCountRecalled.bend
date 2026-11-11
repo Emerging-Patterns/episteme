@@ -6,18 +6,21 @@
 # start, end}` (laws/RecalledMeansOverlap.bend), and `Score.hits(gs, xs)`
 # counts the spans of `gs` that `Excerpt.recalled` holds for over the
 # question's merged excerpts `xs`. A question's result is `Row{id, hit, gold,
-# chars, unknown, failed, ms, prompt_n, prompt_ms}`: the gold spans recalled
-# and in all, the code points of the excerpts' paragraph texts
+# chars, unknown, failed, ms, prompt_n, prompt_ms, cover, span}`: the gold
+# spans recalled and in all, the code points of the excerpts' paragraph texts
 # (`Score.chars`), the unknown labels, the failed shards, the wall
-# milliseconds, and the sums of its reads' `prompt_n` and `prompt_ms`.
+# milliseconds, the sums of its reads' `prompt_n` and `prompt_ms`, and the
+# gold spans' code points returned and in all
+# (laws/CoverageAddsOverExcerpts.bend).
 # `Score.total(rows)` counts the rows, sums each count over them, and takes
 # the wall times' lower median `Score.p50` (the element at index `(n - 1) / 2`
 # of the times sorted ascending, 0 for no rows) and maximum `Score.max` (0 for
 # no rows). `Score.ratio(a, b)` is `a / b` rounded down. The totals row gives
 # recall as `Score.ratio(1000 * hit, gold)` per mille, the mean excerpt tokens
 # as `Score.ratio(100 * chars, per * questions)` at `per / 100` characters a
-# token (`chars_per_token`), and prefill tokens a second as `Score.ratio(1000
-# * prompt_n, prompt_ms)`. Closed examples check the hits of one recalled and
+# token (`chars_per_token`), prefill tokens a second as `Score.ratio(1000
+# * prompt_n, prompt_ms)`, and coverage as `Score.ratio(1000 * cover, span)`
+# per mille. Closed examples check the hits of one recalled and
 # one missed span, the median and maximum of `[9, 1, 5, 3]` (3 and 9) and of
 # no times (0 and 0), and the totals row of two rows; no guarantee rests on
 # them.

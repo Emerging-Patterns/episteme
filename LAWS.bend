@@ -29,8 +29,9 @@
 # laws/IntentAppendsOnChange.bend (the intent file),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
-# laws/TelemetryLineOfARun.bend (telemetry) and
-# laws/HitsCountRecalled.bend (the eval).
+# laws/TelemetryLineOfARun.bend (telemetry), and
+# laws/HitsCountRecalled.bend and laws/CoverageAddsOverExcerpts.bend (the
+# eval).
 #
 # The other law files are closed examples, each one law named for what it
 # checks and with no prose (laws/BlankLinesSeparateParagraphs.bend,
@@ -51,6 +52,7 @@ import ./laws/ChatProjectPasses.bend as ChatProjectPasses
 import ./laws/ChatRecordsKeepEveryBlock.bend as ChatRecordsKeepEveryBlock
 import ./laws/ChatSourceDirName.bend as ChatSourceDirName
 import ./laws/ClaudeCursorReadsBack.bend as ClaudeCursorReadsBack
+import ./laws/CoverageAddsOverExcerpts.bend as CoverageAddsOverExcerpts
 import ./laws/CutEndsAtLastFeed.bend as CutEndsAtLastFeed
 import ./laws/CutReplyFails.bend as CutReplyFails
 import ./laws/DecodeSkipsNonMessages.bend as DecodeSkipsNonMessages
