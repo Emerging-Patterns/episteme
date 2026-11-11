@@ -58,7 +58,7 @@ reader once two large sources were loaded, 2026-11-10: the process held
 about 6 GB beyond its tier).
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (4), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
@@ -66,6 +66,12 @@ from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# A tail pass takes temporaries whose sizes follow the batch's longest shard
+# and the question's length, so no two passes ask for the same blocks; the
+# stock allocator keeps each size it has handed out and the card fills with
+# blocks nothing uses (a 12 GB card at 11.5 GB with 7 GB in use, BATCH 8).
+# Expandable segments hand a freed block's pages to the next size.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import store
 import model
@@ -82,7 +88,7 @@ PAGE = os.sysconf("SC_PAGE_SIZE")
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
-BATCH = int(os.environ.get("BATCH", "4"))
+BATCH = int(os.environ.get("BATCH", "8"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.25"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
