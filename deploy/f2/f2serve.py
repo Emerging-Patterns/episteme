@@ -69,7 +69,7 @@ env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
-import collections, copy, ctypes, hashlib, itertools, json, math, os, re, sys, threading, time
+import collections, copy, ctypes, hashlib, itertools, json, math, os, random, re, sys, threading, time
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -95,6 +95,9 @@ HIGH = None  # this process's memory.high in bytes, set at startup
 PAGE = os.sysconf("SC_PAGE_SIZE")
 SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
+WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
+NULL = float(os.environ.get("NULL", "1.6"))
+WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
 SLABS = int(os.environ.get("SLABS", "12"))
 SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
@@ -389,6 +392,27 @@ class States:
         lacks it, and sent to the GPU, while the GPU scores other shards"""
         return self.reader.apply_async(self.stage, (k,))
 
+    def wordnull(self, k, state, na, pool):
+        """the vector taken from k's scores: NULL times the mean score of
+        WORDNULLS nulls in the shape of a question, "What about <8 words>?",
+        the words drawn from pool (words of the run's shards) by a seed that
+        is the shard's key; kept in a file beside the state. With no words to
+        draw, or WORDNULLS 0, it is the "N/A" score na"""
+        if WORDNULLS <= 0:
+            return na
+        path = "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
+        if os.path.exists(path):
+            return torch.load(path, weights_only=True)
+        words = pool() if pool is not None else []
+        if len(words) < 64:
+            return na
+        rnd = random.Random(k)
+        qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
+        wn = NULL * torch.stack([model.scores(state, q) for q in qs]).mean(0)
+        torch.save(wn, path + ".tmp")
+        os.replace(path + ".tmp", path)
+        return wn
+
     def own(self, k, size, keep, run):
         """whether putting k on the GPU would evict a state this run has
         read: the GPU then holds only the run's own states, and k is scored
@@ -396,7 +420,7 @@ class States:
         return (run is not None and bool(self.gpu) and self.gpu_b + size > CACHE_BYTES
                 and self.used.get(self.victim(self.gpu, keep | {k})) == run)
 
-    def get(self, k, shard, keep=frozenset(), loading=None, run=None):
+    def get(self, k, shard, keep=frozenset(), loading=None, run=None, pool=None):
         """k's state and null; eviction spares the keys in keep (those the
         run reads later) while any other state is resident. loading is a
         prefetch of k from disk, if one was started; run numbers the run
@@ -418,7 +442,9 @@ class States:
                 return st
         elif staged is not None or os.path.exists(self.path(k)):
             state, null = staged[:2] if staged is not None else self.load(k)
-            st, size = (staged[2][0] if staged is not None else copy_to(state, model.DEV), null), nbytes(state[1])
+            there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
+            null = self.wordnull(k, there, null, pool)
+            st, size = (there, null), nbytes(state[1])
             self.n["ram" if staged is not None and staged[3] else "disk"] += 1
             if self.own(k, size, keep, run):
                 if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
@@ -427,10 +453,11 @@ class States:
             self.spare(k, (state, null), size)
         else:
             state = model.prefill(shard)
-            st, size = (state, model.scores(state, "N/A")), nbytes(state[1])
+            na = model.scores(state, "N/A")
+            st, size = (state, self.wordnull(k, state, na, pool)), nbytes(state[1])
             self.n["prefill"] += 1
             self.slots.acquire()
-            self.writer.apply_async(self.save, (k, (host_copy(state), st[1])))
+            self.writer.apply_async(self.save, (k, (host_copy(state), na)))
         self.put_gpu(k, st, size, keep)
         self.used[k] = run
         return st
@@ -462,7 +489,7 @@ class Run:
 
     def __init__(self, shards):
         self.shards = shards
-        self.serial = next(SERIAL)
+        self.serial, self.words = next(SERIAL), None
         self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill
         self.keys = [key(s["text"]) for s in shards]
         self.paras = []  # (shard index, label number, characters, text)
@@ -473,6 +500,14 @@ class Run:
         self.dl = [sum(tf.values()) for tf in self.tfs]
         self.avg = sum(self.dl) / max(len(self.dl), 1)
         self.df = collections.Counter(w for tf in self.tfs for w in tf)
+
+    def pool(self):
+        """words (letters only, 4 or more, lowercase) of up to eight of the
+        run's shards, spread evenly: what the word nulls draw from"""
+        if self.words is None:
+            step = max(1, len(self.shards) // 8)
+            self.words = [w.lower() for sh in self.shards[::step][:8] for w in re.findall(r"[A-Za-z]{4,}", sh["text"])]
+        return self.words
 
     def bm25(self, q):
         N, ws, out = len(self.paras), words(q), []
@@ -506,7 +541,7 @@ class Run:
                     keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
                     self.came[self.keys[i] in STATES.gpu and "gpu" or self.keys[i] in STATES.ram and "ram"
                               or os.path.exists(STATES.path(self.keys[i])) and "disk" or "prefill"] += 1
-                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial)
+                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial, self.pool)
                     batch.append((i, self.keys[i], state, null))
                 for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
                     got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
