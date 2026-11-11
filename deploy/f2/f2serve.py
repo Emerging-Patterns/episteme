@@ -6,7 +6,8 @@ for one shard (the messages of src/read.bend Read.request), answered with
 POST /v1/episteme/run {"question", "shards": [{"source", "n"}, ...]}: F2 then
 ranks every paragraph of the run's shards together and takes them best
 first until BUDGET tokens (characters / 2.55), and answers "ranked": true
-when its store held every named shard. episteme then reads each shard by
+when its store held every named shard, with "states", how many of the
+run's shard states it found on the GPU, in RAM, on disk, or had to prefill. episteme then reads each shard by
 name, POST /v1/episteme/read {"question", "source", "n"}, without its text
 (laws/RankedReadNamesShard.bend), and each read answers the shard's share,
 in the chat completion's shape. A shard read with no notice is ranked alone,
@@ -370,6 +371,7 @@ class Run:
 
     def __init__(self, shards):
         self.shards = shards
+        self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill
         self.keys = [key(s["text"]) for s in shards]
         self.paras = []  # (shard index, label number, characters, text)
         for si, sh in enumerate(shards):
@@ -410,6 +412,8 @@ class Run:
                         loading[k] = STATES.prefetch(k)
                     left[self.keys[i]] -= 1
                     keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
+                    self.came[self.keys[i] in STATES.gpu and "gpu" or self.keys[i] in STATES.ram and "ram"
+                              or os.path.exists(STATES.path(self.keys[i])) and "disk" or "prefill"] += 1
                     state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None))
                     batch.append((i, self.keys[i], state, null))
                 for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
@@ -461,17 +465,19 @@ RUNS = collections.OrderedDict()  # question -> ({shard key: label numbers}, {(s
 
 
 def notice(question, names):
-    """rank the run's shards; answers how many of the names the store holds"""
+    """rank the run's shards; answers how many of the names the store holds
+    and where the run found their states"""
     with META:
         found = [((nm["source"], int(nm["n"])), STORE.shard(nm["source"], int(nm["n"]))) for nm in names]
     found = [(nm, s) for nm, s in found if s]
     shards = [s for _, s in found]
-    picks = Run(shards).pick(question, BUDGET) if shards else {}
+    run = Run(shards)
+    picks = run.pick(question, BUDGET) if shards else {}
     with META:
         RUNS[question] = (picks, {nm: key(s["text"]) for nm, s in found})
         while len(RUNS) > 64:
             RUNS.popitem(last=False)
-    return len(shards)
+    return len(shards), dict(run.came)
 
 
 def answer(text, question):
@@ -524,8 +530,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/v1/episteme/run":
                 req, t = self.body(), time.time()
-                n = notice(req["question"], req["shards"])
-                return self.send(200, {"shards": n, "ms": round((time.time() - t) * 1000),
+                n, came = notice(req["question"], req["shards"])
+                return self.send(200, {"shards": n, "ms": round((time.time() - t) * 1000), "states": came,
                                        "ranked": n > 0 and n == len(req["shards"])})
             if self.path == "/v1/episteme/read":
                 req, t = self.body(), time.time()
