@@ -19,7 +19,8 @@ put in standard units over the run's paragraphs (less its mean, over its
 standard deviation) and the fused score is BM25's plus WEIGHT times the
 attention's, so a paragraph a channel singles out stays ahead of one it
 merely ranks next. Each paragraph's fused score then gains NEIGHBOUR times
-the better of its two neighbours' in the shard.
+the better of its two neighbours' in the shard, and after that SHARD times
+the best score in its shard.
 
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
@@ -58,7 +59,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
@@ -91,6 +92,7 @@ TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
 BATCH = int(os.environ.get("BATCH", "8"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
+SHARD = float(os.environ.get("SHARD", "0.2"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
@@ -425,6 +427,15 @@ class Run:
                 out[i] += NEIGHBOUR * max(near)
         return out
 
+    def lift(self, fused):
+        """each paragraph's score plus SHARD times the best in its shard: a
+        shard that holds a strong paragraph is likelier to hold others that
+        bear on the question"""
+        best = {}
+        for p, x in zip(self.paras, fused):
+            best[p[0]] = max(best.get(p[0], x), x)
+        return [x + SHARD * best[p[0]] for p, x in zip(self.paras, fused)]
+
     def pick(self, q, budget):
         """shard key -> label numbers, best first until the budget"""
         def z(s):
@@ -433,7 +444,7 @@ class Run:
             sd = math.sqrt(sum((x - mean) ** 2 for x in s) / (n - 1)) if n > 1 else 0.0
             return [(x - mean) / (sd + 1e-9) for x in s]
         fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(self.attention(q)))]
-        fused = self.spread(fused)
+        fused = self.lift(self.spread(fused))
         out, used = {k: [] for k in self.keys}, 0.0
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
             cost = self.paras[i][2] / CHARS_PER_TOKEN
