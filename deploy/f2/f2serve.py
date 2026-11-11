@@ -503,7 +503,11 @@ class Run:
 
     def pool(self):
         """words (letters only, 4 or more, lowercase) of up to eight of the
-        run's shards, spread evenly: what the word nulls draw from"""
+        run's shards, spread evenly: what the word nulls draw from. A run of
+        one shard gives none, so that a shard's null is never drawn from the
+        shard alone"""
+        if len(self.shards) < 2:
+            return []
         if self.words is None:
             step = max(1, len(self.shards) // 8)
             self.words = [w.lower() for sh in self.shards[::step][:8] for w in re.findall(r"[A-Za-z]{4,}", sh["text"])]
