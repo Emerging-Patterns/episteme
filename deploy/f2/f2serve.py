@@ -12,11 +12,15 @@ name, POST /v1/episteme/read {"question", "source", "n"}, without its text
 in the chat completion's shape. A shard read with no notice is ranked alone,
 with SHARD_BUDGET.
 
-The ranking is reciprocal-rank fusion (k = 10) of BM25 (k1 1.2, b 0.75,
-lowercase words, light suffix stemming) and the attention score minus the
-same score for the question "N/A", over sqrt(paragraph characters). Each
-paragraph's fused score then gains NEIGHBOUR times the better of its two
-neighbours' in the shard.
+The ranking fuses two scores of each paragraph: BM25 (k1 1.2, b 0.75,
+lowercase words, light suffix stemming), and the attention score minus the
+same score for the question "N/A", over sqrt(paragraph characters). Each is
+put in standard units over the run's paragraphs (less its mean, over its
+standard deviation) and the fused score is BM25's plus WEIGHT times the
+attention's. Scores keep what ranks drop, how far ahead a paragraph is:
+one that a channel singles out stays ahead of one it merely ranks next
+(reciprocal-rank fusion does not). Each paragraph's fused score then gains
+NEIGHBOUR times the better of its two neighbours' in the shard.
 
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
@@ -58,7 +62,7 @@ reader once two large sources were loaded, 2026-11-10: the process held
 about 6 GB beyond its tier).
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), NEIGHBOUR (0.25), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), TERMS_MAX (1024), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, json, math, os, re, sys, threading, time
@@ -89,7 +93,8 @@ SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "1024"))
 BATCH = int(os.environ.get("BATCH", "8"))
-NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.25"))
+WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
+NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
@@ -426,12 +431,12 @@ class Run:
 
     def pick(self, q, budget):
         """shard key -> label numbers, best first until the budget"""
-        def ranks(s):
-            r = [0] * len(s)
-            for k, i in enumerate(sorted(range(len(s)), key=lambda i: -s[i])):
-                r[i] = k
-            return r
-        fused = [1 / (10 + x) + 1 / (10 + y) for x, y in zip(ranks(self.bm25(q)), ranks(self.attention(q)))]
+        def z(s):
+            n = len(s)
+            mean = sum(s) / max(n, 1)
+            sd = math.sqrt(sum((x - mean) ** 2 for x in s) / (n - 1)) if n > 1 else 0.0
+            return [(x - mean) / (sd + 1e-9) for x in s]
+        fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(self.attention(q)))]
         fused = self.spread(fused)
         out, used = {k: [] for k in self.keys}, 0.0
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
