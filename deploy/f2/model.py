@@ -255,6 +255,41 @@ def scores_batch(states, question):
     return out
 
 
+@torch.no_grad()
+def scores_each(state, questions):
+    """scores(state, q) for several questions over one shard in one forward:
+    the shard's cache once a question, each question padded at its end to
+    the longest. A question's tokens attend to nothing after them, so the
+    padding changes none of its scores"""
+    tails = [question_tail(state[3], q) for q in questions]
+    n, t = len(tails), max(nq for _, nq in tails)
+    emb = tails[0][0].new_zeros((n, t, tails[0][0].shape[-1]))
+    for b, (e, nq) in enumerate(tails):
+        emb[b, :nq] = e[0]
+    ids, _cache, spans, _tail = state
+    cache, top = stack([state[1]] * n, t)
+    ln = torch.full((n,), len(ids), device=DEV)
+    pos = ln[:, None] + torch.arange(t, device=DEV)[None]
+    j = torch.arange(top + t, device=DEV)[None, None]
+    row = torch.arange(t, device=DEV)[None, :, None]
+    ok = (j < ln[:, None, None]) | ((j >= top) & (j - top <= row))
+    mask = torch.zeros(ok.shape, dtype=torch.bfloat16, device=DEV).masked_fill(~ok, torch.finfo(torch.bfloat16).min)
+    attention("grouped")
+    o = M(inputs_embeds=emb, past_key_values=cache, position_ids=pos,
+          attention_mask={"full_attention": mask[:, None], "linear_attention": None},
+          use_cache=True, output_attentions=True, logits_to_keep=1)
+    attention("sdpa")
+    A = [x for x in o.attentions if x is not None][AT].float()  # questions, heads, tail tokens, keys
+    cs = torch.tensor([s for s, e in spans])
+    ce = torch.tensor([e for s, e in spans])
+    out = []
+    for b, (_e, nq) in enumerate(tails):
+        cum = torch.nn.functional.pad(A[b, :, :, :len(ids)].cumsum(-1), (1, 0))
+        mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()
+        out.append(mass[HEADS[0]] + mass[HEADS[1]])
+    return out
+
+
 def scores(state, question):
     """per paragraph: the mean over the question's tokens of the attention
     heads 3 and 4 of layer 11 pay to its line, summed over the two heads"""

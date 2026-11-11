@@ -408,7 +408,7 @@ class States:
             return na
         rnd = random.Random(k)
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
-        wn = NULL * torch.stack([model.scores(state, q) for q in qs]).mean(0)
+        wn = NULL * torch.stack(model.scores_each(state, qs)).mean(0)
         torch.save(wn, path + ".tmp")
         os.replace(path + ".tmp", path)
         return wn
