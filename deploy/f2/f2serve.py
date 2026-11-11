@@ -360,10 +360,12 @@ class States:
         elif loading is not None or os.path.exists(self.path(k)):
             state, null = loading.get() if loading is not None else self.load(k)
             st, size = (copy_to(state, model.DEV), null), nbytes(state[1])
-            self.spare(k, (state, null), size)
             self.n["disk"] += 1
             if self.own(k, size, keep, run):
+                if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
+                    self.put_ram(k, (state, null), size, keep)
                 return st
+            self.spare(k, (state, null), size)
         else:
             state = model.prefill(shard)
             st, size = (state, model.scores(state, "N/A")), nbytes(state[1])
