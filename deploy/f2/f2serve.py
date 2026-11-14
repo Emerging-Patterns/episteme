@@ -32,6 +32,8 @@ the best score in its shard.
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
 RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
+A state is written beside its file, flushed to the disk and then renamed,
+and an empty file counts as a miss.
 A run scores the shards whose state is on the GPU first, then those in RAM,
 then the rest; a reader thread stages the states the GPU lacks up to AHEAD
 ahead (read from disk if RAM lacks them, laid in a pinned slab and sent to
@@ -273,6 +275,25 @@ def nbytes(cache):
     return sum(v.numel() * v.element_size() for v, _ in tensors(cache))
 
 
+def write(obj, path):
+    """obj saved at path whole or not at all: written beside it, flushed to
+    the disk, then renamed. Renamed without the flush, a file whose blocks
+    had not reached the disk when the host went down comes back empty"""
+    with open(path + ".tmp", "wb") as f:
+        torch.save(obj, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(path + ".tmp", path)
+
+
+def kept(path):
+    """whether path holds a saved object: a file that is not empty"""
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
 class States:
     """shard states and their "N/A" scores: GPU, then host RAM, then disk"""
 
@@ -334,11 +355,13 @@ class States:
 
     def save(self, k, cpu):
         try:
-            tmp = self.path(k) + ".tmp"
-            torch.save(cpu, tmp)
-            os.replace(tmp, self.path(k))
+            write(cpu, self.path(k))
         finally:
             self.slots.release()
+
+    def kept(self, k):
+        """whether disk holds k's state: an empty file is not one"""
+        return kept(self.path(k))
 
     def load(self, k):
         return torch.load(self.path(k), weights_only=False, map_location="cpu")
@@ -407,7 +430,7 @@ class States:
         if WORDNULLS <= 0:
             return na
         path = "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
-        if os.path.exists(path):
+        if kept(path):
             return torch.load(path, weights_only=True)
         words = pool() if pool is not None else []
         if len(words) < 64:
@@ -415,8 +438,7 @@ class States:
         rnd = random.Random(k)
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
         wn = NULL * torch.stack(model.scores_each(state, qs)).mean(0)
-        torch.save(wn, path + ".tmp")
-        os.replace(path + ".tmp", path)
+        write(wn, path)
         return wn
 
     def own(self, k, size, keep, run):
@@ -446,7 +468,7 @@ class States:
             self.n["ram"] += 1
             if self.own(k, size, keep, run):
                 return st
-        elif staged is not None or os.path.exists(self.path(k)):
+        elif staged is not None or self.kept(k):
             state, null = staged[:2] if staged is not None else self.load(k)
             there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
             null = self.wordnull(k, there, null, pool)
@@ -538,7 +560,7 @@ class Run:
         with Turn():
             order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
             cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
-                    if tier(k) == 1 or tier(k) == 2 and os.path.exists(STATES.path(k))]
+                    if tier(k) == 1 or tier(k) == 2 and STATES.kept(k)]
         loading = {}  # the next AHEAD states the GPU lacks, staged for it while it works
         left = collections.Counter(self.keys)
         got = {}
@@ -552,7 +574,7 @@ class Run:
                     left[self.keys[i]] -= 1
                     keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
                     self.came[self.keys[i] in STATES.gpu and "gpu" or self.keys[i] in STATES.ram and "ram"
-                              or os.path.exists(STATES.path(self.keys[i])) and "disk" or "prefill"] += 1
+                              or STATES.kept(self.keys[i]) and "disk" or "prefill"] += 1
                     state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial, self.pool)
                     batch.append((i, self.keys[i], state, null))
                 for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
