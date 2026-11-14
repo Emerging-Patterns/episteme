@@ -17,7 +17,15 @@ A question that names authors (laws/AuthorKeepsNamedAuthors.bend) has them
 in its notice, "authors": [...]: the run is scored as any other, over every
 paragraph, and the budget is then filled only from paragraphs whose record
 is by one of them, so a speaker with a hundredth of the text still gets the
-whole budget.
+whole budget. Of those, a paragraph is taken only when its attention score,
+before it is put in standard units, is at least FLOOR: the question draws
+that much more attention to it than the null does. One speaker's lines in a
+source are few and short, and without a floor the budget fills with most of
+them whatever was asked; with it a question the speaker never spoke to gets
+little, sometimes nothing, and episteme then delivers no excerpt. FLOOR is
+in the units of the word nulls' score (WORDNULLS above 0). A question that
+names no author has no floor: there it cuts the weaker paragraphs beside a
+strong one, which an answer of several paragraphs needs.
 
 The ranking fuses two scores of each paragraph: BM25 (k1 1.2, b 0.75,
 lowercase words, light suffix stemming), and the attention score minus the
@@ -74,7 +82,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
 import collections, copy, ctypes, hashlib, itertools, json, math, os, random, re, sys, threading, time
@@ -111,6 +119,7 @@ TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
+FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
@@ -603,17 +612,19 @@ class Run:
 
     def pick(self, q, budget, who=()):
         """shard key -> label numbers, best first until the budget; with
-        authors named in who, only paragraphs by one of them are taken"""
+        authors named in who, only paragraphs by one of them are taken, and
+        of those only the ones whose attention score reaches FLOOR"""
         def z(s):
             n = len(s)
             mean = sum(s) / max(n, 1)
             sd = math.sqrt(sum((x - mean) ** 2 for x in s) / (n - 1)) if n > 1 else 0.0
             return [(x - mean) / (sd + 1e-9) for x in s]
-        fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(self.attention(q)))]
+        att = self.attention(q)
+        fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(att))]
         fused = self.lift(self.spread(fused))
         out, used = {k: [] for k in self.keys}, 0.0
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
-            if who and self.authors[i] not in who:
+            if who and (self.authors[i] not in who or att[i] < FLOOR):
                 continue
             cost = self.paras[i][2] / CHARS_PER_TOKEN
             if used + cost > budget and used > 0:
