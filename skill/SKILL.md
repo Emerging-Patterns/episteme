@@ -27,6 +27,8 @@ Every record has one source:
 
 In `chat:claude`, the author `noah` is only the lines Claude Code marks as a human's: what the user typed, queued or sent from an app. Other authors are `agent`, `tool` (a tool result), `task-notification`, `meta` (the harness's own lines: reminders, local commands and their output, scripted prompts), `channel`, `peer`, or the model's name.
 
+Every record has an author, shown last in an excerpt's header, but each kind of source has its own names: in `chat:honcho` the peer's id; in `git:` the commit author's name as git has it (a full name, not the chat name); in `intent` the user; in `book:` the book's own name, which says nothing about who speaks in it. So `--author` takes the name as that source writes it, and one question over a chat and a repo names both: `--author "noah,<name in git>"`.
+
 ## Asking
 
 ```
