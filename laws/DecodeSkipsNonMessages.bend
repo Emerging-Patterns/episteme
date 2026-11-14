@@ -24,7 +24,9 @@
 # `Said` (a `text` block's text, a `thinking` block's thinking), `Call` (a
 # `tool_use` block's name and its input printed as compact JSON), `Back` (a
 # `tool_result` block's size in code points: its string, or the sum of its
-# items' `text`; never its text) or `Mute` (anything else).
+# items' `text`; never its text) or `Mute` (anything else). In a line read
+# as the user's, the harness's reminders at the head of a said text are a
+# `Note` block of their own (laws/ReminderBlocksAreMeta.bend).
 # `Chat.records(path, project, n, l)` gives, in order, the record
 # `claude:<uuid>` whose body is the said texts, each followed by a blank line
 # (none when that has no paragraph), then for each `Call` or `Back` block at

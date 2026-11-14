@@ -133,6 +133,7 @@ import ./laws/RecalledMeansOverlap.bend as RecalledMeansOverlap
 import ./laws/RecordHeaderAndSize.bend as RecordHeaderAndSize
 import ./laws/RecordLineRoundTrips.bend as RecordLineRoundTrips
 import ./laws/RecordsSplitOnlyWhenTooBig.bend as RecordsSplitOnlyWhenTooBig
+import ./laws/ReminderBlocksAreMeta.bend as ReminderBlocksAreMeta
 import ./laws/ReplyIsOkOrFailed.bend as ReplyIsOkOrFailed
 import ./laws/ReplyReadsLabelsAndTimings.bend as ReplyReadsLabelsAndTimings
 import ./laws/RankedReadNamesShard.bend as RankedReadNamesShard

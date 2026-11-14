@@ -96,6 +96,7 @@ import ./proofs/RecalledMeansOverlap.bend as PRecalledMeansOverlap
 import ./proofs/RecordHeaderAndSize.bend as PRecordHeaderAndSize
 import ./proofs/RecordLineRoundTrips.bend as PRecordLineRoundTrips
 import ./proofs/RecordsSplitOnlyWhenTooBig.bend as PRecordsSplitOnlyWhenTooBig
+import ./proofs/ReminderBlocksAreMeta.bend as PReminderBlocksAreMeta
 import ./proofs/ReplyIsOkOrFailed.bend as PReplyIsOkOrFailed
 import ./proofs/ReplyReadsLabelsAndTimings.bend as PReplyReadsLabelsAndTimings
 import ./proofs/RankedReadNamesShard.bend as PRankedReadNamesShard

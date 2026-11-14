@@ -12,7 +12,8 @@
 # (`--author`) is then not answered with the harness's text.
 #
 # A transcript written before Claude Code recorded origins has no line this
-# reads as the user's.
+# reads as the user's. The harness's reminders inside a line of the user's
+# are recorded apart, by `meta` (laws/ReminderBlocksAreMeta.bend).
 import Base
 import ../src/para.bend as P
 import ../src/record.bend as R
