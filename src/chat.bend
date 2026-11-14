@@ -259,14 +259,17 @@ def Chat.origin(+js: Value.Json) -> String:
   Chat.text(Json.as_str(Json.get(Json.get(js, "origin"), "kind")))
 
 # who wrote a user line of a main transcript: noah when its origin is a
-# human (or it has none), else meta for a meta line, else the origin's kind
-def Chat.human.of(plain: Bool, meta: Bool, kind: String) -> String:
-  match plain meta:
-    case True{} False{}:
+# human and it is not meta; meta for a meta line of a human's and for any
+# line with no origin, which is the harness's own; else the origin's kind
+def Chat.human.of(human: Bool, none: Bool, meta: Bool, kind: String) -> String:
+  match human none meta:
+    case True{} _ False{}:
       "noah"
-    case True{} True{}:
+    case True{} _ True{}:
       "meta"
-    case False{} _:
+    case False{} True{} _:
+      "meta"
+    case False{} False{} _:
       kind
 
 # who wrote a user line: agent in a subagent (sidechain) transcript, else
@@ -276,7 +279,7 @@ def Chat.human(side: Bool, meta: Bool, +kind: String) -> String:
     case True{}:
       "agent"
     case False{}:
-      Chat.human.of(Bool.or(String.eq(kind, ""), String.eq(kind, "human")), meta, kind)
+      Chat.human.of(String.eq(kind, "human"), String.eq(kind, ""), meta, kind)
 
 # True when a string read is the one wanted
 def Chat.is(got: Maybe<&2, String>, +want: String) -> Bool:

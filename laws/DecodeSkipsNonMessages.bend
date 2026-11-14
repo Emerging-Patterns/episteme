@@ -10,9 +10,10 @@
 # that is not a compaction summary (`isCompactSummary` true) is read, and it
 # needs a non-empty `uuid` and `timestamp`. The author of a user line is
 # `agent` in a subagent transcript (`isSidechain` true); else `noah` when its
-# `origin.kind` is `human` or it has no origin and it is not `isMeta`; else
-# `meta` for an `isMeta` line with a human or no origin; else its
-# `origin.kind` (for example `task-notification`). The author of an assistant
+# `origin.kind` is `human` and it is not `isMeta`; else `meta` for an
+# `isMeta` line of a human's and for any line with no origin; else its
+# `origin.kind` (for example `task-notification`)
+# (laws/UserLineAuthors.bend). The author of an assistant
 # line is its `message.model`. A prompt typed while Claude was busy is an
 # `attachment` line whose `attachment.type` is `queued_command`: it is read
 # when its `attachment.origin.kind` is `human` (by `noah`) or `channel` (by
