@@ -25,7 +25,7 @@ Every record has one source:
 
 `episteme sources` lists every source with its records, paragraphs and shards. Run it when unsure what to filter on.
 
-In `chat:claude`, the author `noah` is only the user's own typed lines. Other authors are `agent`, `tool` (a tool result), `task-notification`, `meta`, `channel`, `peer`, or the model's name.
+In `chat:claude`, the author `noah` is only the lines Claude Code marks as a human's: what the user typed, queued or sent from an app. Other authors are `agent`, `tool` (a tool result), `task-notification`, `meta` (the harness's own lines: reminders, local commands and their output, scripted prompts), `channel`, `peer`, or the model's name.
 
 ## Asking
 
