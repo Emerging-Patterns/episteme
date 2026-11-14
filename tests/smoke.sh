@@ -522,9 +522,9 @@ grep -q '^skipping http://127.0.0.1:9: ' "$work/err.txt" || fail "the dead reade
 # the eval's line says it came from eval
 tele=$EPISTEME_HOME/telemetry.jsonl
 line=$(tail -n 1 "$tele")
-for want in '"via":"ask","question":"q","filter":["book:tiny/"],"since":null,' '"code":2,"refused":"' \
+for want in '"via":"ask","question":"q","filter":["book:tiny/"],"since":null,"authors":[],' '"code":2,"refused":"' \
   '"sources":[{"source":"book:tiny/tiny-book","shards":' '"shards":[{"source":"book:tiny/tiny-book","n":1,"chars":' \
-  '"ok":false,"ms":0,"labels":0,"out_paras":0,"out_chars":0}' '"excerpts":0,"out_chars":0}'; do
+  '"ok":false,"ms":0,"labels":0,"out_paras":0,"out_chars":0}' '"excerpts":0,"out_chars":0,"returned":[]}'; do
   case $line in *"$want"*) ;; *) fail "the telemetry line lacks $want: $line" ;; esac
 done
 grep -qF '"via":"eval","question":"q","filter":["book:none/"],' "$tele" || fail "no eval telemetry line"

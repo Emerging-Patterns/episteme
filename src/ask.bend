@@ -97,8 +97,9 @@
 # budget from their paragraphs, and the merged excerpts, after the since, are
 # `Filter.by(who, ...)` before they are delivered or written, so no excerpt
 # by another author is delivered whatever a reader returned
-# (laws/AuthorKeepsNamedAuthors.bend). The shards read, the reads and the
-# telemetry line are those of the question without `--author`, and without it
+# (laws/AuthorKeepsNamedAuthors.bend). The shards read and the reads are
+# those of the question without `--author`, its telemetry line names the
+# authors and what it delivered, and without it
 # the run is the one above (laws/NoAuthorChangesNothing.bend); `episteme
 # eval` always runs without one.
 #
@@ -646,12 +647,13 @@ def Ask.logged(
   question: String,
   filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  who: List<&2, String>,
   ms: Nat
 ) -> IO(Result<&2, &2, Refusal, Got>):
   match ran:
     case Ran{all, ap, hits, hp, names, +res}:
       do IO<Result<&2, &2, Refusal, Got>>:
-        Ask.tele(T.Tele.line.with(ts, via, question, filter, since, ms, Ask.code(res), Ask.why(res),
+        Ask.tele(T.Tele.line.with(ts, via, question, filter, since, who, ms, Ask.code(res), Ask.why(res),
           all, ap, hits, hp, names, Ask.rs(res), Ask.xs(res)))
         return res
 
@@ -677,7 +679,7 @@ def Ask.collect(
     behind : Maybe<&2, String> <- St.Store.behind(cap)
     ran : Ran <- Ask.reads(behind, cap, cfg, filter, since, who, question)
     t1 : Nat <- IO.now()
-    Ask.logged(ran, ts, via, question, filter, since, Nat.sub(t1, t0))
+    Ask.logged(ran, ts, via, question, filter, since, who, Nat.sub(t1, t0))
 
 # the run, or stop with its refusal: exit 1 through the store (which frees
 # an ingest's lock), else with its code
