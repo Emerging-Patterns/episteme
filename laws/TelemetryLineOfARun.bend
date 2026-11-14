@@ -2,8 +2,9 @@
 # line to `telemetry.jsonl` under the store: `Tele.line` of the run, a JSON
 # object with, in order, `ts` (when it was asked), `via` (`ask`, `serve` or
 # `eval`), the `question`, its `filter` as written, its `since` (or null),
-# `ms` (milliseconds from the question to its excerpts), its exit `code` and
-# `refused` (the refusal, "" when it ran), then:
+# the `authors` it names (none when it names none), `ms` (milliseconds from
+# the question to its excerpts), its exit `code` and `refused` (the refusal,
+# "" when it ran), then:
 #
 # - `sources`: each source the filter hits, before the since, with its
 #   `shards`, their `chars` (code points) and `paras`;
@@ -12,7 +13,11 @@
 #   `ms`, the count of `labels` it named) and what came out (`out_paras`,
 #   `out_chars`: the paragraphs its labels kept and their code points);
 # - the run's totals: `in_chars` (the shards read), `excerpts` and
-#   `out_chars` (the merged excerpts' paragraph code points).
+#   `out_chars` (the merged excerpts' paragraph code points);
+# - `returned`: what the question delivered, each excerpt in order as its
+#   record's `id` and `author` and the numbers of its `paras`, so that a past
+#   question's result is read again with `episteme show <id>#<n>` and no
+#   reader is asked.
 #
 # A shard with no read is not ok, with ms and labels 0. The example pins
 # the field names and their order.
@@ -43,14 +48,14 @@ def tele.shard(num: U32) -> S.Shard:
 def tele.read() -> Rd.Read:
   Rd.Read{1, "u", ["p2"], True{}, "", 30, 5, 0, 7}
 
-# LAW: an example: a run of one shard whose read kept one paragraph of
-# three code points
+# LAW: an example: a run of one shard, for a question that names an author,
+# whose read kept one paragraph of three code points
 law tele_example:
   for u: Unit
-  {T.Tele.line("2026-11-03T00:00:00.000Z", "ask", "q?", [F.Prefix{"book:x/"}], None{}, 9n, 0, "",
+  {T.Tele.line("2026-11-03T00:00:00.000Z", "ask", "q?", [F.Prefix{"book:x/"}], None{}, ["noah"], 9n, 0, "",
       [tele.shard(3)], [tele.shard(1)], [Rd.Name{"book:x/y", 3}], [tele.read()],
       [E.Ex{tele.rec(), [P.Para{2, 12, 15, "abc"}]}])
-    == "{\"ts\":\"2026-11-03T00:00:00.000Z\",\"via\":\"ask\",\"question\":\"q?\",\"filter\":[\"book:x/\"],\"since\":null,\"ms\":9,\"code\":0,\"refused\":\"\",\"sources\":[{\"source\":\"book:x/y\",\"shards\":1,\"chars\":40,\"paras\":2}],\"shards\":[{\"source\":\"book:x/y\",\"n\":3,\"chars\":40,\"paras\":2,\"ok\":true,\"ms\":7,\"labels\":1,\"out_paras\":1,\"out_chars\":3}],\"in_chars\":40,\"excerpts\":1,\"out_chars\":3}"
+    == "{\"ts\":\"2026-11-03T00:00:00.000Z\",\"via\":\"ask\",\"question\":\"q?\",\"filter\":[\"book:x/\"],\"since\":null,\"authors\":[\"noah\"],\"ms\":9,\"code\":0,\"refused\":\"\",\"sources\":[{\"source\":\"book:x/y\",\"shards\":1,\"chars\":40,\"paras\":2}],\"shards\":[{\"source\":\"book:x/y\",\"n\":3,\"chars\":40,\"paras\":2,\"ok\":true,\"ms\":7,\"labels\":1,\"out_paras\":1,\"out_chars\":3}],\"in_chars\":40,\"excerpts\":1,\"out_chars\":3,\"returned\":[{\"id\":\"s1\",\"author\":\"\",\"paras\":[2]}]}"
     : String}
 
 # LAW: Tele.line is Tele.line.with given each shard's own paragraph count,
@@ -61,6 +66,7 @@ law tele_counts:
   for question: String
   for filter: List<&2, F.Sel>
   for since: Maybe<&2, String>
+  for who: List<&2, String>
   for ms: Nat
   for code: U32
   for why: String
@@ -69,7 +75,7 @@ law tele_counts:
   for names: List<&2, Rd.Name>
   for +rs: List<&2, Rd.Read>
   for +xs: List<&2, E.Ex>
-  {T.Tele.line(ts, via, question, filter, since, ms, code, why, all, hits, names, rs, xs)
-    == T.Tele.line.with(ts, via, question, filter, since, ms, code, why, all, T.Tele.counts(all),
+  {T.Tele.line(ts, via, question, filter, since, who, ms, code, why, all, hits, names, rs, xs)
+    == T.Tele.line.with(ts, via, question, filter, since, who, ms, code, why, all, T.Tele.counts(all),
       hits, T.Tele.counts(hits), names, rs, xs)
     : String}

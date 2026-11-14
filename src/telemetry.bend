@@ -50,6 +50,38 @@ def Tele.since(since: Maybe<&2, String>) -> Value.Json:
     case Some{text}:
       Json.str(text)
 
+# the authors a question names, as JSON strings
+def Tele.who(who: List<&2, String>) -> List<&2, Value.Json>:
+  match who:
+    case Nil{}:
+      []
+    case Con{name, rest}:
+      Json.str(name) <> Tele.who(rest)
+
+# the numbers of paragraphs, as JSON numbers
+def Tele.nums(ps: List<&2, P.Para>) -> List<&2, Value.Json>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{pa, rest}:
+      Tele.u32(E.Excerpt.n(pa)) <> Tele.nums(rest)
+
+# an excerpt as what it returned: its record's id and author and the
+# numbers of its paragraphs, which `episteme show` prints again
+def Tele.ex(cur: E.Ex) -> Value.Json:
+  match cur:
+    case E.Ex{+rec, paras}:
+      Json.obj([("id", Json.str(E.Excerpt.id(rec))), ("author", Json.str(E.Excerpt.author(rec))),
+        ("paras", Json.arr(Tele.nums(paras)))])
+
+# excerpts as what they returned, in order
+def Tele.exs(xs: List<&2, E.Ex>) -> List<&2, Value.Json>:
+  match xs:
+    case Nil{}:
+      []
+    case Con{cur, rest}:
+      Tele.ex(cur) <> Tele.exs(rest)
+
 # a shard's one source, or ""
 def Tele.source(srcs: List<&2, String>) -> String:
   match srcs:
@@ -191,12 +223,14 @@ def Tele.chars(ss: List<&2, S.Shard>) -> Nat:
           Nat.add(U32.to_nat(chars), Tele.chars(rest))
 
 # a question's telemetry line: when it was asked and by which command
-# (via), the question, its filter and since, its milliseconds, its exit
+# (via), the question, its filter, since and the authors it names, its
+# milliseconds, its exit
 # code and refusal ("" when it ran), the size of every source the filter
 # hits (all, before the since, beside their paragraph counts ap), each
 # shard the run read (hits, numbered for the run, beside their paragraph
 # counts hp and names, with reads rs), and the run's totals: code points
-# in, excerpts and code points out. The counts are given, not counted, so
+# in, excerpts and code points out, then what it returned: each excerpt's
+# record id, author and paragraph numbers. The counts are given, not counted, so
 # a shard the question did not load is listed with the count its source's
 # size index holds
 def Tele.line.with(
@@ -205,6 +239,7 @@ def Tele.line.with(
   question: String,
   filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  who: List<&2, String>,
   ms: Nat,
   code: U32,
   why: String,
@@ -218,13 +253,15 @@ def Tele.line.with(
 ) -> String:
   Json.print(Json.obj([("ts", Json.str(ts)), ("via", Json.str(via)),
     ("question", Json.str(question)), ("filter", Json.arr(Tele.sels(filter))),
-    ("since", Tele.since(since)), ("ms", Tele.nat(ms)), ("code", Tele.u32(code)),
+    ("since", Tele.since(since)), ("authors", Json.arr(Tele.who(who))),
+    ("ms", Tele.nat(ms)), ("code", Tele.u32(code)),
     ("refused", Json.str(why)),
     ("sources", Json.arr(Tele.size.all(Tele.sizes(all, ap)))),
     ("shards", Json.arr(Tele.shards(hits, hp, names, rs))),
     ("in_chars", Tele.nat(Tele.chars(hits))),
     ("excerpts", Tele.nat(List.length(&2, E.Ex, xs))),
-    ("out_chars", Tele.nat(Sc.Score.chars(xs)))]))
+    ("out_chars", Tele.nat(Sc.Score.chars(xs))),
+    ("returned", Json.arr(Tele.exs(xs)))]))
 
 # Tele.line.with, each shard's paragraphs counted from the shard
 def Tele.line(
@@ -233,6 +270,7 @@ def Tele.line(
   question: String,
   filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  who: List<&2, String>,
   ms: Nat,
   code: U32,
   why: String,
@@ -242,5 +280,5 @@ def Tele.line(
   +rs: List<&2, Rd.Read>,
   +xs: List<&2, E.Ex>
 ) -> String:
-  Tele.line.with(ts, via, question, filter, since, ms, code, why, all, Tele.counts(all),
+  Tele.line.with(ts, via, question, filter, since, who, ms, code, why, all, Tele.counts(all),
     hits, Tele.counts(hits), names, rs, xs)

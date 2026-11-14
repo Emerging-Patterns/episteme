@@ -23,7 +23,7 @@ episteme serve [--host 127.0.0.1] [--port 18113]
 
 Build with `nix build`. Data lives under `$EPISTEME_HOME` (default `~/.local/share/episteme`); `config.json` there sets the shard size and the reader pool. Ingest holds `$EPISTEME_HOME/lock` (a second ingest refuses); `ask` and `sources` never write, and refuse with "run episteme ingest" when the shards are behind the log. Honcho is read from `$HONCHO_BASE_URL` with `$HONCHO_API_KEY`.
 
-Every question (`ask`, `serve` or `eval`) appends one JSON line to `$EPISTEME_HOME/telemetry.jsonl`: the question, its filter, how long it took, the size of each source it hit, and each shard's size in and excerpts out (laws/TelemetryLineOfARun.bend).
+Every question (`ask`, `serve` or `eval`) appends one JSON line to `$EPISTEME_HOME/telemetry.jsonl`: the question, its filter, how long it took, the size of each source it hit, each shard's size in and excerpts out, and which paragraphs it returned (laws/TelemetryLineOfARun.bend).
 
 ## Readers
 
