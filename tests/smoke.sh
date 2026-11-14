@@ -495,6 +495,8 @@ grep -q '^episteme: --since takes YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ, not 20
   || fail "no --since refusal: $(cat "$work/err.txt")"
 "$bin" ask --filter book:tiny/ --since 2999-01-01 "q" > "$work/out.txt" || fail "ask since after every record failed"
 grep -q '^shards: 0 read, 0 failed$' "$work/out.txt" || fail "a since after every record read: $(cat "$work/out.txt")"
+"$bin" ask --filter book:tiny/ --since 2999-01-01 --author "noah, agent" "q" > "$work/out.txt" || fail "ask with --author failed"
+grep -q '^shards: 0 read, 0 failed$' "$work/out.txt" || fail "ask with --author over no shard read: $(cat "$work/out.txt")"
 # eval without readers: a question whose filter hits no shard scores 0 of
 # 1 and writes its report; a line that is no question exits 1; a label
 # with / and a refused filter exit 2

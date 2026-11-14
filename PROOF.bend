@@ -5,6 +5,7 @@ import ./LAWS.bend as Laws
 import ./proofs/AfterReadsOnFromCursor.bend as PAfterReadsOnFromCursor
 import ./proofs/AllClaudeChatsRefused.bend as PAllClaudeChatsRefused
 import ./proofs/AssistantLineRecords.bend as PAssistantLineRecords
+import ./proofs/AuthorKeepsNamedAuthors.bend as PAuthorKeepsNamedAuthors
 import ./proofs/BareDotIsNoSource.bend as PBareDotIsNoSource
 import ./proofs/BlankLinesSeparateParagraphs.bend as PBlankLinesSeparateParagraphs
 import ./proofs/BookPacksIntoShards.bend as PBookPacksIntoShards
@@ -71,6 +72,7 @@ import ./proofs/MedianAndMax.bend as PMedianAndMax
 import ./proofs/MedianAndMaxOfTimes.bend as PMedianAndMaxOfTimes
 import ./proofs/MergeJoinsRecordAcrossShards.bend as PMergeJoinsRecordAcrossShards
 import ./proofs/MergeOrdersByTime.bend as PMergeOrdersByTime
+import ./proofs/NoAuthorChangesNothing.bend as PNoAuthorChangesNothing
 import ./proofs/Non200Fails.bend as PNon200Fails
 import ./proofs/NonJsonReplyFails.bend as PNonJsonReplyFails
 import ./proofs/NonMessageLinesGiveNothing.bend as PNonMessageLinesGiveNothing

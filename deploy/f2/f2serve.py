@@ -13,6 +13,12 @@ name, POST /v1/episteme/read {"question", "source", "n"}, without its text
 in the chat completion's shape. A shard read with no notice is ranked alone,
 with SHARD_BUDGET.
 
+A question that names authors (laws/AuthorKeepsNamedAuthors.bend) has them
+in its notice, "authors": [...]: the run is scored as any other, over every
+paragraph, and the budget is then filled only from paragraphs whose record
+is by one of them, so a speaker with a hundredth of the text still gets the
+whole budget.
+
 The ranking fuses two scores of each paragraph: BM25 (k1 1.2, b 0.75,
 lowercase words, light suffix stemming), and the attention score minus the
 same score for the question "N/A", over sqrt(paragraph characters). Each is
@@ -493,9 +499,11 @@ class Run:
         self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill
         self.keys = [key(s["text"]) for s in shards]
         self.paras = []  # (shard index, label number, characters, text)
+        self.authors = []  # each paragraph's author, None for a shard known by its text alone
         for si, sh in enumerate(shards):
             for li, (x, y, n) in enumerate(sh["spans"]):
                 self.paras.append((si, li + 1, n, sh["text"][x:y]))
+            self.authors += sh.get("authors") or [None] * len(sh["spans"])
         self.tfs = [tf for k, sh in zip(self.keys, shards) for tf in terms(k, sh)]
         self.dl = [sum(tf.values()) for tf in self.tfs]
         self.avg = sum(self.dl) / max(len(self.dl), 1)
@@ -571,8 +579,9 @@ class Run:
             best[p[0]] = max(best.get(p[0], x), x)
         return [x + SHARD * best[p[0]] for p, x in zip(self.paras, fused)]
 
-    def pick(self, q, budget):
-        """shard key -> label numbers, best first until the budget"""
+    def pick(self, q, budget, who=()):
+        """shard key -> label numbers, best first until the budget; with
+        authors named in who, only paragraphs by one of them are taken"""
         def z(s):
             n = len(s)
             mean = sum(s) / max(n, 1)
@@ -582,6 +591,8 @@ class Run:
         fused = self.lift(self.spread(fused))
         out, used = {k: [] for k in self.keys}, 0.0
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
+            if who and self.authors[i] not in who:
+                continue
             cost = self.paras[i][2] / CHARS_PER_TOKEN
             if used + cost > budget and used > 0:
                 break
@@ -595,15 +606,16 @@ STORE = store.Store()
 RUNS = collections.OrderedDict()  # question -> ({shard key: label numbers}, {(source, n): shard key})
 
 
-def notice(question, names):
-    """rank the run's shards; answers how many of the names the store holds
-    and where the run found their states"""
+def notice(question, names, who=()):
+    """rank the run's shards, for the authors in who when any are named;
+    answers how many of the names the store holds and where the run found
+    their states"""
     with META:
         found = [((nm["source"], int(nm["n"])), STORE.shard(nm["source"], int(nm["n"]))) for nm in names]
     found = [(nm, s) for nm, s in found if s]
     shards = [s for _, s in found]
     run = Run(shards)
-    picks = run.pick(question, BUDGET) if shards else {}
+    picks = run.pick(question, BUDGET, who) if shards else {}
     with META:
         RUNS[question] = (picks, {nm: key(s["text"]) for nm, s in found})
         while len(RUNS) > 64:
@@ -661,7 +673,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/v1/episteme/run":
                 req, t = self.body(), time.time()
-                n, came = notice(req["question"], req["shards"])
+                n, came = notice(req["question"], req["shards"], frozenset(req.get("authors") or ()))
                 return self.send(200, {"shards": n, "ms": round((time.time() - t) * 1000), "states": came,
                                        "ranked": n > 0 and n == len(req["shards"])})
             if self.path == "/v1/episteme/read":

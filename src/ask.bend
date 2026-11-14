@@ -3,7 +3,7 @@
 # a footer. IO: the trusted shell around Filter, Read and Excerpt.
 #
 # Trusted, not proved: `episteme ask [--filter <sources>]... [--since <date>]
-# [--json] <question>` runs `Ask.run`: `Filter.check` of `Filter.parse` of the
+# [--author <names>] [--json] <question>` runs `Ask.run`: `Filter.check` of `Filter.parse` of the
 # `--filter` values, refused with the refusal text on stderr and exit 2, and
 # `--since` as said below; then the config, `Store.ready(cap)`, which stops
 # with exit 1 and names `episteme ingest` when the shards are behind the log
@@ -18,7 +18,7 @@
 # names a failed read `failed <source> shard <n> at <url>: <why>`, and each
 # `--json` read holds `"shard"`, its place in the run, then `"source"` and
 # `"n"`. With none it asks no reader; else it first sends every instance of
-# the configured pool the run notice `Read.notice(names, question)` (the
+# the configured pool the run notice `Read.notice(names, question, who)` (the
 # run's shards' own names in run order; `Reader.notice`,
 # laws/RunNoticeNamesShards.bend), then `Pool.try` reads them with the
 # configured pool, by name on the instances whose answer was ranked
@@ -89,6 +89,22 @@
 # malformed value (exit 2), a since after every record (no shard read, no
 # reader asked) and a since before them (the shards are read, and the dead
 # pool exits 2).
+#
+# Trusted, not proved: `episteme ask --author <names>` names authors,
+# `Filter.who` of the value, read in main.bend. They narrow the run above in
+# two places: the run notice holds them (`Read.notice(names, question, who)`,
+# laws/RunNoticeNamesShards.bend), so a reader that ranks the run fills its
+# budget from their paragraphs, and the merged excerpts, after the since, are
+# `Filter.by(who, ...)` before they are delivered or written, so no excerpt
+# by another author is delivered whatever a reader returned
+# (laws/AuthorKeepsNamedAuthors.bend). The shards read, the reads and the
+# telemetry line are those of the question without `--author`, and without it
+# the run is the one above (laws/NoAuthorChangesNothing.bend); `episteme
+# eval` always runs without one.
+#
+# Why it is trusted: It is argument passing over
+# laws/AuthorKeepsNamedAuthors.bend, laws/RunNoticeNamesShards.bend and
+# laws/NoAuthorChangesNothing.bend and the run above.
 #
 # Trusted, not proved: `Ask.collect`, and so every question `ask`, `serve`
 # and `eval` run (via "ask", "serve" and "eval"), appends one line,
@@ -272,14 +288,15 @@ def Ask.read(
   paths: List<&2, String>,
   +pool: List<&2, St.Slot>,
   +names: List<&2, Rd.Name>,
-  +question: String
+  +question: String,
+  who: List<&2, String>
 ) -> IO(Reads):
   match ss:
     case Nil{}:
       IO.pure(Reads, Reads{Some{[]}, []})
     case Con{_s, _rest}:
       do IO<Reads>:
-        +ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question))
+        +ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question, who))
         Ask.read.by(Ask.every(pool, ranked), ss, paths, pool, ranked, names, question)
 
 # the shards of lights, in order
@@ -452,16 +469,18 @@ def Ask.out(
 type Got is Data:
   Got{xs: List<&2, E.Ex>, rs: List<&2, Rd.Read>, names: List<&2, Rd.Name>, unknown: U32}
 
-# each shard's excerpts merged, those before the since dropped, beside the
-# reads and the shards' names
+# each shard's excerpts merged, those before the since dropped and, when the
+# question names authors, those by another author, beside the reads and the
+# shards' names
 def Ask.got(
   got: List<&2, List<&2, E.Ex>> & U32,
   since: Maybe<&2, String>,
+  +who: List<&2, String>,
   rs: List<&2, Rd.Read>,
   names: List<&2, Rd.Name>
 ) -> Got:
   (lists, unknown) = got
-  Got{F.Filter.after(since, E.Excerpt.merge(lists)), rs, names, unknown}
+  Got{F.Filter.by(who, F.Filter.after(since, E.Excerpt.merge(lists))), rs, names, unknown}
 
 # the first source of a shard's sources, or ""
 def Ask.source(srcs: List<&2, String>) -> String:
@@ -499,6 +518,7 @@ def Ask.came(
   got: Maybe<&2, List<&2, Rd.Read>>,
   +hits: List<&2, S.Shard>,
   since: Maybe<&2, String>,
+  +who: List<&2, String>,
   names: List<&2, Rd.Name>
 ) -> Result<&2, &2, Refusal, Got>:
   match got:
@@ -506,7 +526,7 @@ def Ask.came(
       Fail{Refusal{2, Pl.Pool.none()}}
     case Some{got}:
       +rs = Rd.Read.ordered(hits, got)
-      Done{Ask.got(Rd.Read.excerpts(hits, rs), since, rs, names)}
+      Done{Ask.got(Rd.Read.excerpts(hits, rs), since, who, rs, names)}
 
 # a question's run or refusal beside what telemetry needs of it: every
 # shard the filter hits, the shards it read, numbered for the run, and
@@ -522,11 +542,12 @@ def Ask.ran(
   ap: List<&2, Nat>,
   hp: List<&2, Nat>,
   since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +names: List<&2, Rd.Name>
 ) -> Ran:
   match reads:
     case Reads{got, +hits}:
-      Ran{all, ap, hits, hp, names, Ask.came(got, hits, since, names)}
+      Ran{all, ap, hits, hp, names, Ask.came(got, hits, since, who, names)}
 
 # the shards' reads when the shards are not behind the log, else the
 # refusal and its exit code 1
@@ -536,6 +557,7 @@ def Ask.reads(
   +cfg: St.Config,
   +filter: List<&2, F.Sel>,
   +since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +question: String
 ) -> IO(Ran):
   match behind:
@@ -547,8 +569,8 @@ def Ask.reads(
         +kept : List<&2, St.Light> = Ask.recent(since, ls)
         +ss : List<&2, S.Shard> = Ask.shards(kept)
         +names : List<&2, Rd.Name> = Ask.names(ss)
-        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question)
-        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), since, names)
+        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question, who)
+        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), since, who, names)
 
 # a result's exit code: its refusal's, else Read.code of its reads
 def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
@@ -645,6 +667,7 @@ def Ask.collect(
   +cfg: St.Config,
   +filter: List<&2, F.Sel>,
   +since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +question: String
 ) -> IO(Result<&2, &2, Refusal, Got>):
   do IO<Result<&2, &2, Refusal, Got>>:
@@ -652,7 +675,7 @@ def Ask.collect(
     t0 : Nat <- IO.now()
     +cap : U32 <- St.Store.cap(cfg)
     behind : Maybe<&2, String> <- St.Store.behind(cap)
-    ran : Ran <- Ask.reads(behind, cap, cfg, filter, since, question)
+    ran : Ran <- Ask.reads(behind, cap, cfg, filter, since, who, question)
     t1 : Nat <- IO.now()
     Ask.logged(ran, ts, via, question, filter, since, Nat.sub(t1, t0))
 
@@ -672,18 +695,26 @@ def Ask.gather(
   +cfg: St.Config,
   +filter: List<&2, F.Sel>,
   +since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +question: String
 ) -> IO(Got):
   do IO<Got>:
-    res : Result<&2, &2, Refusal, Got> <- Ask.collect(via, cfg, filter, since, question)
+    res : Result<&2, &2, Refusal, Got> <- Ask.collect(via, cfg, filter, since, who, question)
     Ask.gathered(res)
 
-# a question over the shards a passed filter hits, from the since on
-def Ask.go(+filter: List<&2, F.Sel>, +since: Maybe<&2, String>, +question: String, +json: Bool) -> IO(U32):
+# a question over the shards a passed filter hits, from the since on, by
+# the authors named
+def Ask.go(
+  +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
+  +who: List<&2, String>,
+  +question: String,
+  +json: Bool
+) -> IO(U32):
   do IO<U32>:
     +t0 : Nat <- IO.now()
     +cfg : St.Config <- St.Store.config()
-    got : Got <- Ask.gather("ask", cfg, filter, since, question)
+    got : Got <- Ask.gather("ask", cfg, filter, since, who, question)
     Ask.done(got, json, cfg, t0)
 
 # the refusal on stderr and exit 2
@@ -696,6 +727,7 @@ def Ask.refuse(why: String) -> IO(U32):
 def Ask.dated(
   res: Result<&2, &2, String, Maybe<&2, String>>,
   +filter: List<&2, F.Sel>,
+  +who: List<&2, String>,
   +question: String,
   +json: Bool
 ) -> IO(U32):
@@ -703,13 +735,14 @@ def Ask.dated(
     case Fail{why}:
       Ask.refuse(why)
     case Done{since}:
-      Ask.go(filter, since, question, json)
+      Ask.go(filter, since, who, question, json)
 
 # the --since value read when the check passed, else the refusal and exit 2
 def Ask.checked(
   res: Result<&2, &2, String, Unit>,
   +filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +question: String,
   +json: Bool
 ) -> IO(U32):
@@ -717,13 +750,20 @@ def Ask.checked(
     case Fail{why}:
       Ask.refuse(why)
     case Done{_u}:
-      Ask.dated(F.Filter.since.arg(since), filter, question, json)
+      Ask.dated(F.Filter.since.arg(since), filter, who, question, json)
 
 # ask a question: refused with exit 2 when the filter or the --since value
 # is, else read every shard the filter hits that holds a record at or after
-# the since; answers the exit code, 1 when a read failed
-def Ask.run(+filter: List<&2, F.Sel>, since: Maybe<&2, String>, +question: String, +json: Bool) -> IO(U32):
-  Ask.checked(F.Filter.check(filter), filter, since, question, json)
+# the since, and deliver the excerpts by the authors named (by any author
+# when none is); answers the exit code, 1 when a read failed
+def Ask.run(
+  +filter: List<&2, F.Sel>,
+  since: Maybe<&2, String>,
+  +who: List<&2, String>,
+  +question: String,
+  +json: Bool
+) -> IO(U32):
+  Ask.checked(F.Filter.check(filter), filter, since, who, question, json)
 
 # --- for the server ---
 
@@ -766,6 +806,7 @@ def Ask.reply(res: Result<&2, &2, Refusal, Got>, +cfg: St.Config, +t0: Nat) -> I
 def Ask.answer.dated(
   res: Result<&2, &2, String, Maybe<&2, String>>,
   +filter: List<&2, F.Sel>,
+  +who: List<&2, String>,
   +question: String
 ) -> IO(Result<&2, &2, String, String>):
   match res:
@@ -775,7 +816,7 @@ def Ask.answer.dated(
       do IO<Result<&2, &2, String, String>>:
         +t0 : Nat <- IO.now()
         +cfg : St.Config <- St.Store.config()
-        got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", cfg, filter, since, question)
+        got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", cfg, filter, since, who, question)
         Ask.reply(got, cfg, t0)
 
 # a question over a filter that passed its check, answered as text rather
@@ -785,6 +826,7 @@ def Ask.answer.dated(
 def Ask.answer(
   +filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  +who: List<&2, String>,
   +question: String
 ) -> IO(Result<&2, &2, String, String>):
-  Ask.answer.dated(F.Filter.since.arg(since), filter, question)
+  Ask.answer.dated(F.Filter.since.arg(since), filter, who, question)

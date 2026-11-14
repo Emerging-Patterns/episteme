@@ -9,7 +9,7 @@ episteme reads the user's raw record and returns verbatim excerpts, in time orde
 
 Run it as `episteme <command>` (or `nix run <path to the episteme repo> -- <command>`).
 
-When the `episteme` MCP tools are loaded (`ask`, `show`, `sources`, served by `episteme serve`), call them instead: `ask` takes `question`, `filter` (the `--filter` value) and an optional `since`, `show` takes `id`. Everything below holds for them too; a refusal comes back as a tool error.
+When the `episteme` MCP tools are loaded (`ask`, `show`, `sources`, served by `episteme serve`), call them instead: `ask` takes `question`, `filter` (the `--filter` value) and an optional `since` and `author`, `show` takes `id`. Everything below holds for them too; a refusal comes back as a tool error.
 
 ## Sources
 
@@ -30,12 +30,14 @@ In `chat:claude`, the author `noah` is only the user's own typed lines. Other au
 ## Asking
 
 ```
-episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>] "<question>"
+episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>] [--author <names>] "<question>"
 ```
 
 - **Always pass a narrow `--filter`.** It takes exact sources and prefixes ending in `/`, comma-separated: `--filter book:<corpus>/`, `--filter chat:claude/<project>,git:<repo>`. A missing filter, or one over every chat (`chat:claude/`, `chat:`), is refused.
 - **Cost is the shards read.** A reader scans every shard the filter hits; a shard it has not seen before takes about a second, and a big chat project is hundreds of shards. Pick the fewest sources that can hold the answer; `episteme sources` shows how many shards each has.
 - **For chats or git about recent work, pass `--since`** (UTC). It reads only shards holding a record at or after that time and drops older excerpts, which often cuts a chat project by half or more. It is for chat and git only: book excerpts carry no real date (a book without a year in its id is dated by its ingest time).
+- **For what one speaker said, pass `--author`** (the tool's `author`): `--author noah` for the user's own typed lines. Only excerpts by the named authors come back (comma-separated, as the excerpt headers show them), and the reader spends its whole budget on their paragraphs. Without it, a question like "what did noah say about X" is answered mostly with what the assistant said about X: the user's lines are under a hundredth of a transcript. Put the topic in the question, not the speaker.
+- **The session you are in is not in the record yet.** Transcripts are ingested when a session ends or on a timer, so what was said minutes ago is found in your own context, not by asking.
 - Ask one question at a time, in plain words; put the names and terms the record would use into it.
 
 ## Principles for code
