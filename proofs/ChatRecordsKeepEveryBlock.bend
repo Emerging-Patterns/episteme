@@ -112,6 +112,17 @@ def tools_stamp(
         case C.Mute{}:
           tools_stamp(rest, ts, source, thread, parent, ptr, author, uuid,
             U32.inc(i), r, h)
+        case C.Note{text}:
+          M1.or_else({Laws.chat.stamp(r) == (ts, source, thread, parent)
+              : String & String & String & String},
+            D1.Elem(R.Record, r, C.Chat.tools(rest, ts, source, thread, parent,
+              ptr, author, uuid, U32.inc(i))),
+            made_stamp("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
+              "meta", thread, parent, P.Para.split(text), "", r,
+              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+                U32.inc(i)), h),
+            hr => tools_stamp(rest, ts, source, thread, parent, ptr, author, uuid,
+              U32.inc(i), r, hr))
         case C.Call{name, +input}:
           M1.or_else({Laws.chat.stamp(r) == (ts, source, thread, parent)
               : String & String & String & String},
@@ -268,6 +279,16 @@ def tools_ptr(
         case C.Mute{}:
           tools_ptr(rest, ts, source, thread, parent, ptr, author, uuid,
             U32.inc(i), r, h)
+        case C.Note{text}:
+          ptr_made(True{}, r, ptr,
+            C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              U32.inc(i)),
+            made_ptr("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
+              "meta", thread, parent, P.Para.split(text), "", r,
+              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+                U32.inc(i)), h),
+            hr => tools_ptr(rest, ts, source, thread, parent, ptr, author, uuid,
+              U32.inc(i), r, hr))
         case C.Call{name, +input}:
           ptr_made(Nat.is_le(String.length(input), C.Chat.inline()), r, ptr,
             C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,

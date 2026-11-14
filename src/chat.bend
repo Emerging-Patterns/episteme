@@ -9,9 +9,11 @@ import ezjson@1.2.0.0/src/value.bend as Value
 
 # a content block as ingest keeps it: text or readable thinking (Said), a
 # tool call's name and its input as compact JSON (Call), a tool result's
-# size in code points and never its text (Back), or anything else (Mute)
+# size in code points and never its text (Back), the harness's reminders at
+# the head of a text of the user's (Note), or anything else (Mute)
 type Block is Data:
   Said{text: String}
+  Note{text: String}
   Call{name: String, input: String}
   Back{chars: U32}
   Mute{}
@@ -46,6 +48,8 @@ def Chat.said(bs: List<&2, Block>) -> String:
       match b:
         case Said{text}:
           text ++ "\n\n" ++ Chat.said(rest)
+        case Note{_text}:
+          Chat.said(rest)
         case Call{_name, _input}:
           Chat.said(rest)
         case Back{_chars}:
@@ -84,8 +88,8 @@ def Chat.call(
         name ++ ", " ++ U32.show(U32.from_nat(String.length(input))) ++ " chars", ptr)
 
 # the record a block makes on its own, at index idx of its line: a call's
-# (Chat.call), or a result's pointer to the line, by "tool"; said and mute
-# blocks make none
+# (Chat.call), a result's pointer to the line, by "tool", or a note's text,
+# by "meta"; said and mute blocks make none
 def Chat.tool(
   +ts: String,
   +source: String,
@@ -100,6 +104,9 @@ def Chat.tool(
   match blk:
     case Said{_text}:
       None{}
+    case Note{text}:
+      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, "meta",
+        thread, parent, text, "")
     case Call{name, +input}:
       Chat.call(Nat.is_le(String.length(input), Chat.inline()), ts, source, thread,
         parent, ptr, author, uuid, idx, name, input)
@@ -130,7 +137,7 @@ def Chat.tools(
 
 # the records of a line read from the file at path, line number num, of the
 # project: first the said text as claude:<uuid> (none when it has no
-# paragraph), then one record per call or result block as
+# paragraph), then one record per call, result or note block as
 # claude:<uuid>:<block index>, a result's pointing at file:<path>:<num>
 def Chat.records(+path: String, +project: String, +num: U32, line: Line) -> List<&2, R.Record>:
   match line:
@@ -281,6 +288,101 @@ def Chat.human(side: Bool, meta: Bool, +kind: String) -> String:
     case False{}:
       Chat.human.of(String.eq(kind, "human"), String.eq(kind, ""), meta, kind)
 
+# what a reminder the harness puts into a line opens with
+def Chat.note.open() -> String:
+  "<system-reminder>"
+
+# what such a reminder closes with
+def Chat.note.close() -> String:
+  "</system-reminder>"
+
+# through the last mark of a text, from what its tail holds: one more code
+# point than the tail's count; else the mark's own length when the text
+# opens with it; else None
+def Chat.past.here(later: Maybe<&2, Nat>, opens: Bool, mark: String) -> Maybe<&2, Nat>:
+  match later opens:
+    case Some{count} _:
+      Some{1n+count}
+    case None{} True{}:
+      Some{String.length(mark)}
+    case None{} False{}:
+      None{}
+
+# how many code points of text reach through the last mark in it; None when
+# it holds none
+def Chat.past(text: String, +mark: String) -> Maybe<&2, Nat>:
+  match text:
+    case SNil{}:
+      None{}
+    case SCon{+h, +t}:
+      Chat.past.here(Chat.past(t, mark), String.starts_with(SCon{h, t}, mark), mark)
+
+# the reminders, then what follows them unless it is blank
+def Chat.parts.put(blank: Bool, note: String, rest: String) -> List<&2, Block>:
+  match blank:
+    case True{}:
+      [Note{note}]
+    case False{}:
+      [Note{note}, Said{rest}]
+
+# a text that opens with a reminder, cut after its last one: the first
+# count code points are the harness's, the rest the user's; all of it is the
+# user's when no reminder closes
+def Chat.parts.at(got: Maybe<&2, Nat>, +text: String) -> List<&2, Block>:
+  match got:
+    case None{}:
+      [Said{text}]
+    case Some{+count}:
+      Chat.parts.put(String.is_empty(String.trim(String.drop(text, count))),
+        String.take(text, count), String.drop(text, count))
+
+# a text by whether it opens with a reminder
+def Chat.parts.if(opens: Bool, +text: String) -> List<&2, Block>:
+  match opens:
+    case False{}:
+      [Said{text}]
+    case True{}:
+      Chat.parts.at(Chat.past(text, Chat.note.close()), text)
+
+# a text of the user's as blocks: one said block, unless it opens with a
+# reminder of the harness's; then the text through its last reminder is a
+# note, and what follows it, unless blank, is said
+def Chat.parts(+text: String) -> List<&2, Block>:
+  Chat.parts.if(String.starts_with(text, Chat.note.open()), text)
+
+# the blocks of a line of the user's: each said text as Chat.parts gives
+# it, every other block as it is
+def Chat.mine(bs: List<&2, Block>) -> List<&2, Block>:
+  match bs:
+    case Nil{}:
+      []
+    case Con{b, rest}:
+      match b:
+        case Said{+text}:
+          List.append(&2, Block, Chat.parts(text), Chat.mine(rest))
+        case Note{text}:
+          Note{text} <> Chat.mine(rest)
+        case Call{name, input}:
+          Call{name, input} <> Chat.mine(rest)
+        case Back{chars}:
+          Back{chars} <> Chat.mine(rest)
+        case Mute{}:
+          Mute{} <> Chat.mine(rest)
+
+# a user line's blocks: Chat.mine of them when the line is the user's, else
+# as they are
+def Chat.blocks.by(mine: Bool, bs: List<&2, Block>) -> List<&2, Block>:
+  match mine:
+    case True{}:
+      Chat.mine(bs)
+    case False{}:
+      bs
+
+# a user line read as author's: when it is the user's, the harness's
+# reminders at the head of its texts are notes
+def Chat.line.user(+author: String, blocks: List<&2, Block>, +js: Value.Json) -> Maybe<&2, Line>:
+  Chat.line.with(author, Chat.blocks.by(String.eq(author, "noah"), blocks), js)
+
 # True when a string read is the one wanted
 def Chat.is(got: Maybe<&2, String>, +want: String) -> Bool:
   match got:
@@ -332,8 +434,8 @@ def Chat.queued(+js: Value.Json) -> Maybe<&2, Line>:
 def Chat.decode.who(user: Bool, assistant: Bool, attach: Bool, +js: Value.Json) -> Maybe<&2, Line>:
   match user assistant attach:
     case True{} _ _:
-      Chat.line(Chat.human(Chat.flag(js, "isSidechain"), Chat.flag(js, "isMeta"),
-        Chat.origin(js)), js)
+      Chat.line.user(Chat.human(Chat.flag(js, "isSidechain"), Chat.flag(js, "isMeta"),
+        Chat.origin(js)), Chat.content(Json.get(Json.get(js, "message"), "content")), js)
     case False{} True{} _:
       Chat.line(Chat.text(Json.as_str(Json.get(Json.get(js, "message"), "model"))), js)
     case False{} False{} True{}:
