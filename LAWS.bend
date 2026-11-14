@@ -42,6 +42,7 @@ import Base
 import ./laws/AfterReadsOnFromCursor.bend as AfterReadsOnFromCursor
 import ./laws/AllClaudeChatsRefused.bend as AllClaudeChatsRefused
 import ./laws/AssistantLineRecords.bend as AssistantLineRecords
+import ./laws/AuthorKeepsNamedAuthors.bend as AuthorKeepsNamedAuthors
 import ./laws/BareDotIsNoSource.bend as BareDotIsNoSource
 import ./laws/BlankLinesSeparateParagraphs.bend as BlankLinesSeparateParagraphs
 import ./laws/BookPacksIntoShards.bend as BookPacksIntoShards
@@ -108,6 +109,7 @@ import ./laws/MedianAndMax.bend as MedianAndMax
 import ./laws/MedianAndMaxOfTimes.bend as MedianAndMaxOfTimes
 import ./laws/MergeJoinsRecordAcrossShards.bend as MergeJoinsRecordAcrossShards
 import ./laws/MergeOrdersByTime.bend as MergeOrdersByTime
+import ./laws/NoAuthorChangesNothing.bend as NoAuthorChangesNothing
 import ./laws/Non200Fails.bend as Non200Fails
 import ./laws/NonJsonReplyFails.bend as NonJsonReplyFails
 import ./laws/NonMessageLinesGiveNothing.bend as NonMessageLinesGiveNothing

@@ -358,11 +358,33 @@ def Read.notice.names(names: List<&2, Name>) -> List<&2, Value.Json>:
     case Con{nm, rest}:
       Read.notice.name(nm) <> Read.notice.names(rest)
 
+# the authors as JSON strings, in order
+def Read.notice.strs(who: List<&2, String>) -> List<&2, Value.Json>:
+  match who:
+    case Nil{}:
+      []
+    case Con{name, rest}:
+      Json.str(name) <> Read.notice.strs(rest)
+
+# the notice's fields, "authors" last and only when the question names some
+def Read.notice.fields(
+  question: String,
+  shards: List<&2, Value.Json>,
+  who: List<&2, String>
+) -> List<&1, String & Value.Json>:
+  match who:
+    case Nil{}:
+      [("question", Json.str(question)), ("shards", Json.arr(shards))]
+    case Con{name, rest}:
+      [("question", Json.str(question)), ("shards", Json.arr(shards)),
+        ("authors", Json.arr(Json.str(name) <> Read.notice.strs(rest)))]
+
 # the body of POST <url>/v1/episteme/run before a run's reads: the question
 # and the names of every shard the run reads, so a reader that ranks across
-# shards fills one budget for the run
-def Read.notice(names: List<&2, Name>, question: String) -> Value.Json:
-  Json.obj([("question", Json.str(question)), ("shards", Json.arr(Read.notice.names(names)))])
+# shards fills one budget for the run, and the authors the question names,
+# when it names any, so that the budget is filled from their paragraphs
+def Read.notice(names: List<&2, Name>, question: String, who: List<&2, String>) -> Value.Json:
+  Json.obj(Read.notice.fields(question, Read.notice.names(names), who))
 
 # --- the named read ---
 

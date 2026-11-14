@@ -46,6 +46,12 @@ def Excerpt.source(rec: R.Record) -> String:
     case R.Record{_id, _ts, source, _author, _thread, _parent, _paras, _ptr}:
       source
 
+# a record's author
+def Excerpt.author(rec: R.Record) -> String:
+  match rec:
+    case R.Record{_id, _ts, _source, author, _thread, _parent, _paras, _ptr}:
+      author
+
 # a paragraph's number
 def Excerpt.n(pa: P.Para) -> U32:
   match pa:

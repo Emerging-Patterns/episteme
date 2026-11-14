@@ -487,7 +487,8 @@ def serve.srv() -> Server.Server:
       "Read every shard the filter hits for a question and return verbatim excerpts in time order, then a footer of the reads. Cost is the shards read: keep the filter narrow.",
       schema([prop("question", "The question, in plain words, with the names and terms the record would use"),
           prop("filter", "Sources to read, comma-separated: exact sources and prefixes ending in /, e.g. book:<corpus>/ or chat:claude/<project>,git:<repo>. Required; a filter over every chat is refused"),
-          prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ (chat and git only)")],
+          prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ (chat and git only)"),
+          prop("author", "Return only excerpts by these authors, comma-separated, each a record's author as an excerpt header shows it. Set it whenever the question is about what one speaker said: the user's name for the user's own typed lines")],
         ["question", "filter"])),
     Mcp.tool("show",
       "Return a whole record, or one paragraph of it, and what its pointer points at (a file line or a git patch).",
@@ -509,9 +510,9 @@ def serve.ask(query: Result<&2, &2, String, T.Query>) -> IO(Rpc.Out):
   match query:
     case Fail{why}:
       IO.pure(Rpc.Out, Mcp.ok(Mcp.result.error(why)))
-    case Done{T.Query{filter, since, question}}:
+    case Done{T.Query{filter, since, who, question}}:
       do IO<Rpc.Out>:
-        res : Result<&2, &2, String, String> <- A.Ask.answer(filter, since, question)
+        res : Result<&2, &2, String, String> <- A.Ask.answer(filter, since, who, question)
         return serve.result(res)
 
 # a show as one text: its output, then what went to stderr
@@ -593,6 +594,9 @@ def spec() -> Shake.Cli:
          "Sources to read: values and prefixes ending in /, comma-separated", False{}, None{}, []),
         Shake.opt("since", None{}, Some{"since"},
           "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ",
+          False{}, None{}, []),
+        Shake.opt("author", None{}, Some{"author"},
+          "Print only excerpts by these authors, comma-separated: for what one speaker said",
           False{}, None{}, []),
         Shake.flag("json", None{}, Some{"json"}, "Print one JSON object of excerpts and reads"),
         Shake.pos("question", "The question", True{}, None{}, [])], []),
@@ -723,7 +727,7 @@ def ask.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
     case Some{+m}:
       do IO<Unit>:
         code : U32 <- A.Ask.run(F.Filter.parse(Shake.get_all(m, "filter")),
-          Shake.get(m, "since"),
+          Shake.get(m, "since"), F.Filter.who(Shake.get(m, "author")),
           Maybe.default(&2, String, Shake.get(m, "question"), ""), Shake.on(m, "json"))
         IO.exit(code)
 

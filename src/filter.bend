@@ -1,5 +1,5 @@
-# episteme/src/filter: a question's source filter and since, which shards
-# it reads, which excerpts it keeps and whether it may be asked at all.
+# episteme/src/filter: a question's source filter, since and authors, which
+# shards it reads, which excerpts it keeps and whether it may be asked at all.
 # Pure: no IO.
 import Base
 import ./shard.bend as S
@@ -222,3 +222,57 @@ def Filter.after(since: Maybe<&2, String>, xs: List<&2, E.Ex>) -> List<&2, E.Ex>
       xs
     case Some{+t}:
       Filter.after.go(xs, t)
+
+# --- the authors ---
+
+# a non-empty piece ahead of rest, or rest when the piece is empty
+def Filter.who.piece(+piece: String, rest: List<&2, String>) -> List<&2, String>:
+  match piece:
+    case SNil{}:
+      rest
+    case SCon{_h, _t}:
+      piece <> rest
+
+# the pieces, each with its surrounding whitespace trimmed, the empty ones
+# dropped, in order
+def Filter.who.pieces(ps: List<&2, String>) -> List<&2, String>:
+  match ps:
+    case Nil{}:
+      []
+    case Con{p, more}:
+      Filter.who.piece(String.trim(p), Filter.who.pieces(more))
+
+# the authors an --author value names: split at commas, pieces trimmed,
+# empty pieces dropped; none without the value
+def Filter.who(arg: Maybe<&2, String>) -> List<&2, String>:
+  match arg:
+    case None{}:
+      []
+    case Some{text}:
+      Filter.who.pieces(String.split(text, ','))
+
+# True when the author is one of who
+def Filter.named(who: List<&2, String>, +author: String) -> Bool:
+  match who:
+    case Nil{}:
+      False{}
+    case Con{name, rest}:
+      List.any.if(_u => Filter.named(rest, author), String.eq(author, name))
+
+# the excerpts of xs, in order, whose record's author is one of who
+def Filter.by.go(xs: List<&2, E.Ex>, +who: List<&2, String>) -> List<&2, E.Ex>:
+  match xs:
+    case Nil{}:
+      []
+    case Con{+x, rest}:
+      List.filter.put(E.Ex, x, Filter.by.go(rest, who),
+        Filter.named(who, E.Excerpt.author(E.Excerpt.rec(x))))
+
+# the excerpts a question that names these authors delivers: all of xs when
+# it names none
+def Filter.by(+who: List<&2, String>, xs: List<&2, E.Ex>) -> List<&2, E.Ex>:
+  match who:
+    case Nil{}:
+      xs
+    case Con{_a, _rest}:
+      Filter.by.go(xs, who)

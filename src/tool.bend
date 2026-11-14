@@ -14,9 +14,10 @@ import ./filter.bend as F
 import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
-# an ask call's question, its filter and its since value
+# an ask call's question, its filter, its since value and the authors it
+# names
 type Query is Data:
-  Query{filter: List<&2, F.Sel>, since: Maybe<&2, String>, question: String}
+  Query{filter: List<&2, F.Sel>, since: Maybe<&2, String>, who: List<&2, String>, question: String}
 
 # the refusal of an ask call without a question
 def Tool.no_question() -> String:
@@ -27,27 +28,31 @@ def Tool.checked(
   res: Result<&2, &2, String, Unit>,
   sels: List<&2, F.Sel>,
   since: Maybe<&2, String>,
+  who: List<&2, String>,
   question: String
 ) -> Result<&2, &2, String, Query>:
   match res:
     case Fail{why}:
       Fail{why}
     case Done{_u}:
-      Done{Query{sels, since, question}}
+      Done{Query{sels, since, who, question}}
 
-# an ask call from its filter strings, since value and question: refused
-# without a question, else the command line's filter, refused as the command
-# line refuses it
+# an ask call from its filter strings, since value, author value and
+# question: refused without a question, else the command line's filter,
+# refused as the command line refuses it, and the authors the command line
+# reads from the value
 def Tool.query(
   +vals: List<&2, String>,
   since: Maybe<&2, String>,
+  author: Maybe<&2, String>,
   question: Maybe<&2, String>
 ) -> Result<&2, &2, String, Query>:
   match question:
     case None{}:
       Fail{Tool.no_question()}
     case Some{q}:
-      Tool.checked(F.Filter.check(F.Filter.parse(vals)), F.Filter.parse(vals), since, q)
+      Tool.checked(F.Filter.check(F.Filter.parse(vals)), F.Filter.parse(vals), since,
+        F.Filter.who(author), q)
 
 # s ahead of more when the item was a string, else more
 def Tool.string.or(got: Maybe<&2, String>, more: List<&2, String>) -> List<&2, String>:
@@ -80,4 +85,5 @@ def Tool.strings(+val: Value.Json) -> List<&2, String>:
 # an ask call from its arguments object
 def Tool.ask(+args: Value.Json) -> Result<&2, &2, String, Query>:
   Tool.query(Tool.strings(Json.get(args, "filter")),
-    Json.as_str(Json.get(args, "since")), Json.as_str(Json.get(args, "question")))
+    Json.as_str(Json.get(args, "since")), Json.as_str(Json.get(args, "author")),
+    Json.as_str(Json.get(args, "question")))
