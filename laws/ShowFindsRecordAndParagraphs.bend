@@ -1,7 +1,8 @@
-# `episteme show <id>[#<n>]` prints the first record of the log whose id is
-# `id` (`Cli.find`, in log order: a record seen first wins over a later one
-# with the same id, and no record is None), and of it the paragraphs
-# `Cli.picked` names: every paragraph when no number was wanted, else those
+# `Cli.find(id, recs)` is the first record of `recs` whose id is `id` (in
+# order: a record seen first wins over a later one with the same id, and no
+# record is None). `episteme show <id>[#<n>]` prints the current record with
+# the id (`Live.find`, laws/LiveKeepsLastVersion.bend), and of it the
+# paragraphs `Cli.picked` names: every paragraph when no number was wanted, else those
 # numbered `n` (`Cli.numbered`, in order, none when it has no such
 # paragraph).
 import Base

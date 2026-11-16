@@ -4,9 +4,10 @@
 # A record is the unit the log stores and the shards pack: `Record{id, ts,
 # source, author, thread, parent, paras, ptr}` in `src/record.bend`. `ts` is
 # ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SS.mmmZ`), so string order is time order. An
-# empty `thread`, `parent` or `ptr` means none. `ptr` is `file:<path>:<line>`
-# or `git:<repo path>@<hash>`, and a pointer record's body is one line saying
-# what it points at, its size and its type. `Record.make` splits the body into
+# empty `thread`, `parent` or `ptr` means none. `ptr` says where more of the
+# record is to be found when its body is only a pointer to it (`show`
+# prints what it points at), or, as "removed", that the record removes its
+# id (laws/LiveKeepsLastVersion.bend). `Record.make` splits the body into
 # paragraphs with `Para.split`. `Record.to_line` writes a record as one
 # compact JSON object with no newline, its paragraphs as
 # `[[n,start,end,text],...]`, and `Record.of_line` reads one back.

@@ -62,6 +62,18 @@
 # never holds the size of a tail other than the one in `tail.json`. A
 # missing, unreadable or short `sizes`, or a `tailsize` with no size, only
 # costs the reading.
+# `Store.swap_shards(chars, s, ss, k)` replaces all of source `s`'s shards
+# of one size, as a source packed again from shard 1 needs (src/ingest.bend):
+# it writes `ss`, `sizes` and `tailsize` as `Store.put_shards` would into
+# `repack/<chars>/<Shard.dir(s)>/` (`Store.swap`), first removing what a run
+# cut short left there, then renames the source's directory to that path with
+# `.old` after it, renames the new one into its place and removes the old one
+# (`mv -T`, `rm -rf`). A reader sees the old shards or the new, never a mix,
+# except for the moment between the renames, when the source has no
+# directory; a run cut short there leaves `<swap>.old` and no directory, and
+# `Store.tail` then stops, telling the user to run `episteme ingest
+# --reshard`, which rebuilds the source from the log. Frozen shards change
+# only so: replaced whole, with their sizes, by a swap.
 # `shards/<chars>/covered.json`, `{"covered": k}`, is the mark: every source
 # is caught up with the log up to batch `k`; `Store.mark` reads it, 0 when it
 # is missing. `Store.shards(chars, f)` reads, in name order, the directories
@@ -72,8 +84,9 @@
 # and its tail comes last; any other name is skipped.
 #
 # Why it is trusted: It is IO sequencing over ezsys's `file.read`, `file.save`
-# and `dir.list` and Base's `Process.run` (`mkdir -p`, `rm -rf`), which no law
-# reaches; ezsys's own gate trusts the same effects (on its src/sys.bend).
+# and `dir.list` and Base's `Process.run` (`mkdir -p`, `rm -rf`, `mv -T`),
+# which no law reaches; ezsys's own gate trusts the same effects (on its
+# src/sys.bend).
 # `tests/smoke.sh` runs it end to end.
 import Base
 import ./record.bend as R
@@ -189,7 +202,12 @@ def Store.save(+path: String, text: String) -> IO(Unit):
     res : Result<&1, &1, U32 & String, Unit> <- Sys.file.save(path, text)
     Store.saved(res, path)
 
-# nothing when ok, else refuse with exit 1 naming the lock, leaving it in
+# the exit code of an ingest refused because another holds the lock:
+# EX_TEMPFAIL, so a caller can tell it from a failure and try again
+def Store.busy() -> U32:
+  75
+
+# nothing when ok, else refuse with exit 75 naming the lock, leaving it in
 # place for its holder
 def Store.taken(ok: Bool, path: String) -> IO(Unit):
   match ok:
@@ -198,9 +216,9 @@ def Store.taken(ok: Bool, path: String) -> IO(Unit):
     case False{}:
       do IO<Unit>:
         IO.print_err("episteme: " ++ path ++ " exists: another ingest is running; if none is, remove it by hand")
-        IO.exit(1)
+        IO.exit(Store.busy())
 
-# nothing when the lock was taken, else refuse with exit 1 naming the lock,
+# nothing when the lock was taken, else refuse with exit 75 naming the lock,
 # leaving it in place
 def Store.locked(
   res: Result<&1, &1, U32 & String, U32 & (String & String)>,
@@ -592,6 +610,12 @@ def Store.log() -> IO(List<&2, R.Record>):
 def Store.dir(chars: U32) -> IO(String):
   Store.path("shards/" ++ U32.show(chars))
 
+# where a swap of one source's shards of one size writes them first:
+# repack/<chars>/<Shard.dir(source)> under the data directory, outside
+# shards/, so no read sees a half-written directory
+def Store.swap(chars: U32, src: String) -> IO(String):
+  Store.path("repack/" ++ U32.show(chars) ++ "/" ++ S.Shard.dir(src))
+
 # the directory of one source's shards of one size
 def Store.src(chars: U32, src: String) -> IO(String):
   do IO<String>:
@@ -716,14 +740,32 @@ def Store.lost(empty: Bool, dir: String) -> IO(Unit):
     case False{}:
       Store.die(Unit, dir ++ " has no tail.json; run episteme ingest --reshard")
 
+# stop when a swap of a source's shards was cut short between its two
+# renames: its old directory waits beside the new one with no directory in
+# its place
+def Store.torn(empty: Bool, old: String) -> IO(Unit):
+  match empty:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      Store.die(Unit, old ++ " holds shards whose swap was cut short; run episteme ingest --reshard")
+
 # the tail from a read of tail.json, or None when there is none or its
-# directory does not exist; stop when the directory holds other files
-def Store.tail.read(res: Result<&1, &1, U32 & String, String>, +path: String, +dir: String) -> IO(Maybe<&2, Tail>):
+# directory does not exist; stop when the directory holds other files, or
+# when it does not exist and a swap of it was cut short
+def Store.tail.read(
+  res: Result<&1, &1, U32 & String, String>,
+  +path: String,
+  +dir: String,
+  +old: String
+) -> IO(Maybe<&2, Tail>):
   match res:
     case Fail{_err}:
       do IO<Maybe<&2, Tail>>:
         names : List<&2, String> <- Store.names(dir)
         Store.lost(List.is_empty(&2, String, names), dir)
+        olds : List<&2, String> <- Store.names(old)
+        Store.torn(List.is_empty(&2, String, olds), old)
         return None{}
     case Done{text}:
       do IO<Maybe<&2, Tail>>:
@@ -732,12 +774,13 @@ def Store.tail.read(res: Result<&1, &1, U32 & String, String>, +path: String, +d
 
 # the tail of one source's shards of one size and the last batch packed
 # into it, or None
-def Store.tail(chars: U32, src: String) -> IO(Maybe<&2, Tail>):
+def Store.tail(+chars: U32, +src: String) -> IO(Maybe<&2, Tail>):
   do IO<Maybe<&2, Tail>>:
     +dir : String <- Store.src(chars, src)
     +path : String = dir ++ "/tail.json"
+    +old : String <- Store.swap(chars, src)
     res : Result<&1, &1, U32 & String, String> <- Sys.file.read(path)
-    Store.tail.read(res, path, dir)
+    Store.tail.read(res, path, dir, old ++ ".old")
 
 # a shard's file text by whether it is frozen
 def Store.content.if(frozen: Bool, sh: S.Shard, covered: U32) -> String:
@@ -1303,3 +1346,51 @@ def Store.remove(+path: String) -> IO(Unit):
   do IO<Unit>:
     res : Result<&1, &1, U32 & String, U32 & (String & String)> <- Process.run("rm", ["-rf", path], "", 65536, 600000)
     Store.ran(res, "rm -rf " ++ path)
+
+# run `mv -T -- from to`
+def Store.mv(from: String, to: String) -> IO(Result<&1, &1, U32 & String, U32 & (String & String)>):
+  Process.run("mv", ["-T", "--", from, to], "", 65536, 600000)
+
+# rename a directory, or stop
+def Store.move(+from: String, +to: String) -> IO(Unit):
+  do IO<Unit>:
+    res : Result<&1, &1, U32 & String, U32 & (String & String)> <- Store.mv(from, to)
+    Store.ran(res, "mv -T " ++ from ++ " " ++ to)
+
+# the shards a source's directory holds, none when it holds no file
+def Store.held.if(empty: Bool, +dir: String) -> IO(List<&2, S.Shard>):
+  match empty:
+    case True{}:
+      IO.pure(List<&2, S.Shard>, [])
+    case False{}:
+      Store.shards.in(dir)
+
+# the shards in a source's directory, frozen ones in ascending number, then
+# the tail; none when the directory is missing or empty; stop when the
+# tail is lost
+def Store.held(+dir: String) -> IO(List<&2, S.Shard>):
+  do IO<List<&2, S.Shard>>:
+    names : List<&2, String> <- Store.names(dir)
+    Store.held.if(List.is_empty(&2, String, names), dir)
+
+# replace all of one source's shards of one size with ss: they are written,
+# with their sizes and tailsize, to the swap directory, then the source's
+# directory is renamed to <swap>.old, the swap directory renamed into its
+# place and the old one removed. A reader sees the old shards or the new,
+# and a run cut short between the renames leaves <swap>.old with no source
+# directory, which Store.tail refuses until a reshard
+def Store.swap_shards(+chars: U32, +src: String, +ss: List<&2, S.Shard>, +covered: U32) -> IO(Unit):
+  do IO<Unit>:
+    +dir : String <- Store.src(chars, src)
+    +tmp : String <- Store.swap(chars, src)
+    +old : String = tmp ++ ".old"
+    Store.remove(tmp)
+    Store.remove(old)
+    Store.mkdir(tmp)
+    Store.put.go(ss, tmp, covered)
+    Store.save(tmp ++ "/sizes", Json.print(Json.arr(Store.sizes.json(Store.sizes.of(ss)))) ++ "\n")
+    Store.save(tmp ++ "/tailsize", Json.print(Json.arr(Store.sizes.json(Store.tailsz.of(ss)))) ++ "\n")
+    Store.mkdir(dir)
+    Store.move(dir, old)
+    Store.move(tmp, dir)
+    Store.remove(old)

@@ -6,9 +6,11 @@
 # lost tail, a stale shard size, a crash in the middle of a run, the
 # ingest lock (a second ingest refused, the lock removed after a failed
 # one), the honcho connector against a fake Honcho, the git
-# connector on synthetic repos, the intent file and ingest --all, and ask (with and without --since), its
-# telemetry line and eval without readers. Each ingest case ends with no id twice
-# in the log and shards byte for byte as a reshard writes them. EPISTEME
+# connector on synthetic repos, the intent file and ingest --all, ask (with and without --since), its
+# telemetry line and eval without readers, and records given as JSON lines
+# (changes and removals). Each ingest case ends with no id twice in the log,
+# but the records', whose changes reuse ids, and
+# shards byte for byte as a reshard writes them. EPISTEME
 # names the binary (default bin/episteme, built with
 # `bend main.bend -o bin/episteme`).
 set -euo pipefail
@@ -214,7 +216,7 @@ corpus locked tiny-book
 mkdir "$EPISTEME_HOME/lock"
 touch "$work/mark"
 rc=0; "$bin" ingest books locked > /dev/null 2> "$work/err.txt" || rc=$?
-[ "$rc" = 1 ] || fail "an ingest while the lock exists exited $rc, not 1"
+[ "$rc" = 75 ] || fail "an ingest while the lock exists exited $rc, not 75"
 grep -qF "$EPISTEME_HOME/lock exists: another ingest is running; if none is, remove it by hand" "$work/err.txt" \
   || fail "no lock refusal: $(cat "$work/err.txt")"
 [ -d "$EPISTEME_HOME/lock" ] || fail "a refused ingest removed the lock"
@@ -531,5 +533,59 @@ grep -qF '"via":"eval","question":"q","filter":["book:none/"],' "$tele" || fail 
 rc=0; "$bin" ask --filter book:tiny/ --since 2000-01-01T00:00:00.000Z "q" > "$work/out.txt" 2> "$work/err.txt" || rc=$?
 [ "$rc" = 2 ] || fail "ask since before every record exited $rc, not 2: no shard reached the dead pool"
 config 100
+
+# records given as JSON lines: a first run, a run with nothing new, a new
+# record, a changed and a removed one with --complete (show gives only the
+# new version and exits 1 for the removed one, the shards hold neither old
+# text), another source left alone, a refused line, standard input, and the
+# lock's exit code
+rec() { printf '{"id":"%s","ts":"%s","source":"%s","author":"a","text":"%s"}\n' "$@"; }
+{ rec 'note:x@one' 2000-01-01T00:00:00.001Z note:x 'The lamp is lit.\n\nThe door is shut.'
+  rec 'note:x@two' 2000-01-01T00:00:00.002Z note:x 'A crow on the sill.'
+  printf '{"id":"note:y@k","ts":"1999-01-01T00:00:00.000Z","source":"note:y","paras":[[1,5,9,"abcd"]],"ptr":"file:%s:1"}\n' "$work/ptr.txt"
+} > "$work/in1.jsonl"
+echo 'pointed line' > "$work/ptr.txt"
+"$bin" ingest records "$work/in1.jsonl" > "$work/recs.txt"
+grep -q '^note:x: 2 records$' "$work/recs.txt" || fail "the first records run gave: $(cat "$work/recs.txt")"
+grep -q '^note:y: 1 records$' "$work/recs.txt" || fail "the first records run gave: $(cat "$work/recs.txt")"
+xdir=$shards/note:x
+[ -f "$xdir/tail.json" ] || fail "no shards of note:x"
+"$bin" show 'note:x@one#2' > "$work/out.txt" || fail "show of a given record's paragraph failed"
+grep -q '^note:x@one#2: The door is shut.$' "$work/out.txt" || fail "show printed: $(cat "$work/out.txt")"
+"$bin" show 'note:y@k' > "$work/out.txt" || fail "show of a record with paras failed"
+grep -q '^note:y@k#1: abcd$' "$work/out.txt" || fail "show of paras: $(cat "$work/out.txt")"
+grep -q '^pointed line$' "$work/out.txt" || fail "show did not resolve the pointer: $(cat "$work/out.txt")"
+n=$(batches)
+"$bin" ingest records - < "$work/in1.jsonl" > "$work/recs.txt"
+[ "$(grep -c ': 0 records$' "$work/recs.txt")" = 2 ] || fail "the same records again gave: $(cat "$work/recs.txt")"
+[ "$(batches)" = "$n" ] || fail "the same records again appended a batch"
+{ rec 'note:x@one' 2000-01-01T00:00:00.001Z note:x 'The lamp is out.'
+  rec 'note:x@three' 2000-01-01T00:00:00.003Z note:x 'The crow flies.'
+} > "$work/in2.jsonl"
+"$bin" ingest records --complete "$work/in2.jsonl" > "$work/recs.txt"
+grep -q '^note:x: 4 records$' "$work/recs.txt" || fail "a change, a new record and a removal gave: $(cat "$work/recs.txt")"
+"$bin" show 'note:x@one' > "$work/out.txt" || fail "show of a changed record failed"
+grep -q '^note:x@one#1: The lamp is out.$' "$work/out.txt" || fail "show of a changed record: $(cat "$work/out.txt")"
+grep -q 'lamp is lit' "$work/out.txt" && fail "show of a changed record printed the old text"
+rc=0; "$bin" show 'note:x@one#2' > /dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "show of a paragraph the change dropped exited $rc, not 1"
+rc=0; "$bin" show 'note:x@two' > /dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "show of a removed record exited $rc, not 1"
+grep -rq 'lamp is lit\|crow on the sill\|(removed)' "$xdir" && fail "the shards hold an old or removed record"
+grep -q 'The crow flies' "$xdir"/*.json || fail "the shards lost the new record"
+"$bin" show 'note:y@k' > /dev/null || fail "a complete run over note:x removed note:y"
+[ -e "$EPISTEME_HOME/repack/8000/note:x" ] && fail "a repack left its swap directory"
+[ -e "$EPISTEME_HOME/repack/8000/note:x.old" ] && fail "a repack left the old shards"
+fresh 8000 "records"
+n=$(batches)
+{ rec 'note:x@four' 2000-01-01T00:00:00.004Z note:x 'Fine.'; echo '{"id":"note:x@bad","source":"note:x","text":"no ts"}'; } > "$work/bad.jsonl"
+rc=0; "$bin" ingest records "$work/bad.jsonl" > /dev/null 2> "$work/err.txt" || rc=$?
+[ "$rc" = 1 ] || fail "records with a bad line exited $rc, not 1"
+grep -q 'line 2 is no record' "$work/err.txt" || fail "the bad line is not named: $(cat "$work/err.txt")"
+[ "$(batches)" = "$n" ] || fail "records with a bad line appended a batch"
+mkdir "$EPISTEME_HOME/lock"
+rc=0; "$bin" ingest records "$work/in2.jsonl" > /dev/null 2>&1 || rc=$?
+[ "$rc" = 75 ] || fail "a records ingest while the lock exists exited $rc, not 75"
+rmdir "$EPISTEME_HOME/lock"
 
 echo "smoke: ok"

@@ -6,9 +6,10 @@
 # Trusted, not proved: Only `episteme ingest` writes the log or the shards.
 # Every ingest (a connector, `--all`, `--reshard` or none) first takes the
 # lock `<home>/lock`, made with `mkdir` without `-p`, so it fails when the
-# lock exists: then the run refuses with exit 1 and `<home>/lock exists:
-# another ingest is running; if none is, remove it by hand` on stderr and
-# leaves the lock alone. It holds the lock to its end and removes it then, and
+# lock exists: then the run refuses with exit 75 (`Store.busy`, EX_TEMPFAIL,
+# so a caller can tell it from a failure, which exits 1, and try again) and
+# `<home>/lock exists: another ingest is running; if none is, remove it by
+# hand` on stderr, and leaves the lock alone. It holds the lock to its end and removes it then, and
 # on a failure too: `Store.die` and `Store.exit`, which every failure of the
 # IO shell exits through, remove it in an ingest run and in no other run; a
 # process killed outright leaves it, to be removed by hand. Holding the lock,
@@ -20,9 +21,12 @@
 # memory and never the whole log: it reads the batch, splits it with
 # `Shard.parts`, and, for each source of its parts, reads the source's tail
 # and its `covered` batch (the empty shard 1 and 0 when there is none) and,
-# when the batch is above `covered`, writes `Shard.extend(cap, tail,
-# Shard.part(s, parts))`, which is `Shard.only(s, batch)`
-# (laws/SourceSplitIsOnePass.bend), with `covered` the batch; then it writes
+# when the batch is above `covered`, takes `ys = Shard.part(s, parts)`, which
+# is `Shard.only(s, batch)` (laws/SourceSplitIsOnePass.bend): when no record
+# of `ys` is a removal (`Live.marked`) it writes `Shard.extend(cap, tail, ys)`
+# with `Store.put_shards`; when one is, it reads every shard of `s`
+# (`Store.held`) and writes `Live.repack(cap, shards, ys)` in their place with
+# `Store.swap_shards`; either way with `covered` the batch. Then it writes
 # the mark, the batch's number, last, before it reads the next. Extending a
 # tail batch by batch gives the shards one extension of all of them gives
 # (laws/ExtendResumesPack.bend). A crash leaves each
@@ -45,15 +49,26 @@
 # `c`, packs that batch the same way, moves the mark to it, and caches the
 # batch number in `state/<conn>.json`; when it is empty it writes nothing. It
 # answers how many records it appended. `Ingest.reshard` (`episteme ingest
-# --reshard`) removes `shards/<chars>/covered.json`, then `shards/<chars>/`,
-# for the configured size and syncs from batch 0, so a reshard stopped half
+# --reshard`) removes `shards/<chars>/covered.json`, then `shards/<chars>/`
+# and `repack/<chars>/`, for the configured size and syncs from batch 0, so a reshard stopped half
 # way leaves no mark and packs again from batch 1; other sizes are left alone.
 # It answers how many shards it wrote, counting the `.json` files of the
 # source directories without reading them.
 #
+# A source's shards are then the pack of its current records
+# (laws/SourceShardsHoldCurrentRecords.bend) on one condition this shell
+# trusts: when a batch holds no removal of a source, its records of that
+# source are their own current records and have ids no earlier record of the
+# source has. `episteme ingest records` puts a removal of an id ahead of
+# every record that changes one (laws/RecordsInputChanges.bend); every other
+# connector gives each record an id new to its source, which
+# `tests/smoke.sh` checks as "no id twice in the log", and appends no
+# removal, so for them `Live.of` is the identity.
+#
 # Why it is trusted: It is IO sequencing: no law can state what happens after
 # an effect. Every decision it acts on is laws/IngestKeepsRecordsThatFit.bend,
-# laws/ExtendResumesPack.bend and `Shard.pack`
+# laws/ExtendResumesPack.bend, laws/SourceShardsHoldCurrentRecords.bend and
+# `Shard.pack`
 # (laws/ShardsCoverEveryParagraph.bend, laws/RecordsSplitOnlyWhenTooBig.bend,
 # laws/FrozenShardsFitCap.bend, laws/ShardSourcesSorted.bend,
 # laws/FreezingIsStable.bend and laws/OnlyTheLastShardIsOpen.bend). The lock
@@ -66,14 +81,16 @@
 # (refused by a read and by an ingest's sync with frozen shard 1 untouched,
 # then mended by a reshard), a size that missed two batches, a crash in the
 # middle of a run followed by a run over another corpus, a second ingest
-# refused while the lock exists (the lock left in place, nothing written), and
-# the lock removed after an ingest that failed; each ends with no id twice in
+# refused with exit 75 while the lock exists (the lock left in place, nothing
+# written), the lock removed after an ingest that failed, and records given
+# as JSON lines changed and removed, their source packed again; each ends with no id twice in
 # the log, shards byte for byte as a reshard writes them, and every shard
 # holding the one source its directory names.
 import Base
 import ./record.bend as R
 import ./shard.bend as S
 import ./store.bend as St
+import ./live.bend as L
 
 # report one record when it does not fit
 def Ingest.skip(fits: Bool, rec: R.Record) -> IO(Unit):
@@ -173,12 +190,39 @@ def Ingest.put(+recs: List<&2, R.Record>, tail: S.Shard, +cap: U32, +src: String
     case Con{_rec, _rest}:
       St.Store.put_shards(cap, src, S.Shard.extend(cap, tail, recs), last)
 
+# src's shards packed again from shard 1 after records recs that hold a
+# removal (Live.repack over the shards src's directory holds, none when
+# it has none), covering batch last
+def Ingest.repack(+cap: U32, +src: String, recs: List<&2, R.Record>, last: U32) -> IO(Unit):
+  do IO<Unit>:
+    +dir : String <- St.Store.src(cap, src)
+    ss : List<&2, S.Shard> <- St.Store.held(dir)
+    St.Store.swap_shards(cap, src, L.Live.repack(cap, ss, recs), last)
+
+# src's shards after its records recs: packed again when one of them
+# is a removal, else extended from the tail
+def Ingest.put.if(
+  marked: Bool,
+  +recs: List<&2, R.Record>,
+  tail: S.Shard,
+  +cap: U32,
+  +src: String,
+  last: U32
+) -> IO(Unit):
+  match marked:
+    case True{}:
+      Ingest.repack(cap, src, recs, last)
+    case False{}:
+      Ingest.put(recs, tail, cap, src, last)
+
 # src's shards caught up from its tail: packing goes on with its records
-# of the batches above the last its tail covers
+# of the batches above the last its tail covers, or starts again from
+# shard 1 when one of them is a removal
 def Ingest.source.at(found: St.Tail, +cap: U32, +src: String, +bs: List<&2, Split>) -> IO(Unit):
   match found:
     case St.Tail{tail, +covered}:
-      Ingest.put(Ingest.mine(bs, covered, src), tail, cap, src, Ingest.upto(bs, src, covered))
+      +recs = Ingest.mine(bs, covered, src)
+      Ingest.put.if(L.Live.marked(recs), recs, tail, cap, src, Ingest.upto(bs, src, covered))
 
 # each source of srcs caught up with the split batches bs
 def Ingest.sources(srcs: List<&2, String>, +cap: U32, +bs: List<&2, Split>) -> IO(Unit):
@@ -285,7 +329,9 @@ def Ingest.reshard() -> IO(U32):
     cfg : St.Config <- St.Store.config()
     +cap : U32 <- St.Store.cap(cfg)
     +dir : String <- St.Store.dir(cap)
+    +swaps : String <- St.Store.path("repack/" ++ U32.show(cap))
     St.Store.remove(dir ++ "/covered.json")
     St.Store.remove(dir)
+    St.Store.remove(swaps)
     Ingest.sync(cap)
     St.Store.count(cap)

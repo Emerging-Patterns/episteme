@@ -13,8 +13,8 @@
 # in each module's header, and its defs and types no law can import carry
 # `# noqa: L001` with the reason; tests/smoke.sh runs it end
 # to end on a synthetic book, a synthetic transcript, a fake Honcho, synthetic
-# git repos and an intent file, and tests/live.sh, run by hand, runs the
-# reader pool against live readers.
+# git repos, an intent file and records given as JSON lines, and
+# tests/live.sh, run by hand, runs the reader pool against live readers.
 #
 # The first file of each family opens with what the family is about:
 # laws/ParagraphsAreNonBlankRuns.bend (paragraphs),
@@ -29,6 +29,8 @@
 # laws/HonchoRecordFields.bend (Honcho messages),
 # laws/GitRecordFields.bend (git history),
 # laws/IntentAppendsOnChange.bend (the intent file),
+# laws/RecordsInputChanges.bend (records given as JSON lines),
+# laws/LiveKeepsLastVersion.bend (current records: changes and removals),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
 # laws/TelemetryLineOfARun.bend (telemetry),
@@ -107,6 +109,7 @@ import ./laws/KeepPicksMessageLines.bend as KeepPicksMessageLines
 import ./laws/KeepSkipsUnparsedLines.bend as KeepSkipsUnparsedLines
 import ./laws/LeadingBlankLinesDropped.bend as LeadingBlankLinesDropped
 import ./laws/LinesStopAtLastFeed.bend as LinesStopAtLastFeed
+import ./laws/LiveKeepsLastVersion.bend as LiveKeepsLastVersion
 import ./laws/LongParaLineIsNoRecord.bend as LongParaLineIsNoRecord
 import ./laws/MakeNeedsAParagraph.bend as MakeNeedsAParagraph
 import ./laws/MedianAndMax.bend as MedianAndMax
@@ -136,6 +139,7 @@ import ./laws/RatioRoundsDown.bend as RatioRoundsDown
 import ./laws/RecalledMeansOverlap.bend as RecalledMeansOverlap
 import ./laws/RecordHeaderAndSize.bend as RecordHeaderAndSize
 import ./laws/RecordLineRoundTrips.bend as RecordLineRoundTrips
+import ./laws/RecordsInputChanges.bend as RecordsInputChanges
 import ./laws/RecordsSplitOnlyWhenTooBig.bend as RecordsSplitOnlyWhenTooBig
 import ./laws/ReminderBlocksAreMeta.bend as ReminderBlocksAreMeta
 import ./laws/ReplyIsOkOrFailed.bend as ReplyIsOkOrFailed
@@ -157,6 +161,7 @@ import ./laws/ShardLabelsNumberParagraphs.bend as ShardLabelsNumberParagraphs
 import ./laws/ShardRendersLabelledText.bend as ShardRendersLabelledText
 import ./laws/ShardsCoverEveryParagraph.bend as ShardsCoverEveryParagraph
 import ./laws/ShardSourcesSorted.bend as ShardSourcesSorted
+import ./laws/ShardsGiveBackRecords.bend as ShardsGiveBackRecords
 import ./laws/ShiftMovesOffsets.bend as ShiftMovesOffsets
 import ./laws/ShowFindsRecordAndParagraphs.bend as ShowFindsRecordAndParagraphs
 import ./laws/ShowRunsCommandOutput.bend as ShowRunsCommandOutput
@@ -169,6 +174,7 @@ import ./laws/SinceRefusesNoSeconds.bend as SinceRefusesNoSeconds
 import ./laws/SinceRefusesShortMonth.bend as SinceRefusesShortMonth
 import ./laws/SinceRefusesWord.bend as SinceRefusesWord
 import ./laws/SourceDirsAreSafeAndDistinct.bend as SourceDirsAreSafeAndDistinct
+import ./laws/SourceShardsHoldCurrentRecords.bend as SourceShardsHoldCurrentRecords
 import ./laws/SourcesCountsEachSource.bend as SourcesCountsEachSource
 import ./laws/SourceSplitIsOnePass.bend as SourceSplitIsOnePass
 import ./laws/SubagentPromptByAgent.bend as SubagentPromptByAgent

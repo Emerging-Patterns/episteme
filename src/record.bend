@@ -8,9 +8,9 @@ import ezjson@1.2.0.0/src/value.bend as Value
 # one record: its id, its ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`,
 # so string order is time order), its source, its author, the thread and
 # parent record it answers (empty for none), its body as numbered
-# paragraphs, and the pointer to a large body (`file:<path>:<line>` or
-# `git:<repo path>@<hash>`, empty for none); a pointer record's body is one
-# line saying what it points at, its size and its type
+# paragraphs, and the pointer: where more of the record is to be found when
+# its body only points at it, empty for none, or "removed" for a removal of
+# its id (src/live.bend)
 type Record is Data:
   Record{id: String, ts: String, source: String, author: String,
     thread: String, parent: String, paras: List<&2, P.Para>, ptr: String}

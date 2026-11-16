@@ -67,6 +67,7 @@ import ./proofs/KeepPicksMessageLines.bend as PKeepPicksMessageLines
 import ./proofs/KeepSkipsUnparsedLines.bend as PKeepSkipsUnparsedLines
 import ./proofs/LeadingBlankLinesDropped.bend as PLeadingBlankLinesDropped
 import ./proofs/LinesStopAtLastFeed.bend as PLinesStopAtLastFeed
+import ./proofs/LiveKeepsLastVersion.bend as PLiveKeepsLastVersion
 import ./proofs/LongParaLineIsNoRecord.bend as PLongParaLineIsNoRecord
 import ./proofs/MakeNeedsAParagraph.bend as PMakeNeedsAParagraph
 import ./proofs/MedianAndMax.bend as PMedianAndMax
@@ -96,6 +97,7 @@ import ./proofs/RatioRoundsDown.bend as PRatioRoundsDown
 import ./proofs/RecalledMeansOverlap.bend as PRecalledMeansOverlap
 import ./proofs/RecordHeaderAndSize.bend as PRecordHeaderAndSize
 import ./proofs/RecordLineRoundTrips.bend as PRecordLineRoundTrips
+import ./proofs/RecordsInputChanges.bend as PRecordsInputChanges
 import ./proofs/RecordsSplitOnlyWhenTooBig.bend as PRecordsSplitOnlyWhenTooBig
 import ./proofs/ReminderBlocksAreMeta.bend as PReminderBlocksAreMeta
 import ./proofs/ReplyIsOkOrFailed.bend as PReplyIsOkOrFailed
@@ -117,6 +119,7 @@ import ./proofs/ShardLabelsNumberParagraphs.bend as PShardLabelsNumberParagraphs
 import ./proofs/ShardRendersLabelledText.bend as PShardRendersLabelledText
 import ./proofs/ShardsCoverEveryParagraph.bend as PShardsCoverEveryParagraph
 import ./proofs/ShardSourcesSorted.bend as PShardSourcesSorted
+import ./proofs/ShardsGiveBackRecords.bend as PShardsGiveBackRecords
 import ./proofs/ShiftMovesOffsets.bend as PShiftMovesOffsets
 import ./proofs/ShowFindsRecordAndParagraphs.bend as PShowFindsRecordAndParagraphs
 import ./proofs/ShowRunsCommandOutput.bend as PShowRunsCommandOutput
@@ -129,6 +132,7 @@ import ./proofs/SinceRefusesNoSeconds.bend as PSinceRefusesNoSeconds
 import ./proofs/SinceRefusesShortMonth.bend as PSinceRefusesShortMonth
 import ./proofs/SinceRefusesWord.bend as PSinceRefusesWord
 import ./proofs/SourceDirsAreSafeAndDistinct.bend as PSourceDirsAreSafeAndDistinct
+import ./proofs/SourceShardsHoldCurrentRecords.bend as PSourceShardsHoldCurrentRecords
 import ./proofs/SourcesCountsEachSource.bend as PSourcesCountsEachSource
 import ./proofs/SourceSplitIsOnePass.bend as PSourceSplitIsOnePass
 import ./proofs/SubagentPromptByAgent.bend as PSubagentPromptByAgent

@@ -22,12 +22,13 @@ Every record has one source:
 | `chat:honcho` | Honcho's raw messages |
 | `git:<repo dir>` | one repo's commits, e.g. `git:episteme` |
 | `intent` | the user's intent file, one record per version |
+| any other `<kind>:<name>` | records a caller stored with `episteme ingest records`; a changed record shows only its latest version, a removed one none |
 
 `episteme sources` lists every source with its records, paragraphs and shards. Run it when unsure what to filter on.
 
 In `chat:claude`, the author `noah` is only the lines Claude Code marks as a human's: what the user typed, queued or sent from an app. Other authors are `agent`, `tool` (a tool result), `task-notification`, `meta` (the harness's own lines: reminders, local commands and their output, scripted prompts), `channel`, `peer`, or the model's name.
 
-Every record has an author, shown last in an excerpt's header, but each kind of source has its own names: in `chat:honcho` the peer's id; in `git:` the commit author's name as git has it (a full name, not the chat name); in `intent` the user; in `book:` the book's own name, which says nothing about who speaks in it. So `--author` takes the name as that source writes it, and one question over a chat and a repo names both: `--author "noah,<name in git>"`.
+Every record has an author, shown last in an excerpt's header, but each kind of source has its own names: in `chat:honcho` the peer's id; in `git:` the commit author's name as git has it (a full name, not the chat name); in `intent` the user; in a source stored with `ingest records`, whatever author its caller gave; in `book:` the book's own name, which says nothing about who speaks in it. So `--author` takes the name as that source writes it, and one question over a chat and a repo names both: `--author "noah,<name in git>"`.
 
 ## Asking
 
@@ -69,4 +70,4 @@ Exit 2 with `skipping <url>: ...` means no reader is up. Tell the user rather th
 
 ## Keeping it fresh
 
-`episteme ingest --all` adds what is new from claude, git, the intent file and Honcho. Books take corpus names: `episteme ingest books <corpus>...`. Reads never write: when the shards are behind the log, `ask` and `sources` exit 1 and say to run `episteme ingest`, which packs them. One ingest runs at a time: it holds `$EPISTEME_HOME/lock`, and a second one exits 1 naming it; remove the lock by hand only when no ingest is running.
+`episteme ingest --all` adds what is new from claude, git, the intent file and Honcho. Books take corpus names: `episteme ingest books <corpus>...`; other records come as JSON lines: `episteme ingest records <file|-> [--complete]`. Reads never write: when the shards are behind the log, `ask` and `sources` exit 1 and say to run `episteme ingest`, which packs them. One ingest runs at a time: it holds `$EPISTEME_HOME/lock`, and a second one exits 75 naming it (try again later); remove the lock by hand only when no ingest is running.

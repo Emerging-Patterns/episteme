@@ -5,9 +5,10 @@
 # records paragraphs shards`, then one line per source of the shards of the
 # configured size, in source order: its records (items holding their record's
 # paragraph 1), its paragraphs (the items' paragraphs) and the shards whose
-# `sources` hold it. `episteme show <id>[#<n>]` prints the first record of the
-# log with the id (the text after the last `#` is a paragraph number when it
-# reads as one) as `Excerpt.render` writes one excerpt, with all its
+# `sources` hold it. `episteme show <id>[#<n>]` prints the current record of
+# the log with the id, `Live.find` (laws/LiveKeepsLastVersion.bend): the last
+# record with it, and none when that one is a removal (the text after the
+# last `#` is a paragraph number when it reads as one) as `Excerpt.render` writes one excerpt, with all its
 # paragraphs or paragraph `n`; then, for a `ptr` of `file:<path>:<line>`, that
 # line of the file, and for `git:<repo>@<hash>`, what `git --no-lazy-fetch -C
 # <repo> show --stat --patch --end-of-options <hash>` prints. Commands run
@@ -36,6 +37,7 @@ import Base
 import ./src/para.bend as P
 import ./src/record.bend as R
 import ./src/excerpt.bend as E
+import ./src/live.bend as L
 import ./src/store.bend as St
 import ./src/ingest.bend as In
 import ./src/conn/books.bend as Books
@@ -43,6 +45,7 @@ import ./src/conn/claude.bend as Claude
 import ./src/conn/honcho.bend as Hon
 import ./src/conn/git.bend as Git
 import ./src/conn/intent.bend as Intent
+import ./src/conn/records.bend as Recs
 import ./src/chat.bend as C
 import ./src/filter.bend as F
 import ./src/ask.bend as A
@@ -198,7 +201,7 @@ def show.want(wt: Cl.Want, +arg: String) -> IO(Result<&2, &2, String, Cl.Shown>)
     case Cl.Want{+id, num}:
       do IO<Result<&2, &2, String, Cl.Shown>>:
         log : List<&2, R.Record> <- St.Store.log()
-        show.found(Cl.Cli.find(id, log), num, arg)
+        show.found(L.Live.find(id, log), num, arg)
 
 # a record, or one paragraph of it, and what its pointer points at; or the
 # refusal when there is none
@@ -231,7 +234,8 @@ def show(+arg: String) -> IO(Unit):  # noqa: L001 IO command: reads the log and 
 def serve.instructions() -> String:
   String.concat([
     "episteme returns verbatim, cited excerpts of the primary record: ingested books, ",
-    "Claude Code transcripts, Honcho chats, git history and the intent file. Readers only ",
+    "Claude Code transcripts, Honcho chats, git history, the intent file and records given ",
+    "as JSON lines. Readers only ",
     "pick paragraphs; nothing is summarized, so answer from the excerpts and cite every ",
     "claim as <record id>#<n>. Later excerpts are the current state. Call sources first ",
     "when unsure what to filter on; pass the narrowest filter that can hold the answer, ",
@@ -342,12 +346,21 @@ def ingest.all() -> IO(Unit):
     Intent.Intent.run()
     Hon.Honcho.run()
 
+# the records input, else what ingest.rest picks
+def ingest.more(records: Maybe<&2, Shake.Matched>, git: Bool, intent: Bool) -> IO(Unit):
+  match records:
+    case Some{+rm}:
+      Recs.Records.run(Maybe.default(&2, String, Shake.get(rm, "input"), "-"), Shake.on(rm, "complete"))
+    case None{}:
+      ingest.rest(git, intent)
+
 # the books connector, the claude connector, the honcho connector, else
-# what ingest.rest picks
+# what ingest.more picks
 def ingest.go(
   books: Maybe<&2, Shake.Matched>,
   claude: Bool,
   honcho: Bool,
+  records: Maybe<&2, Shake.Matched>,
   git: Bool,
   intent: Bool
 ) -> IO(Unit):
@@ -359,7 +372,7 @@ def ingest.go(
     case None{} False{} True{}:
       Hon.Honcho.run()
     case None{} False{} False{}:
-      ingest.rest(git, intent)
+      ingest.more(records, git, intent)
 
 # every connector with --all, else the one ingest bound
 def ingest.pick(all: Bool, +found: Shake.Matched) -> IO(Unit):
@@ -368,7 +381,8 @@ def ingest.pick(all: Bool, +found: Shake.Matched) -> IO(Unit):
       ingest.all()
     case False{}:
       ingest.go(Shake.sub_of(found, "books"), Cl.Cli.given(Shake.sub_of(found, "claude")),
-        Cl.Cli.given(Shake.sub_of(found, "honcho")), Cl.Cli.given(Shake.sub_of(found, "git")),
+        Cl.Cli.given(Shake.sub_of(found, "honcho")), Shake.sub_of(found, "records"),
+        Cl.Cli.given(Shake.sub_of(found, "git")),
         Cl.Cli.given(Shake.sub_of(found, "intent")))
 
 # a reshard; else the shards caught up with the log, then every connector
