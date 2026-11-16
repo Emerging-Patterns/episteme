@@ -107,7 +107,7 @@ def Ingest.start(got: Maybe<&2, St.Tail>) -> St.Tail:
       St.Tail{S.Shard{1, [], [], 0, False{}}, 0}
 
 # a log batch's number and its records split by source (Shard.parts)
-type Split is Data:
+type Split is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Split{num: U32, parts: List<&2, S.Part>}
 
 # each batch's records split by source, in one pass a batch

@@ -71,12 +71,12 @@ import ezsys@0.1.0.0/main.bend as Sys
 # how far a run got: the cursor, the records read and not yet appended
 # (newest repo first), their code points, the records appended, the
 # commits read and the repos read so far
-type Run is Data:
+type Run is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Run{pos: List<&2, G.Pos>, recs: List<&2, List<&2, R.Record>>,
     chars: Nat, total: U32, commits: U32, repos: U32}
 
 # a repo: its source name and its path
-type Repo is Data:
+type Repo is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Repo{name: String, path: String}
 
 # the code points of records a batch gathers before it is appended

@@ -60,7 +60,7 @@ import ezsys@0.1.0.0/main.bend as Sys
 # how far a run got: the cursor, the records read and not yet appended
 # (newest file first), their code points, and the records and batches
 # appended so far
-type Run is Data:
+type Run is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Run{seen: List<&2, C.At>, recs: List<&2, List<&2, R.Record>>,
     chars: Nat, total: U32, batches: U32}
 

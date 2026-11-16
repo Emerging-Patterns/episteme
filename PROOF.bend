@@ -16,6 +16,7 @@ import ./proofs/ChatProjectPasses.bend as PChatProjectPasses
 import ./proofs/ChatRecordsKeepEveryBlock.bend as PChatRecordsKeepEveryBlock
 import ./proofs/ChatSourceDirName.bend as PChatSourceDirName
 import ./proofs/ClaudeCursorReadsBack.bend as PClaudeCursorReadsBack
+import ./proofs/CliNamesItsCommands.bend as PCliNamesItsCommands
 import ./proofs/CoverageAddsOverExcerpts.bend as PCoverageAddsOverExcerpts
 import ./proofs/CutEndsAtLastFeed.bend as PCutEndsAtLastFeed
 import ./proofs/CutReplyFails.bend as PCutReplyFails
@@ -117,6 +118,9 @@ import ./proofs/ShardRendersLabelledText.bend as PShardRendersLabelledText
 import ./proofs/ShardsCoverEveryParagraph.bend as PShardsCoverEveryParagraph
 import ./proofs/ShardSourcesSorted.bend as PShardSourcesSorted
 import ./proofs/ShiftMovesOffsets.bend as PShiftMovesOffsets
+import ./proofs/ShowFindsRecordAndParagraphs.bend as PShowFindsRecordAndParagraphs
+import ./proofs/ShowRunsCommandOutput.bend as PShowRunsCommandOutput
+import ./proofs/ShowWantsIdAndParagraph.bend as PShowWantsIdAndParagraph
 import ./proofs/SinceDateIsMidnight.bend as PSinceDateIsMidnight
 import ./proofs/SinceDropsOldExcerpts.bend as PSinceDropsOldExcerpts
 import ./proofs/SinceKeepsFullTime.bend as PSinceKeepsFullTime
@@ -125,6 +129,7 @@ import ./proofs/SinceRefusesNoSeconds.bend as PSinceRefusesNoSeconds
 import ./proofs/SinceRefusesShortMonth.bend as PSinceRefusesShortMonth
 import ./proofs/SinceRefusesWord.bend as PSinceRefusesWord
 import ./proofs/SourceDirsAreSafeAndDistinct.bend as PSourceDirsAreSafeAndDistinct
+import ./proofs/SourcesCountsEachSource.bend as PSourcesCountsEachSource
 import ./proofs/SourceSplitIsOnePass.bend as PSourceSplitIsOnePass
 import ./proofs/SubagentPromptByAgent.bend as PSubagentPromptByAgent
 import ./proofs/TelemetryLineOfARun.bend as PTelemetryLineOfARun

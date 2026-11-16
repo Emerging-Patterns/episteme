@@ -45,7 +45,7 @@ import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
 # a span of a book: where it starts, in code points, and its text
-type Span is Data:
+type Span is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Span{at: U32, body: String}
 
 # the number of code points of a text, as a U32

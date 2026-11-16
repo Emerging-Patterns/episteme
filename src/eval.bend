@@ -39,7 +39,7 @@ import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
 # an eval question: its id, its text, its filter and its gold spans
-type Q is Data:
+type Q is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Q{id: String, question: String, filter: List<&2, String>, gold: List<&2, E.Gold>}
 
 # --- the questions ---

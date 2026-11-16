@@ -12,7 +12,7 @@ episteme answers a question from the raw record: one append-only log of records,
 nix flake check                                      # the gate: proofs and lint
 nix develop -c ez lock                               # must leave ez.lock.toml unchanged unless you meant to change it
 nix develop -c ez prove                              # every PROOF.bend in the tree
-nix develop -c ez tool run bolt --RTS +RTS --gpu off -RTS   # lint: 0 errors
+nix develop -c ez tool run bolt check --RTS +RTS --gpu off -RTS   # lint: clean
 ```
 
 Flakes see only files git tracks: `git add` a new file before `nix flake check`. The proof pass line is exactly `ALL PROOFS CHECK`; bolt must report 0 errors.
