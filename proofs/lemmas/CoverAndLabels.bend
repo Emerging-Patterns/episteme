@@ -4,7 +4,6 @@ import ../../src/para.bend as P
 import ../../src/record.bend as R
 import ../../src/shard.bend as S
 import ../../src/excerpt.bend as E
-import ../../src/git.bend as G
 import ../../laws/ShardLabelsNumberParagraphs.bend as L1
 import ../../laws/defs/Specification.bend as D1
 import ./BoolFacts.bend as M1

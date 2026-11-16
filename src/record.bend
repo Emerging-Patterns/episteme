@@ -222,28 +222,6 @@ def Record.size(+rec: Record) -> Nat:
 def Record.chars(+rec: Record) -> U32:
   U32.from_nat(Record.size(rec))
 
-# a paragraph moved by code points on: its start and end plus by
-def Record.shift.para(pa: P.Para, +by: U32) -> P.Para:
-  match pa:
-    case P.Para{n, start, end, text}:
-      P.Para{n, U32.add(start, by), U32.add(end, by), text}
-
-# paragraphs moved by code points on, in order
-def Record.shift.paras(ps: List<&2, P.Para>, +by: U32) -> List<&2, P.Para>:
-  match ps:
-    case Nil{}:
-      []
-    case Con{pa, rest}:
-      Record.shift.para(pa, by) <> Record.shift.paras(rest, by)
-
-# a record whose body was cut from a text at offset by, its paragraphs'
-# offsets moved to be offsets into that whole text
-def Record.shift(rec: Record, +by: U32) -> Record:
-  match rec:
-    case Record{id, ts, source, author, thread, parent, paras, ptr}:
-      Record{id, ts, source, author, thread, parent,
-        Record.shift.paras(paras, by), ptr}
-
 # True when a string is not empty
 def Record.filled(str: String) -> Bool:
   match str:

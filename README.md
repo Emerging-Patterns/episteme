@@ -2,17 +2,11 @@
 
 Summary-less RAG in Bend 2: retrieval returns verbatim, cited source paragraphs. No embeddings, and no generated text in retrieval.
 
-Books, Claude Code transcripts, Honcho chats, git history, an intent file and any records a caller gives as JSON lines go into one append-only log, packed into frozen shards (one source per shard). For a question, small local reader models pick the paragraphs that bear on it, and episteme returns them in time order. Readers only name paragraphs; they never write.
+Records a caller gives as JSON lines go into one append-only log, packed into frozen shards (one source per shard). For a question, small local reader models pick the paragraphs that bear on it, and episteme returns them in time order. Readers only name paragraphs; they never write.
 The gate is `nix flake check`; what episteme guarantees is in `laws/`, one file per guarantee.
 
 ```
-episteme ingest books <corpus>...   # book:<corpus>/<book>
-episteme ingest claude              # chat:claude/<project>, from ~/.claude/projects
-episteme ingest honcho              # chat:honcho
-episteme ingest git                 # git:<repo dir>
-episteme ingest intent              # intent, from $EPISTEME_HOME/intent.md
 episteme ingest records <file|-> [--complete]   # records given as JSON lines
-episteme ingest --all               # claude, git, intent, honcho
 episteme ingest                     # pack log batches the shards lack
 episteme ingest --reshard
 episteme sources
@@ -22,11 +16,11 @@ episteme eval <questions.jsonl> --label <name>
 episteme serve [--host 127.0.0.1] [--port 18113]
 ```
 
-Build with `nix build`. Data lives under `$EPISTEME_HOME` (default `~/.local/share/episteme`); `config.json` there sets the shard size and the reader pool. Ingest holds `$EPISTEME_HOME/lock` (a second ingest refuses with exit 75); `ask` and `sources` never write, and refuse with "run episteme ingest" when the shards are behind the log. Honcho is read from `$HONCHO_BASE_URL` with `$HONCHO_API_KEY`. A record's id names its last version: a changed record is stored after a removal of its id, a removed one as a removal alone, and its source is then packed again, so `ask` and `show` give only the current version (laws/LiveKeepsLastVersion.bend, laws/SourceShardsHoldCurrentRecords.bend).
+Build with `nix build`. Data lives under `$EPISTEME_HOME` (default `~/.local/share/episteme`); `config.json` there sets the shard size, the reader pool and, optionally, `refuse`: `[[selector, message], ...]`, filters too wide to ask, each refused with its message, along with any prefix that selects all it does (laws/FilterRefusesCoveredSelectors.bend). Ingest holds `$EPISTEME_HOME/lock` (a second ingest refuses with exit 75); `ask` and `sources` never write, and refuse with "run episteme ingest" when the shards are behind the log. A record's id names its last version: a changed record is stored after a removal of its id, a removed one as a removal alone, and its source is then packed again, so `ask` and `show` give only the current version (laws/LiveKeepsLastVersion.bend, laws/SourceShardsHoldCurrentRecords.bend).
 
 ## Records as JSON lines
 
-`episteme ingest records <file>` (`-` reads standard input) stores records a caller builds. Each non-empty line is one record as the log stores it:
+`episteme ingest records <file>` (`-` reads standard input) stores records a caller builds: episteme reads no source itself, so what a book, a chat or a repo becomes as records is the caller's. Each non-empty line is one record as the log stores it:
 
 ```
 {"id": "<source>@<key>", "ts": "YYYY-MM-DDTHH:MM:SS.mmmZ", "source": "<kind>:<name>",

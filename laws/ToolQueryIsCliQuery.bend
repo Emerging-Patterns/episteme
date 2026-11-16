@@ -1,6 +1,6 @@
 # `episteme serve` answers MCP tool calls, and an `ask` call reads its
-# arguments as `episteme ask` reads its flags. `Tool.query(vals, since,
-# author, question)` takes the call's `filter` strings (each one a `--filter`
+# arguments as `episteme ask` reads its flags. `Tool.query(refs, vals,
+# since, author, question)` takes the store's refusals and the call's `filter` strings (each one a `--filter`
 # value), its `since` value, its `author` value and its question. With a
 # question, its filter is `Filter.parse(vals)`, refused with `Filter.check`'s
 # refusal exactly when the command line's filter would be, the since value is
@@ -30,19 +30,21 @@ def verdict(
 # when the command line's check refuses it, the since value unread, and the
 # authors the command line reads from the author value
 law query_is_cli:
+  for +refs: List<&2, F.Refusal>
   for +vals: List<&2, String>
   for since: Maybe<&2, String>
   for author: Maybe<&2, String>
   for question: String
-  {T.Tool.query(vals, since, author, Some{question})
-    == verdict(F.Filter.check(F.Filter.parse(vals)), F.Filter.parse(vals),
+  {T.Tool.query(refs, vals, since, author, Some{question})
+    == verdict(F.Filter.check(refs, F.Filter.parse(vals)), F.Filter.parse(vals),
       since, F.Filter.who(author), question)
     : Result<&2, &2, String, T.Query>}
 
 # LAW: a call without a question is refused, whatever else it holds
 law query_needs_question:
+  for +refs: List<&2, F.Refusal>
   for +vals: List<&2, String>
   for since: Maybe<&2, String>
   for author: Maybe<&2, String>
-  {T.Tool.query(vals, since, author, None{}) == Fail{T.Tool.no_question()}
+  {T.Tool.query(refs, vals, since, author, None{}) == Fail{T.Tool.no_question()}
     : Result<&2, &2, String, T.Query>}

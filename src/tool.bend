@@ -42,6 +42,7 @@ def Tool.checked(
 # refused as the command line refuses it, and the authors the command line
 # reads from the value
 def Tool.query(
+  +refs: List<&2, F.Refusal>,
   +vals: List<&2, String>,
   since: Maybe<&2, String>,
   author: Maybe<&2, String>,
@@ -51,7 +52,7 @@ def Tool.query(
     case None{}:
       Fail{Tool.no_question()}
     case Some{q}:
-      Tool.checked(F.Filter.check(F.Filter.parse(vals)), F.Filter.parse(vals), since,
+      Tool.checked(F.Filter.check(refs, F.Filter.parse(vals)), F.Filter.parse(vals), since,
         F.Filter.who(author), q)
 
 # s ahead of more when the item was a string, else more
@@ -83,7 +84,7 @@ def Tool.strings(+val: Value.Json) -> List<&2, String>:
   Tool.strings.if(Json.as_str(val), val)
 
 # an ask call from its arguments object
-def Tool.ask(+args: Value.Json) -> Result<&2, &2, String, Query>:
-  Tool.query(Tool.strings(Json.get(args, "filter")),
+def Tool.ask(+refs: List<&2, F.Refusal>, +args: Value.Json) -> Result<&2, &2, String, Query>:
+  Tool.query(refs, Tool.strings(Json.get(args, "filter")),
     Json.as_str(Json.get(args, "since")), Json.as_str(Json.get(args, "author")),
     Json.as_str(Json.get(args, "question")))

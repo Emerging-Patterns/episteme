@@ -32,9 +32,9 @@
 # `Excerpt.recalled(g, xs)` scores the eval: a gold span `Gold{source, start,
 # end}` is recalled when some excerpt's record has `source` and holds a
 # paragraph whose start/end offsets overlap the span, `start < g.end` and
-# `g.start < end`; the paragraphs' start/end offsets are whole-file positions,
-# as the books connector sets them with `Record.shift`
-# (laws/ShiftMovesOffsets.bend, src/conn/books.bend); closed examples check an
+# `g.start < end`; the paragraphs' start/end offsets are those the record
+# was given (records given as JSON lines keep their offsets, so a record cut
+# from a larger file can give whole-file positions); closed examples check an
 # overlap, spans that only touch and another source.
 import Base
 import ../src/para.bend as P

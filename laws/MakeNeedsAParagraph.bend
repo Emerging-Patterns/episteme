@@ -17,11 +17,7 @@
 # example laws check this on five lines, and no guarantee rests on it yet.
 # laws/RecordLineRoundTrips.bend rests on laws/RecordLineRoundTrips.bend for
 # every record; its laws check the round trip on two records, one a pointer
-# record with escapes and non-ASCII text. `Record.shift(r, k)` moves a
-# record's paragraph offsets `k` code points on: a connector that cuts a body
-# from offset `k` of a file shifts its record so offsets are into the whole
-# file, as the eval needs. Offsets are U32, so laws/ShiftMovesOffsets.bend
-# holds when a paragraph's start and end plus `k` do not wrap past 2^32.
+# record with escapes and non-ASCII text.
 import Base
 import ../src/para.bend as P
 import ../src/record.bend as R

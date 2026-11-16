@@ -15,8 +15,8 @@
 # one line per question, `{"id", "question", "filter": ["book:<corpus>/"],
 # "gold": [{"source": "book:<corpus>/<source_id>", "start", "end"}...],
 # "answer"}`, the offsets the chunk's own, code-point offsets into `<canon
-# dir>/text/<source_id>.txt` as the books connector's are
-# (src/conn/books.bend). It prints nothing and exits 1 when the file is not
+# dir>/text/<source_id>.txt`, as book records ingested from that text give
+# theirs. It prints nothing and exits 1 when the file is not
 # such YAML, an entry lacks an id, a question or a gold chunk, a chunk id is
 # not in the table, or the first gold span of the first question does not
 # slice its book file to the chunk's `text`.

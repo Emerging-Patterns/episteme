@@ -12,9 +12,7 @@
 # main.bend's pure parts live in src/cli.bend. What the shell does is trusted
 # in each module's header, and its defs and types no law can import carry
 # `# noqa: L001` with the reason; tests/smoke.sh runs it end
-# to end on a synthetic book, a synthetic transcript, a fake Honcho, synthetic
-# git repos, an intent file and records given as JSON lines, and
-# tests/live.sh, run by hand, runs the reader pool against live readers.
+# to end on records given as JSON lines, and tests/live.sh, run by hand, runs the reader pool against live readers.
 #
 # The first file of each family opens with what the family is about:
 # laws/ParagraphsAreNonBlankRuns.bend (paragraphs),
@@ -25,10 +23,6 @@
 # laws/SinceKeepsRecentShards.bend (--since),
 # laws/ResolveKeepsNamedParagraphs.bend (excerpts),
 # laws/IngestKeepsRecordsThatFit.bend (ingest),
-# laws/DecodeSkipsNonMessages.bend (Claude transcripts),
-# laws/HonchoRecordFields.bend (Honcho messages),
-# laws/GitRecordFields.bend (git history),
-# laws/IntentAppendsOnChange.bend (the intent file),
 # laws/RecordsInputChanges.bend (records given as JSON lines),
 # laws/LiveKeepsLastVersion.bend (current records: changes and removals),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
@@ -44,71 +38,33 @@
 # laws/ShardLabelsNumberParagraphs.bend, a quantified law no guarantee
 # claims. They promise nothing beyond the equality each states.
 import Base
-import ./laws/AfterReadsOnFromCursor.bend as AfterReadsOnFromCursor
-import ./laws/AllClaudeChatsRefused.bend as AllClaudeChatsRefused
-import ./laws/AssistantLineRecords.bend as AssistantLineRecords
 import ./laws/AuthorKeepsNamedAuthors.bend as AuthorKeepsNamedAuthors
 import ./laws/BareDotIsNoSource.bend as BareDotIsNoSource
 import ./laws/BlankLinesSeparateParagraphs.bend as BlankLinesSeparateParagraphs
 import ./laws/BookPacksIntoShards.bend as BookPacksIntoShards
-import ./laws/ChatCursorReadsBack.bend as ChatCursorReadsBack
-import ./laws/ChatFilterNamesAProject.bend as ChatFilterNamesAProject
-import ./laws/ChatPrefixRefused.bend as ChatPrefixRefused
-import ./laws/ChatProjectPasses.bend as ChatProjectPasses
-import ./laws/ChatRecordsKeepEveryBlock.bend as ChatRecordsKeepEveryBlock
 import ./laws/ChatSourceDirName.bend as ChatSourceDirName
-import ./laws/ClaudeCursorReadsBack.bend as ClaudeCursorReadsBack
 import ./laws/CliNamesItsCommands.bend as CliNamesItsCommands
 import ./laws/CoverageAddsOverExcerpts.bend as CoverageAddsOverExcerpts
-import ./laws/CutEndsAtLastFeed.bend as CutEndsAtLastFeed
 import ./laws/CutReplyFails.bend as CutReplyFails
-import ./laws/DecodeSkipsNonMessages.bend as DecodeSkipsNonMessages
 import ./laws/EmptyAnswerIsOk.bend as EmptyAnswerIsOk
 import ./laws/EmptyIdLineIsNoRecord.bend as EmptyIdLineIsNoRecord
-import ./laws/EmptyIntentAppendsNothing.bend as EmptyIntentAppendsNothing
 import ./laws/EmptyParasLineIsNoRecord.bend as EmptyParasLineIsNoRecord
-import ./laws/EmptyPrefixRefused.bend as EmptyPrefixRefused
 import ./laws/EveryShardIsRead.bend as EveryShardIsRead
-import ./laws/ExactClaudeChatRefused.bend as ExactClaudeChatRefused
 import ./laws/ExcerptsFitBudget.bend as ExcerptsFitBudget
 import ./laws/ExcerptsRenderAsText.bend as ExcerptsRenderAsText
 import ./laws/ExtendResumesPack.bend as ExtendResumesPack
 import ./laws/FailedReadsListed.bend as FailedReadsListed
 import ./laws/FilterHitsChosenSources.bend as FilterHitsChosenSources
 import ./laws/FilterParseSplitsAndTrims.bend as FilterParseSplitsAndTrims
+import ./laws/FilterRefusesCoveredSelectors.bend as FilterRefusesCoveredSelectors
 import ./laws/FinalFeedNotInParagraph.bend as FinalFeedNotInParagraph
 import ./laws/FooterNamesFailedShards.bend as FooterNamesFailedShards
 import ./laws/FreezingIsStable.bend as FreezingIsStable
 import ./laws/FrozenShardsFitCap.bend as FrozenShardsFitCap
 import ./laws/FullTailStaysOpen.bend as FullTailStaysOpen
-import ./laws/GitCommitRecord.bend as GitCommitRecord
-import ./laws/GitCursorReadsBack.bend as GitCursorReadsBack
-import ./laws/GitCutDropsAndCounts.bend as GitCutDropsAndCounts
-import ./laws/GitCutFits.bend as GitCutFits
-import ./laws/GitCutLosesNoLine.bend as GitCutLosesNoLine
-import ./laws/GitLogReadsCommits.bend as GitLogReadsCommits
-import ./laws/GitMoreCountsDropped.bend as GitMoreCountsDropped
-import ./laws/GitReadsPastTips.bend as GitReadsPastTips
-import ./laws/GitRecordFields.bend as GitRecordFields
-import ./laws/GitTimesAreUtc.bend as GitTimesAreUtc
-import ./laws/GroupsKeepEveryParagraph.bend as GroupsKeepEveryParagraph
 import ./laws/HitsCountRecalled.bend as HitsCountRecalled
-import ./laws/HonchoAlonePasses.bend as HonchoAlonePasses
-import ./laws/HonchoCursorReadsBack.bend as HonchoCursorReadsBack
-import ./laws/HonchoListIds.bend as HonchoListIds
-import ./laws/HonchoNonPageHasNoItems.bend as HonchoNonPageHasNoItems
-import ./laws/HonchoPageRecords.bend as HonchoPageRecords
-import ./laws/HonchoPlacesAndQueries.bend as HonchoPlacesAndQueries
-import ./laws/HonchoReadsOnlyNew.bend as HonchoReadsOnlyNew
-import ./laws/HonchoRecordFields.bend as HonchoRecordFields
-import ./laws/HonchoStepPages.bend as HonchoStepPages
 import ./laws/IngestKeepsRecordsThatFit.bend as IngestKeepsRecordsThatFit
-import ./laws/IntentAppendsOnChange.bend as IntentAppendsOnChange
-import ./laws/IntentFirstTextRecord.bend as IntentFirstTextRecord
-import ./laws/KeepPicksMessageLines.bend as KeepPicksMessageLines
-import ./laws/KeepSkipsUnparsedLines.bend as KeepSkipsUnparsedLines
 import ./laws/LeadingBlankLinesDropped.bend as LeadingBlankLinesDropped
-import ./laws/LinesStopAtLastFeed.bend as LinesStopAtLastFeed
 import ./laws/LiveKeepsLastVersion.bend as LiveKeepsLastVersion
 import ./laws/LongParaLineIsNoRecord.bend as LongParaLineIsNoRecord
 import ./laws/MakeNeedsAParagraph.bend as MakeNeedsAParagraph
@@ -119,7 +75,6 @@ import ./laws/MergeOrdersByTime.bend as MergeOrdersByTime
 import ./laws/NoAuthorChangesNothing.bend as NoAuthorChangesNothing
 import ./laws/Non200Fails.bend as Non200Fails
 import ./laws/NonJsonReplyFails.bend as NonJsonReplyFails
-import ./laws/NonMessageLinesGiveNothing.bend as NonMessageLinesGiveNothing
 import ./laws/NoParasLineIsNoRecord.bend as NoParasLineIsNoRecord
 import ./laws/NoSinceChangesNothing.bend as NoSinceChangesNothing
 import ./laws/NumberIdsFail.bend as NumberIdsFail
@@ -132,16 +87,12 @@ import ./laws/ParagraphsAreNonBlankRuns.bend as ParagraphsAreNonBlankRuns
 import ./laws/ParagraphsCutAtMax.bend as ParagraphsCutAtMax
 import ./laws/PrefixHitsBook.bend as PrefixHitsBook
 import ./laws/PrefixMissesLongerName.bend as PrefixMissesLongerName
-import ./laws/ProjectDropsDash.bend as ProjectDropsDash
-import ./laws/QueuedNotificationSkipped.bend as QueuedNotificationSkipped
-import ./laws/QueuedPromptRead.bend as QueuedPromptRead
 import ./laws/RatioRoundsDown.bend as RatioRoundsDown
 import ./laws/RecalledMeansOverlap.bend as RecalledMeansOverlap
 import ./laws/RecordHeaderAndSize.bend as RecordHeaderAndSize
 import ./laws/RecordLineRoundTrips.bend as RecordLineRoundTrips
 import ./laws/RecordsInputChanges.bend as RecordsInputChanges
 import ./laws/RecordsSplitOnlyWhenTooBig.bend as RecordsSplitOnlyWhenTooBig
-import ./laws/ReminderBlocksAreMeta.bend as ReminderBlocksAreMeta
 import ./laws/ReplyIsOkOrFailed.bend as ReplyIsOkOrFailed
 import ./laws/ReplyReadsLabelsAndTimings.bend as ReplyReadsLabelsAndTimings
 import ./laws/RankedReadNamesShard.bend as RankedReadNamesShard
@@ -162,7 +113,6 @@ import ./laws/ShardRendersLabelledText.bend as ShardRendersLabelledText
 import ./laws/ShardsCoverEveryParagraph.bend as ShardsCoverEveryParagraph
 import ./laws/ShardSourcesSorted.bend as ShardSourcesSorted
 import ./laws/ShardsGiveBackRecords.bend as ShardsGiveBackRecords
-import ./laws/ShiftMovesOffsets.bend as ShiftMovesOffsets
 import ./laws/ShowFindsRecordAndParagraphs.bend as ShowFindsRecordAndParagraphs
 import ./laws/ShowReadsOneSource.bend as ShowReadsOneSource
 import ./laws/ShowRunsCommandOutput.bend as ShowRunsCommandOutput
@@ -178,15 +128,9 @@ import ./laws/SourceDirsAreSafeAndDistinct.bend as SourceDirsAreSafeAndDistinct
 import ./laws/SourceShardsHoldCurrentRecords.bend as SourceShardsHoldCurrentRecords
 import ./laws/SourcesCountsEachSource.bend as SourcesCountsEachSource
 import ./laws/SourceSplitIsOnePass.bend as SourceSplitIsOnePass
-import ./laws/SubagentPromptByAgent.bend as SubagentPromptByAgent
 import ./laws/TelemetryLineOfARun.bend as TelemetryLineOfARun
 import ./laws/ToolQueryIsCliQuery.bend as ToolQueryIsCliQuery
-import ./laws/ToolRecordsInlineOrPoint.bend as ToolRecordsInlineOrPoint
-import ./laws/ToolResultIsPointer.bend as ToolResultIsPointer
 import ./laws/TotalsRowOfTwo.bend as TotalsRowOfTwo
 import ./laws/TotalSumsRows.bend as TotalSumsRows
 import ./laws/TouchingSpanNotRecalled.bend as TouchingSpanNotRecalled
 import ./laws/TruncatedLineIsNoRecord.bend as TruncatedLineIsNoRecord
-import ./laws/UserLineAuthors.bend as UserLineAuthors
-import ./laws/UserTextByNoah.bend as UserTextByNoah
-import ./laws/Utf8ReadsAndReplaces.bend as Utf8ReadsAndReplaces

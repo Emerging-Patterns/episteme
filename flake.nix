@@ -38,10 +38,8 @@
           checks = {
             proofs = ez.mkProofs { ez = ezBin; src = self; };
             lint = ez.mkLint { src = self; };
-            # the IO shell end to end on the synthetic fixtures; python3
-            # runs the fake Honcho, and git builds and reads the fixture repos
-            smoke = nixpkgs.legacyPackages.${system}.runCommand "smoke"
-              { nativeBuildInputs = with nixpkgs.legacyPackages.${system}; [ python3 git ]; } ''
+            # the IO shell end to end on synthetic records
+            smoke = nixpkgs.legacyPackages.${system}.runCommand "smoke" { } ''
               EPISTEME=${episteme}/bin/episteme bash ${self}/tests/smoke.sh
               echo ok > $out
             '';

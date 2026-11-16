@@ -1,7 +1,6 @@
 # proofs of laws/ParagraphsAreNonBlankRuns.bend
 import Base
 import ../src/para.bend as P
-import ../src/git.bend as G
 import ../laws/ParagraphsAreNonBlankRuns.bend as Laws
 import ../laws/defs/Specification.bend as D1
 import ./lemmas/BoolFacts.bend as M1

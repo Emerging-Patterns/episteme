@@ -253,33 +253,6 @@ def has(+text: String, its: List<&2, S.Item>) -> Bool:
     case Con{head, tail}:
       Bool.or(String.eq(text, rec.source(item.rec(head))), has(text, tail))
 
-# True when sel would select every Claude chat: exact chat:claude, or the
-# prefix chat:, chat:claude/ or the empty prefix
-def chat_wide(sel: F.Sel) -> Bool:
-  match sel:
-    case F.Exact{text}:
-      String.eq(text, "chat:claude")
-    case F.Prefix{+text}:
-      Bool.or(String.eq(text, "chat:"),
-        Bool.or(String.eq(text, "chat:claude/"), String.eq(text, "")))
-
-# True when some selector of sels is chat-wide
-def some_wide(sels: List<&2, F.Sel>) -> Bool:
-  match sels:
-    case Nil{}:
-      False{}
-    case Con{sel, rest}:
-      Bool.or(chat_wide(sel), some_wide(rest))
-
-# True when the check must refuse sels: sels is empty or holds a chat-wide
-# selector
-def refused(sels: List<&2, F.Sel>) -> Bool:
-  match sels:
-    case Nil{}:
-      True{}
-    case Con{sel, rest}:
-      some_wide(sel <> rest)
-
 # a record's timestamp
 def rec.ts(record: R.Record) -> String:
   match record:

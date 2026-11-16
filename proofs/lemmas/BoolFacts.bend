@@ -2,7 +2,6 @@
 import Base
 import ../../src/shard.bend as S
 import ../../src/excerpt.bend as E
-import ../../src/git.bend as G
 import ../../laws/defs/Specification.bend as D1
 
 # --- Bool facts ---

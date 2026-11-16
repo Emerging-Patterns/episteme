@@ -9,9 +9,8 @@
 # exactly the excerpts of `xs`, in order, whose record's author is one of
 # `who`, compared whole: no excerpt by another author survives, whatever a
 # reader returned. So a question about what one speaker said is answered
-# with that speaker's paragraphs or with none. A record's author is what its
-# connector wrote: in a Claude transcript the user's own lines are the
-# user's (laws/UserLineAuthors.bend).
+# with that speaker's paragraphs or with none. A record's author is what the
+# input that gave it says.
 #
 # The run's readers are told the authors in the run notice
 # (laws/RunNoticeNamesShards.bend); a question that names none is asked

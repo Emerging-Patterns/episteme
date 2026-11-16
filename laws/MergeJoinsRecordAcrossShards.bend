@@ -1,7 +1,6 @@
 import Base
 import ../src/para.bend as P
 import ../src/excerpt.bend as E
-import ../src/chat.bend as C
 import ./defs/Specification.bend as D1
 
 # LAW: an example: shard 1 gave record a's second paragraph and record b,

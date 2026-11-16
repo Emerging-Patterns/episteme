@@ -14,19 +14,14 @@ pid=
 trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; rm -rf "$work"' EXIT
 
 export EPISTEME_HOME=$work/home
-export EPISTEME_BOOKS=$work/books
-mkdir -p "$EPISTEME_HOME" "$EPISTEME_BOOKS/tiny/text"
+mkdir -p "$EPISTEME_HOME"
 
 fail() { echo "serve: FAIL: $*" >&2; exit 1; }
 
-for ext in txt heads.json pages.json; do
-  cp "$here/fixtures/books/tiny/text/tiny-book.$ext" "$EPISTEME_BOOKS/tiny/text/tiny-book.$ext"
-done
-chmod -R u+w "$EPISTEME_BOOKS"
 # a pool whose one instance is never up
 printf '{"shard_tokens": 100, "chars_per_token": 8000, "pool": [["http://127.0.0.1:1", 2]], "budget_tokens": 60000}\n' \
   > "$EPISTEME_HOME/config.json"
-"$bin" ingest books tiny > /dev/null
+"$bin" ingest records "$here/fixtures/records/tiny-book.jsonl" > /dev/null
 
 port=${SERVE_PORT:-18131}
 "$bin" serve --port "$port" 2> "$work/serve.err" &

@@ -146,14 +146,14 @@ def Eval.refusal(res: Result<&2, &2, String, Unit>, +id: String, more: Unit -> M
       more(Unit{})
 
 # the first question whose filter ask would refuse, with the refusal, or None
-def Eval.refused(qs: List<&2, Q>) -> Maybe<&2, String>:
+def Eval.refused(+refs: List<&2, F.Refusal>, qs: List<&2, Q>) -> Maybe<&2, String>:
   match qs:
     case Nil{}:
       None{}
     case Con{quest, rest}:
       match quest:
         case Q{id, _question, filter, _gold}:
-          Eval.refusal(F.Filter.check(F.Filter.parse(filter)), id, _u => Eval.refused(rest))
+          Eval.refusal(F.Filter.check(refs, F.Filter.parse(filter)), id, _u => Eval.refused(refs, rest))
 
 # a row, after its progress line on stderr
 def Eval.told(row: Sc.Row) -> IO(Sc.Row):
@@ -233,7 +233,8 @@ def Eval.load(+path: String, +label: String) -> IO(U32):
     +cfg : St.Config <- St.Store.config()
     text : String <- St.Store.read(path)
     +qs : List<&2, Q> <- Eval.need(Eval.qs(String.lines(text)), path)
-    Eval.checked(Eval.refused(qs), cfg, qs, label)
+    refs : List<&2, F.Refusal> <- St.Store.refusals()
+    Eval.checked(Eval.refused(refs, qs), cfg, qs, label)
 
 # the run when the label names no subdirectory, else the refusal and exit 2
 def Eval.labelled(slash: Bool, +path: String, +label: String) -> IO(U32):

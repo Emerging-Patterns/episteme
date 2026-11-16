@@ -3,7 +3,7 @@
 # a footer. IO: the trusted shell around Filter, Read and Excerpt.
 #
 # Trusted, not proved: `episteme ask [--filter <sources>]... [--since <date>]
-# [--author <names>] [--json] <question>` runs `Ask.run`: `Filter.check` of `Filter.parse` of the
+# [--author <names>] [--json] <question>` runs `Ask.run`: `Filter.check` of `Store.refusals()` and `Filter.parse` of the
 # `--filter` values, refused with the refusal text on stderr and exit 2, and
 # `--since` as said below; then the config, `Store.ready(cap)`, which stops
 # with exit 1 and names `episteme ingest` when the shards are behind the log
@@ -764,13 +764,14 @@ def Ask.checked(
 # the since, and deliver the excerpts by the authors named (by any author
 # when none is); answers the exit code, 1 when a read failed
 def Ask.run(
+  +refs: List<&2, F.Refusal>,
   +filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String,
   +json: Bool
 ) -> IO(U32):
-  Ask.checked(F.Filter.check(filter), filter, since, who, question, json)
+  Ask.checked(F.Filter.check(refs, filter), filter, since, who, question, json)
 
 # --- for the server ---
 

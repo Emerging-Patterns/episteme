@@ -174,7 +174,7 @@ def Live.cut.if(at: Bool, chr: Char, got: Maybe<&2, String>) -> Maybe<&2, String
 
 # the text before the last "@" of str, or none when it has no "@": the
 # source a record id names when the id is <source>@<key> with no "@" in
-# the key, as the books, git and intent connectors make every id
+# the key
 def Live.source(str: String) -> Maybe<&2, String>:
   match str:
     case SNil{}:

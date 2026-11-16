@@ -83,43 +83,79 @@ def Filter.hits(+sels: List<&2, Sel>, sources: List<&2, String>) -> Bool:
     case Con{src, rest}:
       List.any.if(_u => Filter.hits(sels, rest), Filter.picks(sels, src))
 
-# the refusal: a question about chats names a project
-def Filter.refusal() -> String:
-  "a filter is required, and a chat filter must name a project; run \"episteme sources\" to list them"
+# --- refusals ---
 
-# True when sel would select every Claude chat
-def Filter.wide(sel: Sel) -> Bool:
-  match sel:
-    case Exact{text}:
-      String.eq(text, "chat:claude")
-    case Prefix{+text}:
-      Bool.or(String.eq(text, "chat:"),
-        Bool.or(String.eq(text, "chat:claude/"), String.is_empty(text)))
+# a selector the store refuses, and the message a filter holding it is
+# refused with
+type Refusal is Data:
+  Refusal{sel: Sel, why: String}
 
-# True when some selector of sels would select every Claude chat
-def Filter.any_wide(sels: List<&2, Sel>) -> Bool:
+# the refusal of a selector's text and its message: a prefix when the text
+# ends in /, else exact, as Filter.parse reads a piece
+def Filter.refusal(+text: String, why: String) -> Refusal:
+  Refusal{Filter.sel.if(text, String.ends_with(text, "/")), why}
+
+# the refusal of a filter that names no source
+def Filter.required() -> String:
+  "a filter is required; run \"episteme sources\" to list them"
+
+# True when sel selects every source the refused selector r selects: the
+# same exact source, or a prefix of r's text
+def Filter.covers(r: Sel, sel: Sel) -> Bool:
+  match r sel:
+    case Exact{t} Exact{s}:
+      String.eq(s, t)
+    case Exact{t} Prefix{p}:
+      String.starts_with(t, p)
+    case Prefix{t} Prefix{p}:
+      String.starts_with(t, p)
+    case Prefix{_t} Exact{_s}:
+      False{}
+
+# Some{why} when hit, else what the rest says
+def Filter.why.if(hit: Bool, why: String, more: Unit -> Maybe<&2, String>) -> Maybe<&2, String>:
+  match hit:
+    case True{}:
+      Some{why}
+    case False{}:
+      more(Unit{})
+
+# the message of the first refusal of refs whose selector sel covers, or
+# None
+def Filter.why(refs: List<&2, Refusal>, +sel: Sel) -> Maybe<&2, String>:
+  match refs:
+    case Nil{}:
+      None{}
+    case Con{ref, rest}:
+      match ref:
+        case Refusal{r, why}:
+          Filter.why.if(Filter.covers(r, sel), why, _u => Filter.why(rest, sel))
+
+# the message of the first selector of sels that some refusal of refs
+# covers, or None
+def Filter.whys(+refs: List<&2, Refusal>, sels: List<&2, Sel>) -> Maybe<&2, String>:
   match sels:
     case Nil{}:
-      False{}
-    case Con{sel, rest}:
-      List.any.if(_u => Filter.any_wide(rest), Filter.wide(sel))
+      None{}
+    case Con{+sel, rest}:
+      Maybe.or(&2, String, Filter.why(refs, sel), Filter.whys(refs, rest))
 
-# Fail with the refusal when bad, else Done
-def Filter.check.if(bad: Bool) -> Result<&2, &2, String, Unit>:
-  match bad:
-    case True{}:
-      Fail{Filter.refusal()}
-    case False{}:
+# Fail with the message when there is one, else Done
+def Filter.check.if(got: Maybe<&2, String>) -> Result<&2, &2, String, Unit>:
+  match got:
+    case Some{why}:
+      Fail{why}
+    case None{}:
       Done{Unit{}}
 
-# Done, or Fail with the refusal when sels is empty or holds a selector that
-# would select every Claude chat
-def Filter.check(sels: List<&2, Sel>) -> Result<&2, &2, String, Unit>:
+# Done, or Fail: with Filter.required() when sels is empty, else with the
+# message of the first selector a refusal of refs covers
+def Filter.check(+refs: List<&2, Refusal>, sels: List<&2, Sel>) -> Result<&2, &2, String, Unit>:
   match sels:
     case Nil{}:
-      Fail{Filter.refusal()}
+      Fail{Filter.required()}
     case Con{sel, rest}:
-      Filter.check.if(Filter.any_wide(sel <> rest))
+      Filter.check.if(Filter.whys(refs, sel <> rest))
 
 # --- since ---
 

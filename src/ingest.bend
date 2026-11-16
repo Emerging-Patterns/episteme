@@ -4,7 +4,7 @@
 # Shard.parts and Shard.extend.
 #
 # Trusted, not proved: Only `episteme ingest` writes the log or the shards.
-# Every ingest (a connector, `--all`, `--reshard` or none) first takes the
+# Every ingest (`records`, `--reshard` or none) first takes the
 # lock `<home>/lock`, made with `mkdir` without `-p`, so it fails when the
 # lock exists: then the run refuses with exit 75 (`Store.busy`, EX_TEMPFAIL,
 # so a caller can tell it from a failure, which exits 1, and try again) and
@@ -14,8 +14,8 @@
 # IO shell exits through, remove it in an ingest run and in no other run; a
 # process killed outright leaves it, to be removed by hand. Holding the lock,
 # `episteme ingest --reshard` runs `Ingest.reshard`, and every other ingest
-# runs `Ingest.sync(cap)` for the configured size, then its connectors (none
-# for a bare `episteme ingest`). `Ingest.sync(cap)` catches the shards of one
+# runs `Ingest.sync(cap)` for the configured size, then its records input
+# (none for a bare `episteme ingest`). `Ingest.sync(cap)` catches the shards of one
 # size up with the log: when the highest batch `k` is above the mark, it takes
 # the batches above the mark one at a time, in log order, so one batch is in
 # memory and never the whole log: it reads the batch, splits it with

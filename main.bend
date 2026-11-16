@@ -46,13 +46,7 @@ import ./src/excerpt.bend as E
 import ./src/live.bend as L
 import ./src/store.bend as St
 import ./src/ingest.bend as In
-import ./src/conn/books.bend as Books
-import ./src/conn/claude.bend as Claude
-import ./src/conn/honcho.bend as Hon
-import ./src/conn/git.bend as Git
-import ./src/conn/intent.bend as Intent
 import ./src/conn/records.bend as Recs
-import ./src/chat.bend as C
 import ./src/filter.bend as F
 import ./src/ask.bend as A
 import ./src/gold.bend as G
@@ -129,7 +123,7 @@ def show.read(res: Result<&1, &1, U32 & String, String>, +path: String, num: Str
     case Fail{(code, why)}:
       Cl.Shown{"", "episteme: " ++ Sys.err.os(code, why, path)}
     case Done{text}:
-      Cl.Shown{line.at(C.Chat.lines(text),
+      Cl.Shown{line.at(String.lines(text),
         U32.to_nat(Maybe.default(&2, U32, U32.read(num), 0))) ++ "\n", ""}
 
 # the line of file:<path>:<line>
@@ -276,13 +270,12 @@ def show(+arg: String) -> IO(Unit):  # noqa: L001 IO command: reads the log and 
 # what the server tells a client about its tools
 def serve.instructions() -> String:
   String.concat([
-    "episteme returns verbatim, cited excerpts of the primary record: ingested books, ",
-    "Claude Code transcripts, Honcho chats, git history, the intent file and records given ",
-    "as JSON lines. Readers only ",
+    "episteme returns verbatim, cited excerpts of the primary record: the records ingested ",
+    "into it, one source each. Readers only ",
     "pick paragraphs; nothing is summarized, so answer from the excerpts and cite every ",
     "claim as <record id>#<n>. Later excerpts are the current state. Call sources first ",
     "when unsure what to filter on; pass the narrowest filter that can hold the answer, ",
-    "and since for recent chat or git work. A footer naming failed shards means those ",
+    "and since for recent work. A footer naming failed shards means those ",
     "shards were not read: report it, and never read their gap as the record saying nothing."])
 
 # the tools episteme serves
@@ -291,8 +284,8 @@ def serve.srv() -> Server.Server:
     Mcp.tool("ask",
       "Read every shard the filter hits for a question and return verbatim excerpts in time order, then a footer of the reads. Cost is the shards read: keep the filter narrow.",
       Cl.Cli.schema([Cl.Cli.prop("question", "The question, in plain words, with the names and terms the record would use"),
-          Cl.Cli.prop("filter", "Sources to read, comma-separated: exact sources and prefixes ending in /, e.g. book:<corpus>/ or chat:claude/<project>,git:<repo>. Required; a filter over every chat is refused"),
-          Cl.Cli.prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ (chat and git only)"),
+          Cl.Cli.prop("filter", "Sources to read, comma-separated: exact sources and prefixes ending in /, e.g. <kind>:<name> or <kind>:<prefix>/. Required; a filter the store refuses as too wide is refused with what to name instead"),
+          Cl.Cli.prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ"),
           Cl.Cli.prop("author", "Return only excerpts by these authors, comma-separated, each a record's author as an excerpt header shows it. Set it whenever the question is about what one speaker said: the user's name for the user's own typed lines")],
         ["question", "filter"])),
     Mcp.tool("show",
@@ -348,7 +341,9 @@ def serve.sources() -> IO(Rpc.Out):
 def serve.tool.if(ask: Bool, shw: Bool, +args: Value.Json) -> IO(Rpc.Out):
   match ask shw:
     case True{} _:
-      serve.ask(T.Tool.ask(args))
+      do IO<Rpc.Out>:
+        refs : List<&2, F.Refusal> <- St.Store.refusals()
+        serve.ask(T.Tool.ask(refs, args))
     case False{} True{}:
       serve.show(Json.as_str(Json.get(args, "id")))
     case False{} False{}:
@@ -369,67 +364,17 @@ def serve(+host: String, +port: U32) -> IO(Unit):  # noqa: L001 IO: serves MCP o
     IO.print_err("episteme: serving MCP at http://" ++ host ++ ":" ++ U32.show(port) ++ "/mcp")
     Mcp.http.serve(~serve.run, ~serve.srv(), ~"/mcp", ~[], host, port, 4294967295)
 
-# the git connector, the intent connector, or none: a bare ingest only
-# catches the shards up with the log
-def ingest.rest(git: Bool, intent: Bool) -> IO(Unit):
-  match git intent:
-    case True{} _:
-      Git.Git.run()
-    case False{} True{}:
-      Intent.Intent.run()
-    case False{} False{}:
-      IO.pure(Unit, Unit{})
-
-# every connector that needs no argument, honcho last since it stops the
-# run with exit 1 when Honcho cannot be reached
-def ingest.all() -> IO(Unit):
-  do IO<Unit>:
-    Claude.Claude.run()
-    Git.Git.run()
-    Intent.Intent.run()
-    Hon.Honcho.run()
-
-# the records input, else what ingest.rest picks
-def ingest.more(records: Maybe<&2, Shake.Matched>, git: Bool, intent: Bool) -> IO(Unit):
+# store the records input, when there is one; a bare ingest only catches
+# the shards up with the log
+def ingest.pick(records: Maybe<&2, Shake.Matched>) -> IO(Unit):
   match records:
     case Some{+rm}:
       Recs.Records.run(Maybe.default(&2, String, Shake.get(rm, "input"), "-"), Shake.on(rm, "complete"))
     case None{}:
-      ingest.rest(git, intent)
+      IO.pure(Unit, Unit{})
 
-# the books connector, the claude connector, the honcho connector, else
-# what ingest.more picks
-def ingest.go(
-  books: Maybe<&2, Shake.Matched>,
-  claude: Bool,
-  honcho: Bool,
-  records: Maybe<&2, Shake.Matched>,
-  git: Bool,
-  intent: Bool
-) -> IO(Unit):
-  match books claude honcho:
-    case Some{bm} _ _:
-      Books.Books.run(Shake.get_all(bm, "corpora"))
-    case None{} True{} _:
-      Claude.Claude.run()
-    case None{} False{} True{}:
-      Hon.Honcho.run()
-    case None{} False{} False{}:
-      ingest.more(records, git, intent)
-
-# every connector with --all, else the one ingest bound
-def ingest.pick(all: Bool, +found: Shake.Matched) -> IO(Unit):
-  match all:
-    case True{}:
-      ingest.all()
-    case False{}:
-      ingest.go(Shake.sub_of(found, "books"), Cl.Cli.given(Shake.sub_of(found, "claude")),
-        Cl.Cli.given(Shake.sub_of(found, "honcho")), Shake.sub_of(found, "records"),
-        Cl.Cli.given(Shake.sub_of(found, "git")),
-        Cl.Cli.given(Shake.sub_of(found, "intent")))
-
-# a reshard; else the shards caught up with the log, then every connector
-# with --all or the one ingest bound
+# a reshard; else the shards caught up with the log, then the records
+# input
 def ingest.locked(reshard: Bool, +found: Shake.Matched) -> IO(Unit):
   match reshard:
     case True{}:
@@ -439,11 +384,11 @@ def ingest.locked(reshard: Bool, +found: Shake.Matched) -> IO(Unit):
     case False{}:
       do IO<Unit>:
         In.Ingest.caught()
-        ingest.pick(Shake.on(found, "all"), found)
+        ingest.pick(Shake.sub_of(found, "records"))
 
 # run ingest with what it bound, holding the lock from its first step to
 # its last (Store.die and Store.exit remove it on a failure)
-def ingest(+found: Shake.Matched) -> IO(Unit):  # noqa: L001 IO command: holds the store lock around the connectors
+def ingest(+found: Shake.Matched) -> IO(Unit):  # noqa: L001 IO command: holds the store lock around the ingest
   do IO<Unit>:
     St.Store.lock()
     ingest.locked(Shake.on(found, "reshard"), found)
@@ -486,7 +431,8 @@ def ask.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
       IO.pure(Unit, Unit{})
     case Some{+m}:
       do IO<Unit>:
-        code : U32 <- A.Ask.run(F.Filter.parse(Shake.get_all(m, "filter")),
+        refs : List<&2, F.Refusal> <- St.Store.refusals()
+        code : U32 <- A.Ask.run(refs, F.Filter.parse(Shake.get_all(m, "filter")),
           Shake.get(m, "since"), F.Filter.who(Shake.get(m, "author")),
           Maybe.default(&2, String, Shake.get(m, "question"), ""), Shake.on(m, "json"))
         IO.exit(code)

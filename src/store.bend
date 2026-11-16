@@ -289,6 +289,80 @@ def Store.pool.if(arr: Bool, js: Value.Json) -> Maybe<&2, List<&2, Slot>>:
 def Store.pool(+js: Value.Json) -> Maybe<&2, List<&2, Slot>>:
   Store.pool.if(Json.is_arr(js), js)
 
+# a refusal entry [selector, message], or None when it is not one
+def Store.refusal.of(two: Bool, text: Maybe<&2, String>, why: Maybe<&2, String>) -> Maybe<&2, F.Refusal>:
+  match two text why:
+    case True{} Some{t} Some{w}:
+      Some{F.Filter.refusal(t, w)}
+    case _ _ _:
+      None{}
+
+# a refusal read from [selector, message], or None
+def Store.refusal(+js: Value.Json) -> Maybe<&2, F.Refusal>:
+  Store.refusal.of(Bool.and(Json.is_arr(js), U32.is_eq(Json.len(js), 2)),
+    Json.as_str(Json.at(js, 0)), Json.as_str(Json.at(js, 1)))
+
+# a refusal ahead of more, or None when either is missing
+def Store.refusal.cons(
+  got: Maybe<&2, F.Refusal>,
+  more: Maybe<&2, List<&2, F.Refusal>>
+) -> Maybe<&2, List<&2, F.Refusal>>:
+  match got more:
+    case Some{x} Some{xs}:
+      Some{x <> xs}
+    case _ _:
+      None{}
+
+# refusal entries, in order, or None when one is not an entry
+def Store.refusals.of(js: List<&2, Value.Json>) -> Maybe<&2, List<&2, F.Refusal>>:
+  match js:
+    case Nil{}:
+      Some{[]}
+    case Con{head, rest}:
+      Store.refusal.cons(Store.refusal(head), Store.refusals.of(rest))
+
+# the entries of a "refuse" value when it is an array of them, else None
+def Store.refusals.arr(arr: Bool, +val: Value.Json) -> Maybe<&2, List<&2, F.Refusal>>:
+  match arr:
+    case True{}:
+      Store.refusals.of(Json.items(val))
+    case False{}:
+      None{}
+
+# the refusals of config.json's "refuse": none when it is missing, else the
+# entries when it is an array of them, else None
+def Store.refusals.field(has: Bool, +js: Value.Json) -> Maybe<&2, List<&2, F.Refusal>>:
+  match has:
+    case False{}:
+      Some{[]}
+    case True{}:
+      Store.refusals.arr(Json.is_arr(Json.get(js, "refuse")), Json.get(js, "refuse"))
+
+# the refusals of a parsed config.json, or stop when "refuse" is of the
+# wrong kind; none when config.json is no JSON object (Store.config says so)
+def Store.refusals.parsed(got: Maybe<&2, Value.Json>) -> IO(List<&2, F.Refusal>):
+  match got:
+    case None{}:
+      IO.pure(List<&2, F.Refusal>, [])
+    case Some{+js}:
+      Store.need(List<&2, F.Refusal>, Store.refusals.field(Json.has(js, "refuse"), js), "refuse")
+
+# the refusals of a read of config.json: none when it cannot be read
+def Store.refusals.read(res: Result<&1, &1, U32 & String, String>) -> IO(List<&2, F.Refusal>):
+  match res:
+    case Fail{_err}:
+      IO.pure(List<&2, F.Refusal>, [])
+    case Done{text}:
+      Store.refusals.parsed(Json.parse(text))
+
+# the refusals a filter is checked against: config.json's "refuse", each
+# [selector, message]; none when config.json or the field is missing
+def Store.refusals() -> IO(List<&2, F.Refusal>):
+  do IO<List<&2, F.Refusal>>:
+    +home : String <- Store.home()
+    res : Result<&1, &1, U32 & String, String> <- Sys.file.read(home ++ "/config.json")
+    Store.refusals.read(res)
+
 # the settings read from a parsed config.json, or stop naming the first
 # field that is missing or of the wrong kind
 def Store.config.of(+js: Value.Json) -> IO(Config):

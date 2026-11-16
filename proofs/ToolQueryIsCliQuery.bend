@@ -22,9 +22,9 @@ def checked_eq(res, _sels, _since, _who, _question):
     case Done{_u}:
       {==}
 
-def Laws.query_is_cli(vals, since, author, question):
-  checked_eq(F.Filter.check(F.Filter.parse(vals)), F.Filter.parse(vals), since,
+def Laws.query_is_cli(refs, vals, since, author, question):
+  checked_eq(F.Filter.check(refs, F.Filter.parse(vals)), F.Filter.parse(vals), since,
     F.Filter.who(author), question)
 
-def Laws.query_needs_question(_vals, _since, _author):
+def Laws.query_needs_question(_refs, _vals, _since, _author):
   {==}

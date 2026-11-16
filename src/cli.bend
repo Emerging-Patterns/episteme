@@ -264,29 +264,16 @@ def Cli.given(got: Maybe<&2, Shake.Matched>) -> Bool:
     case Some{_m}:
       True{}
 
-# the ingest command and its connectors
+# the ingest command and its records input
 def Cli.spec.ingest() -> Shake.Sub:
   Shake.sub("ingest", "Append new records to the log and pack them into shards; alone, pack log batches the shards lack.",
     [Shake.flag("reshard", None{}, Some{"reshard"},
-      "Pack the whole log again at the configured shard size"),
-     Shake.flag("all", None{}, Some{"all"},
-      "Run the claude, git, intent and honcho connectors, in that order")],
-    [Shake.sub("books", "Ingest canon books, one record per section.",
-      [Shake.rest("corpora", "Corpus names under the canon root", True{}, None{}, [])],
-      []),
-     Shake.sub("records", "Store records given as JSON lines, one record each as the log stores it; a changed record replaces its id's.",
+      "Pack the whole log again at the configured shard size")],
+    [Shake.sub("records", "Store records given as JSON lines, one record each as the log stores it; a changed record replaces its id's.",
       [Shake.flag("complete", None{}, Some{"complete"},
         "The input is the whole of each source it names: remove the records of those sources it lacks"),
        Shake.pos("input", "A file of JSON lines, or - for standard input", True{}, None{}, [])],
-      []),
-     Shake.sub("claude", "Ingest Claude Code transcripts, one record per message, tool call and tool result.",
-      [], []),
-     Shake.sub("honcho", "Ingest Honcho's raw messages, one record per message.",
-      [], []),
-     Shake.sub("git", "Ingest the history of each git repo under ~/projects and ~/projects/bend, one record per commit.",
-      [], []),
-     Shake.sub("intent", "Ingest intent.md under the data directory as one record when its text changed.",
-      [], [])])
+      [])])
 
 # the commands episteme takes
 def Cli.spec() -> Shake.Cli:

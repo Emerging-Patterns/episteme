@@ -12,17 +12,9 @@
 # it. `Filter.hits(f, sources)` says whether a shard with those `sources` is
 # read; `Filter.reads(f, name)` is what `ask` runs, on the name of each source
 # directory: the name read back with `Shard.undir`, never read when it is no
-# source's, else `Filter.picks(f, s)` of its source `s`. `Filter.check(f)` is
-# that a question about chats must name a project, so a filter
-# that is empty, or that holds a selector meaning every Claude chat (exact
-# `chat:claude`, prefix `chat:`, prefix `chat:claude/` or prefix `""`), is
-# refused with the text `a filter is required, and a chat filter must name a
-# project; run "episteme sources" to list them`, and any other filter,
-# `chat:honcho` alone included, passes. Closed examples check that
-# `book:venaya/` hits `[book:venaya/b1]` and misses `[book:venayaX]`, that
-# `chat:claude/home-noah-projects-bend` and `chat:honcho` pass the check, and
-# that `chat:claude/` and the hand-built selectors exact `chat:claude`, prefix
-# `chat:` and prefix `""` are refused with the refusal text.
+# source's, else `Filter.picks(f, s)` of its source `s`. `Filter.check` refuses a
+# filter: laws/FilterRefusesCoveredSelectors.bend. Closed examples check that
+# `book:venaya/` hits `[book:venaya/b1]` and misses `[book:venayaX]`.
 import Base
 import ../src/shard.bend as S
 import ../src/filter.bend as F

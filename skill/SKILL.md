@@ -1,6 +1,6 @@
 ---
 name: episteme
-description: Answer from the primary record with verbatim, cited excerpts. Use when a question turns on what an ingested book actually says, what was decided or said in an earlier Claude Code session or Honcho chat, why a repo changed (its git history), or what the user says they mean to do (their intent file). Triggers include "what did we decide about X", "when did we change Y and why", "find where the book says Z", "what did I say about W", and "which design principles apply to this code" over a corpus of design books. Not for questions the current repo or conversation already answers.
+description: Answer from the primary record with verbatim, cited excerpts. Use when a question turns on what an ingested source actually says: a book, an earlier chat or session, a repo's history, notes, or any other records stored in episteme. Triggers include "what did we decide about X", "when did we change Y and why", "find where the book says Z", "what did I say about W", and "which design principles apply to this code" over a corpus of design books. Not for questions the current repo or conversation already answers.
 ---
 
 # episteme
@@ -13,22 +13,9 @@ When the `episteme` MCP tools are loaded (`ask`, `show`, `sources`, served by `e
 
 ## Sources
 
-Every record has one source:
+Every record has one source, `<kind>:<name>`, as whoever ingested it named it (for example `book:<corpus>/<book>` or `chat:<app>/<project>`). `episteme sources` lists every source with its records, paragraphs and shards: run it when unsure what to filter on. Which sources exist, and what their authors and ids mean, is said by the setup that feeds them, not by episteme.
 
-| Source | What it holds |
-| :---- | :---- |
-| `book:<corpus>/<book>` | a book, one record per section (`book:<corpus>/` for a whole corpus) |
-| `chat:claude/<project>` | Claude Code transcripts of one project; `<project>` is the `~/.claude/projects` dir name without its leading `-`, e.g. `chat:claude/home-alice-projects-site` |
-| `chat:honcho` | Honcho's raw messages |
-| `git:<repo dir>` | one repo's commits, e.g. `git:episteme` |
-| `intent` | the user's intent file, one record per version |
-| any other `<kind>:<name>` | records a caller stored with `episteme ingest records`; a changed record shows only its latest version, a removed one none |
-
-`episteme sources` lists every source with its records, paragraphs and shards. Run it when unsure what to filter on.
-
-In `chat:claude`, the author `noah` is only the lines Claude Code marks as a human's: what the user typed, queued or sent from an app. Other authors are `agent`, `tool` (a tool result), `task-notification`, `meta` (the harness's own lines: reminders, local commands and their output, scripted prompts), `channel`, `peer`, or the model's name.
-
-Every record has an author, shown last in an excerpt's header, but each kind of source has its own names: in `chat:honcho` the peer's id; in `git:` the commit author's name as git has it (a full name, not the chat name); in `intent` the user; in a source stored with `ingest records`, whatever author its caller gave; in `book:` the book's own name, which says nothing about who speaks in it. So `--author` takes the name as that source writes it, and one question over a chat and a repo names both: `--author "noah,<name in git>"`.
+Every record has an author, shown last in an excerpt's header, as its source writes it, so `--author` takes the name as that source writes it, and one question over two kinds of source may name the same person twice: `--author "<name in one>,<name in the other>"`. A changed record shows only its latest version, a removed one none.
 
 ## Asking
 
@@ -36,11 +23,11 @@ Every record has an author, shown last in an excerpt's header, but each kind of 
 episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>] [--author <names>] "<question>"
 ```
 
-- **Always pass a narrow `--filter`.** It takes exact sources and prefixes ending in `/`, comma-separated: `--filter book:<corpus>/`, `--filter chat:claude/<project>,git:<repo>`. A missing filter, or one over every chat (`chat:claude/`, `chat:`), is refused.
+- **Always pass a narrow `--filter`.** It takes exact sources and prefixes ending in `/`, comma-separated: `--filter book:<corpus>/`, `--filter <kind>:<name>,<kind>:<prefix>/`. A missing filter is refused, and so is one the setup refuses as too wide (the refusal says what to name instead).
 - **Cost is the shards read.** A reader scans every shard the filter hits; a shard it has not seen before takes about a second, and a big chat project is hundreds of shards. Pick the fewest sources that can hold the answer; `episteme sources` shows how many shards each has.
-- **For chats or git about recent work, pass `--since`** (UTC). It reads only shards holding a record at or after that time and drops older excerpts, which often cuts a chat project by half or more. It is for chat and git only: book excerpts carry no real date (a book without a year in its id is dated by its ingest time).
-- **For what one speaker said, pass `--author`** (the tool's `author`): `--author noah` for the user's own typed lines. Only excerpts by the named authors come back (comma-separated, as the excerpt headers show them), and the reader spends its whole budget on their paragraphs, taking only those the question bears on. No excerpts means nothing of theirs was found on it in those sources; a short reply that only makes sense in its context can be missed, so report "nothing found", not "never said". Without it, a question like "what did noah say about X" is answered mostly with what the assistant said about X: the user's lines are under a hundredth of a transcript. Put the topic in the question, not the speaker.
-- **The session you are in is not in the record yet.** Transcripts are ingested when a session ends or on a timer, so what was said minutes ago is found in your own context, not by asking.
+- **For recent work, pass `--since`** (UTC). It reads only shards holding a record at or after that time and drops older excerpts, which often cuts a chat project by half or more. It is only as good as the sources' timestamps: a source whose records carry no real date (a book) is not narrowed by it.
+- **For what one speaker said, pass `--author`** (the tool's `author`), with the user's name as the source writes it for the user's own lines. Only excerpts by the named authors come back (comma-separated, as the excerpt headers show them), and the reader spends its whole budget on their paragraphs, taking only those the question bears on. No excerpts means nothing of theirs was found on it in those sources; a short reply that only makes sense in its context can be missed, so report "nothing found", not "never said". Without it, a question like "what did the user say about X" is answered mostly with what the assistant said about X: the user's lines are under a hundredth of a transcript. Put the topic in the question, not the speaker.
+- **The session you are in may not be in the record yet.** Whatever feeds chats in runs when it runs, so what was said minutes ago is found in your own context, not by asking.
 - Ask one question at a time, in plain words; put the names and terms the record would use into it.
 
 ## Principles for code
@@ -60,7 +47,7 @@ Each excerpt is a header line `### <record id> | <source> | <ts> | <author>`, th
 
 - **Cite every claim** as `<record id>#<n>`. Make no claim the excerpts do not hold.
 - **Later excerpts are the current state.** When two disagree, the later one is what holds now; say what changed.
-- `episteme show <record id>` prints the whole record, `episteme show <record id>#<n>` one paragraph. A tool result or a long tool input is a pointer, and show prints the file line or git patch it points at.
+- `episteme show <record id>` prints the whole record, `episteme show <record id>#<n>` one paragraph. A record whose body is a pointer (`file:<path>:<line>` or `git:<repo>@<hash>`) is shown with the file line or git patch it points at.
 
 ## Failures
 
@@ -70,4 +57,4 @@ Exit 2 with `skipping <url>: ...` means no reader is up. Tell the user rather th
 
 ## Keeping it fresh
 
-`episteme ingest --all` adds what is new from claude, git, the intent file and Honcho. Books take corpus names: `episteme ingest books <corpus>...`; other records come as JSON lines: `episteme ingest records <file|-> [--complete]`. Reads never write: when the shards are behind the log, `ask` and `sources` exit 1 and say to run `episteme ingest`, which packs them. One ingest runs at a time: it holds `$EPISTEME_HOME/lock`, and a second one exits 75 naming it (try again later); remove the lock by hand only when no ingest is running.
+Records come in as JSON lines: `episteme ingest records <file|-> [--complete]`, run by whatever feeds each source. Reads never write: when the shards are behind the log, `ask` and `sources` exit 1 and say to run `episteme ingest`, which packs them. One ingest runs at a time: it holds `$EPISTEME_HOME/lock`, and a second one exits 75 naming it (try again later); remove the lock by hand only when no ingest is running.

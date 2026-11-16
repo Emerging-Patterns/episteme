@@ -20,8 +20,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 export EPISTEME_HOME=$work/home
-export EPISTEME_BOOKS=$work/books
-mkdir -p "$EPISTEME_HOME" "$EPISTEME_BOOKS/tiny/text"
+mkdir -p "$EPISTEME_HOME"
 
 fail() { echo "live: FAIL: $*" >&2; exit 1; }
 
@@ -29,12 +28,11 @@ for url in "$reader" "$small"; do
   curl -sf "$url/health" > /dev/null || fail "no reader at $url; start it first (see the top of this file)"
 done
 
-for book in tiny-book tiny-two; do
-  for ext in txt heads.json pages.json; do
-    cp "$here/fixtures/books/tiny/text/tiny-book.$ext" "$EPISTEME_BOOKS/tiny/text/$book.$ext"
-  done
-done
-chmod -R u+w "$EPISTEME_BOOKS"
+# the fixture book's records, and the same under tiny-two
+{ cat "$here/fixtures/records/tiny-book.jsonl"
+  sed 's#book:tiny/tiny-book#book:tiny/tiny-two#g; s#"author":"tiny-book"#"author":"tiny-two"#' \
+    "$here/fixtures/records/tiny-book.jsonl"
+} > "$work/tiny.jsonl"
 
 # a config of 8000-character shards and the given pool
 config() {
@@ -43,7 +41,7 @@ config() {
 }
 
 config "[[\"$reader\", 2]]"
-"$bin" ingest books tiny > /dev/null 2>&1
+"$bin" ingest records "$work/tiny.jsonl" > /dev/null 2>&1
 shards=$(find "$EPISTEME_HOME/shards/8000" -mindepth 2 -name '*.json' | wc -l)
 [ "$shards" -ge 2 ] || fail "the fixture should make at least two shards, made $shards"
 question="How many gulls did the lantern keeper count before noon?"
