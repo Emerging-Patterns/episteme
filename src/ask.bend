@@ -182,6 +182,14 @@ def Ask.renum(sh: S.Shard, num: U32) -> S.Shard:
     case S.Shard{_n, items, sources, chars, frozen}:
       S.Shard{num, items, sources, chars, frozen}
 
+# whether a read named any labels
+def Ask.any(labels: List<&2, String>) -> Bool:
+  match labels:
+    case Nil{}:
+      False{}
+    case Con{_label, _rest}:
+      True{}
+
 # whether an unread shard is read now: it has a file, and every shard is
 # wanted or its read named labels
 def Ask.wanted(path: String, every: Bool, labels: List<&2, String>) -> Bool:
@@ -193,11 +201,7 @@ def Ask.wanted(path: String, every: Bool, labels: List<&2, String>) -> Bool:
         case True{}:
           True{}
         case False{}:
-          match labels:
-            case Nil{}:
-              False{}
-            case Con{_label, _rest}:
-              True{}
+          Ask.any(labels)
 
 # sh, or the shard in its file under sh's run number when need
 def Ask.load.if(need: Bool, +sh: S.Shard, +path: String) -> IO(S.Shard):
@@ -653,7 +657,8 @@ def Ask.logged(
   match ran:
     case Ran{all, ap, hits, hp, names, +res}:
       do IO<Result<&2, &2, Refusal, Got>>:
-        Ask.tele(T.Tele.line.with(ts, via, question, filter, since, who, ms, Ask.code(res), Ask.why(res),
+        Ask.tele(T.Tele.line.with(
+          T.Asked{ts, via, question, filter, since, who, ms, Ask.code(res), Ask.why(res)},
           all, ap, hits, hp, names, Ask.rs(res), Ask.xs(res)))
         return res
 

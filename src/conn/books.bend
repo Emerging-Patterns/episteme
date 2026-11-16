@@ -167,6 +167,16 @@ def Books.ts(book: String, now: String) -> String:
 def Books.piece() -> Nat:
   20000n
 
+# the start of a group's first paragraph, at when it has none
+def Books.lead(at: U32, group: List<&2, P.Para>) -> U32:
+  match group:
+    case Nil{}:
+      at
+    case Con{para, _rest}:
+      match para:
+        case P.Para{_n, start, _end, _text}:
+          start
+
 # where a group's record starts: the span's start for a span's first
 # group, else the start of the group's first paragraph
 def Books.start(first: Bool, +at: U32, group: List<&2, P.Para>) -> U32:
@@ -174,13 +184,7 @@ def Books.start(first: Bool, +at: U32, group: List<&2, P.Para>) -> U32:
     case True{}:
       at
     case False{}:
-      match group:
-        case Nil{}:
-          at
-        case Con{para, _rest}:
-          match para:
-            case P.Para{_n, start, _end, _text}:
-              start
+      Books.lead(at, group)
 
 # one record per group of a span's paragraphs, in order, each numbering its
 # paragraphs from 1

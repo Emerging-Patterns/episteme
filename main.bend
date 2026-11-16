@@ -126,19 +126,22 @@ def stat.put(sts: List<&2, Stat>, +src: String, +recs: U32, +ps: U32, +shs: U32)
           stat.at(String.order(src, source), st, rest, src, recs, ps, shs,
             _u => stat.put(rest, src, recs, ps, shs))
 
+# the counts of one item, of rec from from to upto, added
+def stat.item(+rec: R.Record, from: U32, upto: U32, sts: List<&2, Stat>) -> List<&2, Stat>:
+  match rec:
+    case R.Record{_id, _ts, +source, _author, _thread, _parent, _paras, _ptr}:
+      +ps = S.Shard.item.paras(S.Item{rec, from, upto})
+      stat.put(sts, source, first(ps), U32.from_nat(List.length(&2, P.Para, ps)), 0)
+
 # the counts of items added
 def stat.items(its: List<&2, S.Item>, sts: List<&2, Stat>) -> List<&2, Stat>:
   match its:
     case Nil{}:
       sts
-    case Con{+it, rest}:
+    case Con{it, rest}:
       match it:
-        case S.Item{+rec, from, upto}:
-          match rec:
-            case R.Record{_id, _ts, +source, _author, _thread, _parent, _paras, _ptr}:
-              +ps = S.Shard.item.paras(S.Item{rec, from, upto})
-              stat.items(rest, stat.put(sts, source, first(ps),
-                U32.from_nat(List.length(&2, P.Para, ps)), 0))
+        case S.Item{rec, from, upto}:
+          stat.items(rest, stat.item(rec, from, upto, sts))
 
 # one shard counted for each of its sources
 def stat.sources(srcs: List<&2, String>, sts: List<&2, Stat>) -> List<&2, Stat>:
@@ -564,25 +567,29 @@ def serve(+host: String, +port: U32) -> IO(Unit):
     IO.print_err("episteme: serving MCP at http://" ++ host ++ ":" ++ U32.show(port) ++ "/mcp")
     Mcp.http.serve(~serve.run, ~serve.srv(), ~"/mcp", ~[], host, port, 4294967295)
 
+# the ingest command and its connectors
+def spec.ingest() -> Shake.Sub:
+  Shake.sub("ingest", "Append new records to the log and pack them into shards; alone, pack log batches the shards lack.",
+    [Shake.flag("reshard", None{}, Some{"reshard"},
+      "Pack the whole log again at the configured shard size"),
+     Shake.flag("all", None{}, Some{"all"},
+      "Run the claude, git, intent and honcho connectors, in that order")],
+    [Shake.sub("books", "Ingest canon books, one record per section.",
+      [Shake.rest("corpora", "Corpus names under the canon root", True{}, None{}, [])],
+      []),
+     Shake.sub("claude", "Ingest Claude Code transcripts, one record per message, tool call and tool result.",
+      [], []),
+     Shake.sub("honcho", "Ingest Honcho's raw messages, one record per message.",
+      [], []),
+     Shake.sub("git", "Ingest the history of each git repo under ~/projects and ~/projects/bend, one record per commit.",
+      [], []),
+     Shake.sub("intent", "Ingest intent.md under the data directory as one record when its text changed.",
+      [], [])])
+
 # the commands episteme takes
 def spec() -> Shake.Cli:
   Shake.app("episteme", "Primary-source Q&A over raw records.", Some{version()}, [],
-    [Shake.sub("ingest", "Append new records to the log and pack them into shards; alone, pack log batches the shards lack.",
-      [Shake.flag("reshard", None{}, Some{"reshard"},
-        "Pack the whole log again at the configured shard size"),
-       Shake.flag("all", None{}, Some{"all"},
-        "Run the claude, git, intent and honcho connectors, in that order")],
-      [Shake.sub("books", "Ingest canon books, one record per section.",
-        [Shake.rest("corpora", "Corpus names under the canon root", True{}, None{}, [])],
-        []),
-       Shake.sub("claude", "Ingest Claude Code transcripts, one record per message, tool call and tool result.",
-        [], []),
-       Shake.sub("honcho", "Ingest Honcho's raw messages, one record per message.",
-        [], []),
-       Shake.sub("git", "Ingest the history of each git repo under ~/projects and ~/projects/bend, one record per commit.",
-        [], []),
-       Shake.sub("intent", "Ingest intent.md under the data directory as one record when its text changed.",
-        [], [])]),
+    [spec.ingest(),
      Shake.sub("sources", "List each source with its records, paragraphs and shards.", [], []),
      Shake.sub("show", "Print a record, or one paragraph of it.",
        [Shake.pos("id", "<record id> or <record id>#<n>", True{}, None{}, [])], []),

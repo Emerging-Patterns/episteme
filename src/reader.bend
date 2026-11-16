@@ -20,7 +20,6 @@
 # src/wire.bend). What a reply means is laws/ReplyIsOkOrFailed.bend.
 # `tests/live.sh` runs it against llama-server.
 import Base
-import ./shard.bend as S
 import ./read.bend as Rd
 import ezhttp@0.23.0.0/main.bend as Ez
 import ezhttp@0.23.0.0/src/http.bend as Http

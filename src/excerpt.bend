@@ -344,6 +344,13 @@ def Excerpt.render.gap(xs: List<&2, Ex>) -> String:
     case Con{_head, _tail}:
       "\n"
 
+# one excerpt's text, of rec and its paras
+def Excerpt.render.one(rec: R.Record, paras: List<&2, P.Para>) -> String:
+  match rec:
+    case R.Record{+id, ts, source, author, _thread, _parent, _rps, _ptr}:
+      String.concat(["### ", id, " | ", source, " | ", ts, " | ",
+        author, "\n", Excerpt.render.paras(id, paras)])
+
 # excerpts as text: each its line "### <id> | <source> | <ts> | <author>",
 # then one line "<id>#<n>: <text>" per paragraph, apart by a blank line
 def Excerpt.render(xs: List<&2, Ex>) -> String:
@@ -353,11 +360,7 @@ def Excerpt.render(xs: List<&2, Ex>) -> String:
     case Con{x, +rest}:
       match x:
         case Ex{rec, paras}:
-          match rec:
-            case R.Record{+id, ts, source, author, _thread, _parent, _rps, _ptr}:
-              String.concat(["### ", id, " | ", source, " | ", ts, " | ",
-                author, "\n", Excerpt.render.paras(id, paras),
-                Excerpt.render.gap(rest), Excerpt.render(rest)])
+          Excerpt.render.one(rec, paras) ++ Excerpt.render.gap(rest) ++ Excerpt.render(rest)
 
 # --- recall ---
 

@@ -52,7 +52,7 @@ def tele.read() -> Rd.Read:
 # whose read kept one paragraph of three code points
 law tele_example:
   for u: Unit
-  {T.Tele.line("2026-11-03T00:00:00.000Z", "ask", "q?", [F.Prefix{"book:x/"}], None{}, ["noah"], 9n, 0, "",
+  {T.Tele.line(T.Asked{"2026-11-03T00:00:00.000Z", "ask", "q?", [F.Prefix{"book:x/"}], None{}, ["noah"], 9n, 0, ""},
       [tele.shard(3)], [tele.shard(1)], [Rd.Name{"book:x/y", 3}], [tele.read()],
       [E.Ex{tele.rec(), [P.Para{2, 12, 15, "abc"}]}])
     == "{\"ts\":\"2026-11-03T00:00:00.000Z\",\"via\":\"ask\",\"question\":\"q?\",\"filter\":[\"book:x/\"],\"since\":null,\"authors\":[\"noah\"],\"ms\":9,\"code\":0,\"refused\":\"\",\"sources\":[{\"source\":\"book:x/y\",\"shards\":1,\"chars\":40,\"paras\":2}],\"shards\":[{\"source\":\"book:x/y\",\"n\":3,\"chars\":40,\"paras\":2,\"ok\":true,\"ms\":7,\"labels\":1,\"out_paras\":1,\"out_chars\":3}],\"in_chars\":40,\"excerpts\":1,\"out_chars\":3,\"returned\":[{\"id\":\"s1\",\"author\":\"\",\"paras\":[2]}]}"
@@ -75,7 +75,7 @@ law tele_counts:
   for names: List<&2, Rd.Name>
   for +rs: List<&2, Rd.Read>
   for +xs: List<&2, E.Ex>
-  {T.Tele.line(ts, via, question, filter, since, who, ms, code, why, all, hits, names, rs, xs)
-    == T.Tele.line.with(ts, via, question, filter, since, who, ms, code, why, all, T.Tele.counts(all),
-      hits, T.Tele.counts(hits), names, rs, xs)
+  {T.Tele.line(T.Asked{ts, via, question, filter, since, who, ms, code, why}, all, hits, names, rs, xs)
+    == T.Tele.line.with(T.Asked{ts, via, question, filter, since, who, ms, code, why}, all,
+      T.Tele.counts(all), hits, T.Tele.counts(hits), names, rs, xs)
     : String}

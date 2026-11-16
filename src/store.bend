@@ -1296,7 +1296,7 @@ def Store.cursor(+conn: String) -> IO(String):
     +dir : String <- Store.path("log")
     +names : List<&2, String> <- Store.names(dir)
     +got : String <- Store.scan(Store.after(names, U32.sub(from, U32.min(from, 1))), dir, conn, "")
-    Store.cursor.if(Bool.and(String.is_empty(got), Bool.not(U32.is_eq(from, 0))), got, names, dir, conn)
+    Store.cursor.if(Bool.and(String.is_empty(got), U32.is_ne(from, 0)), got, names, dir, conn)
 
 # remove a directory and everything under it
 def Store.remove(+path: String) -> IO(Unit):
