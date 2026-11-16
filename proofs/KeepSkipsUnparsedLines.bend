@@ -2,7 +2,7 @@
 import Base
 import ../src/record.bend as R
 import ../src/chat.bend as C
-import ezjson@1.2.0.0/main.bend as Json
+import ezjson@1.5.0.0/main.bend as Json
 import ../laws/KeepSkipsUnparsedLines.bend as Laws
 
 def Laws.keep_drop(path, project, n, text, h):

@@ -21,11 +21,11 @@
 # `tests/live.sh` runs it against llama-server.
 import Base
 import ./read.bend as Rd
-import ezhttp@0.23.0.0/main.bend as Ez
-import ezhttp@0.23.0.0/src/http.bend as Http
-import ezhttp@0.23.0.0/src/client.bend as Client
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezhttp@0.26.0.0/main.bend as Ez
+import ezhttp@0.26.0.0/src/http.bend as Http
+import ezhttp@0.26.0.0/src/client.bend as Client
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # how long one call may take, in milliseconds
 def Reader.timeout() -> U32:

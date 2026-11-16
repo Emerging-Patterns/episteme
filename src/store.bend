@@ -94,9 +94,9 @@ import ./shard.bend as S
 import ./para.bend as P
 import ./filter.bend as F
 import ./excerpt.bend as E
-import ezsys@0.1.0.0/main.bend as Sys
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezsys@0.2.0.0/main.bend as Sys
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # a reader instance: its URL and its slot count
 type Slot is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)

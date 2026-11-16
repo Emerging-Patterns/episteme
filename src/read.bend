@@ -6,8 +6,8 @@ import Base
 import ./record.bend as R
 import ./shard.bend as S
 import ./excerpt.bend as E
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # one reader call: the shard it read, the instance that read it, the labels
 # it named, whether it answered (False when the call failed, which is never

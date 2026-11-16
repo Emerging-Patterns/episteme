@@ -7,9 +7,9 @@ import Base
 import ./para.bend as P
 import ./record.bend as R
 import ./shard.bend as S
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
-import shake@0.8.0.0/main.bend as Shake
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
+import shake@0.9.0.0/main.bend as Shake
 
 # the package version marker
 def Cli.version() -> String:

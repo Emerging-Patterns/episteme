@@ -60,11 +60,11 @@ import ../chat.bend as C
 import ../honcho.bend as H
 import ../store.bend as St
 import ../ingest.bend as In
-import ezsys@0.1.0.0/main.bend as Sys
-import ezhttp@0.23.0.0/main.bend as Ez
-import ezhttp@0.23.0.0/src/http.bend as Http
-import ezhttp@0.23.0.0/src/client.bend as Client
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezsys@0.2.0.0/main.bend as Sys
+import ezhttp@0.26.0.0/main.bend as Ez
+import ezhttp@0.26.0.0/src/http.bend as Http
+import ezhttp@0.26.0.0/src/client.bend as Client
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # how far a run got: the cursor, the records read and not yet appended
 # (newest session first), their code points, the records appended and the

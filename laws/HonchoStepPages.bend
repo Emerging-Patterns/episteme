@@ -4,7 +4,7 @@
 # read skips.
 import Base
 import ../src/honcho.bend as H
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # LAW: a full page goes on at the next page, from its start
 law step_full:

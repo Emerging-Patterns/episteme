@@ -2,6 +2,35 @@
 version = "2"
 hub = "https://hub.bend-lang.com"
 [packages]
+[packages.0x0b59049ea5717d6f2fd30293c7271ede]
+[packages.0x0b59049ea5717d6f2fd30293c7271ede.source]
+kind = "hub"
+[packages.0x0b59049ea5717d6f2fd30293c7271ede.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"README.md" = "87f576910a896c984e99fe2c58540e4819882d64f580cde42e25759f19bcb7c6"
+"main.bend" = "6e9b612f6634b15062079b76afa3c4b29a0c91304793edb72d9f97d04ec94564"
+"src/auth.bend" = "53b36c29add9fa647134fea758fe43f3333ae8bbf2fd10df95fe28545dc00153"
+"src/b64.bend" = "4212a94d354d3919d630302d8d7f6436e000f09a308ad5ad27e37edd841d2a96"
+"src/body.bend" = "a19cb79eead65692aa5022104ca9fbb2ed0de663b96a2038b02eae4a1fa856a3"
+"src/cache.bend" = "166b11a7574e1302980bacd2b8ce0bf5e297760eb4caa5543b8cdc2609d50798"
+"src/client.bend" = "147d88f243295c8f4cc029927d3c279a39ba659f5d2460c07fea4afec0396716"
+"src/cookie.bend" = "9c389460249ba9a2396f01764fce8897e8c3e3d10575a17b48986d537368e261"
+"src/cors.bend" = "66a744b253d93783f53e647bfc4b6e9bf84e0b1cc520ccdffa084b22166d382b"
+"src/echo.bend" = "9da299cf211ee00c81eb3c039053378b00a0e0fa79b2ac902797c517dfd4e9da"
+"src/entities.bend" = "1692a1a9b9fe64ab16de5bcfcc0f950a5f596aec661108fb700c957ff6e10795"
+"src/form.bend" = "8a80a56126c00ece978b5c68718ee4875659cbe4ca8a6ce47c7ae8b8d9653df8"
+"src/html.bend" = "e4aabd63fba9601583742a32a7e717bce0f32f154465be7bfb530895daa064a6"
+"src/http.bend" = "35f481c13d070691cfd33a90525bfd9304bcd7c6107cff402cc36a901ee61cb0"
+"src/packed.bend" = "06dfb6b3476ed6ff094a548ed9f4b614d8ff51c54ec054436fd9d8ea5759ab32"
+"src/pct.bend" = "0d82b32dace1116101b8eac14bcfdb9e401700fc7c74145dd90ef5de4b36c64b"
+"src/qs.bend" = "3910a35864db2e5d536faa655bafb3228e505904cfc7e3f4b00cb14196bdc108"
+"src/redirect.bend" = "a05ca4fd6a4a19b950c1732fc51266937b6e3689ac238e3f7c214dea35003c4f"
+"src/server.bend" = "869e0c9ced84f18b70ca99512a1487fcc87ecbcaf0324c77d1e2f977f908568b"
+"src/step.bend" = "b5316afc4d692c2c8a0ae6348baee5f81a154a057974df78d508d30772eb91a3"
+"src/unescape.bend" = "e3ef3b03735f06175b5a990d23b73498148cbe6387c5129318edb5ec888ab80b"
+"src/url.bend" = "cd2da8d3b4fde2f41d76084eb0605f14906ab925a3305763ce07808a170d3b8a"
+"src/wire.bend" = "3636f6faca8743a8ea1cac0c59248407ec97a0fa0586cf684d96b72b3b5c7d17"
+"src/wirespec.bend" = "f3086b1b7125d19052efdfcd02df6b627b3131fadf937fc8113a6994926ed8c2"
 [packages.0x185ae03c75e3e75be1171471f68b43cb]
 [packages.0x185ae03c75e3e75be1171471f68b43cb.source]
 kind = "hub"
@@ -21,64 +50,52 @@ kind = "hub"
 "effs/sqlite.c" = "8a76236a328d9120a342943fbc007b33b2b10e836ba748bf0b4e1a5092cb7e57"
 "effs/sqlite.js" = "e1bcfc6c2037856573fcb7b4374297a1d6496d01facedb9d8d6ca5a12720cc2a"
 "sqlite.bend" = "5219db84dd9bc47d6291ed064e6e1884c7829b46f1cd8035eb24e9af6642c3a2"
+[packages.0x244a8dc4388b93088fc9417f57a9eccb]
+[packages.0x244a8dc4388b93088fc9417f57a9eccb.source]
+kind = "hub"
+[packages.0x244a8dc4388b93088fc9417f57a9eccb.files]
+LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
+"README.md" = "f862d583b7f777d731aea2f20049eb025a4f837d80f7fc7aeaf6d66af282920b"
+"main.bend" = "7c2e7abf0141f0d9c1c2775670e85ec680da4f568f5be0211084477919b69106"
+"src/client.bend" = "87344b7ec53a7837210a3e96db9325aeabd34f49a213c6829a6688baa6e5a05f"
+"src/effs/stdin.c" = "4ed5c4a6109bf6796075c162cc357b21648743ed066c2558ee0c397f718a3422"
+"src/effs/stdin.js" = "0ff22492ec7a86d39fb1234ffa0207851509d9ce2e2b6cbb77bb5f2c45f84197"
+"src/io.bend" = "eedeb15e02157a199fdf0db4800af5294175a3cac384e645a435a6bb7711ab21"
+"src/line.bend" = "9701710a7ae23a089ed8aada4da28d00774fa5e99c6d6427038d37e4f8ad098c"
+"src/openapi.bend" = "555f030995d25fdc56063573a40a2a5feeb565c127d4fa9779a4021fb0064f59"
+"src/rpc.bend" = "23fe192996f590e3ebb0aee5ac75081623a140dab99a94d72d04694bca85c35c"
+"src/server.bend" = "7e360c7b9e6969f96c05d27b9181defd8ee6a87e425d05b01bfb2c10e5f23fa0"
+"src/sse.bend" = "be439d343cacc4cad78476dc1f4fcc079091145c0f00f9b5003dd5cecd013bff"
+"src/web.bend" = "ee203332fa4e47e4c685f5e9d5ec9f6580aed4da1aebb0876b87ce71ba66a930"
 [packages.0x4eed9d7ac6ece61523d747a9d804e4f0]
 [packages.0x4eed9d7ac6ece61523d747a9d804e4f0.source]
 kind = "hub"
 [packages.0x4eed9d7ac6ece61523d747a9d804e4f0.files]
 "int.bend" = "5588aa776b7883a661b30489bccc7f2bf54ee0e333d363eaa33804cb1b130fcf"
-[packages.0x5a44d8a54be79db966199d0fa91fe8e6]
-[packages.0x5a44d8a54be79db966199d0fa91fe8e6.source]
+[packages.0x597f8af3f77d8983aacfa076df42d235]
+[packages.0x597f8af3f77d8983aacfa076df42d235.source]
 kind = "hub"
-[packages.0x5a44d8a54be79db966199d0fa91fe8e6.files]
+[packages.0x597f8af3f77d8983aacfa076df42d235.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
-"main.bend" = "4b2d0dd0ef5b7b123ce033a0943ef3955bb65e79082d8978784e2bf08f4a06fe"
-"src/args.bend" = "5e1b2f9b04f8eba6ec1e691935a7ea7e52b0838463f797eb992888051fb0e626"
-"src/check.bend" = "99df53c1bfd423e393edc3615415415c5a677905e8ed84649e34c82ae9243f9f"
-"src/cli.bend" = "db1d66785516b6aa33fb694c288adbadb6876d1ce4e3b9d5d4fcb045645723cc"
-[packages.0x6b75cc24ae78878f45f867de73d7929d]
-[packages.0x6b75cc24ae78878f45f867de73d7929d.source]
+"README.md" = "46a600ac6912b9494efd19bbde29d3e69c51f1e46d8d3bae5fc05524e2e4ccda"
+"main.bend" = "0ea32ddbd3b69a13f672855f2632bc4286586ba2dcf9abfe5669be0deb37f54f"
+"src/fixed.bend" = "39ebdf10aad8572eab5a6d8a14e6973dfc13000620fc2081e1d9b027e6003948"
+"src/lazy.bend" = "5e0ec859ceea76521a7a04c78edfe47dafe9b036166602af7f085079f6f7d7e5"
+"src/lex.bend" = "6f1a48b79d03bcbc15d6e124a65289bfeaf0a5f26fcbda263d8ecfb2dc4a57d9"
+"src/parse.bend" = "03be50cae0939f1695c3219ef007774e62f4b23066dd0bf3b450b95b5a358985"
+"src/print.bend" = "6d9ad9d8cefc38ebea810a302237a4d0e0dfc9f45445463ce4d84b63206db872"
+"src/pull.bend" = "2d94029387e5e1faa4bc3ac31bb1c725af50cf17d0815d23e77ed0c2cef82f77"
+"src/value.bend" = "3e79221afa179cc29343ef60a1b2915c6f4d088674533870e6c52ee81b140789"
+[packages.0x64697f57fea19681b5fa4f87014ce63d]
+[packages.0x64697f57fea19681b5fa4f87014ce63d.source]
 kind = "hub"
-[packages.0x6b75cc24ae78878f45f867de73d7929d.files]
+[packages.0x64697f57fea19681b5fa4f87014ce63d.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
-"main.bend" = "2fb81661674bd39809d08e789a56d3288009b3c72263e9588c9a3d5960c4e559"
-"src/client.bend" = "3b37fe32ba724c340aa32d34a129cc2701226310152d2ce4b6b3c9485ea66908"
-"src/effs/stdin.c" = "4ed5c4a6109bf6796075c162cc357b21648743ed066c2558ee0c397f718a3422"
-"src/effs/stdin.js" = "0ff22492ec7a86d39fb1234ffa0207851509d9ce2e2b6cbb77bb5f2c45f84197"
-"src/io.bend" = "f1a8556026eebdd947fa2c2847a09cb45f8308fc833e447957b6ca079a20577c"
-"src/line.bend" = "ce3da7fcd662912392ddd998ee1743b99f10567930aeb366994b5ee96bd7cd19"
-"src/openapi.bend" = "2751ef5575850d18660a91e3b617bc7cdc9bc2dea41801bc000d6524efe48642"
-"src/rpc.bend" = "3b65d13daf19995a0657e60e69639ae09f41bc2bdf843c3c4ff4624df5752431"
-"src/server.bend" = "cc53cbaa789afa6f7194fbe392ccb6f1b0d3b8c9990c227bb3fc2abefcb29b1b"
-"src/sse.bend" = "be439d343cacc4cad78476dc1f4fcc079091145c0f00f9b5003dd5cecd013bff"
-"src/web.bend" = "548a90e2ed724879289178e78bca97079bf69694dd87b449839d81dd6ac19f81"
-[packages.0x7367809738fddd234b8d2bed772ad2cf]
-[packages.0x7367809738fddd234b8d2bed772ad2cf.source]
-kind = "hub"
-[packages.0x7367809738fddd234b8d2bed772ad2cf.files]
-LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
-"main.bend" = "a92e09a02c50285c1f99cce3779c2b29ae88a1222cb73abf55518f7d4db7690b"
-"src/auth.bend" = "53b36c29add9fa647134fea758fe43f3333ae8bbf2fd10df95fe28545dc00153"
-"src/b64.bend" = "4212a94d354d3919d630302d8d7f6436e000f09a308ad5ad27e37edd841d2a96"
-"src/body.bend" = "f1337314ce299b0e6954d539fe5cddef4fa54217de4a183667669bef3669b46d"
-"src/cache.bend" = "5bad4c297b74b1b468bdc61aa48a17fc810c8e3a9cb31acd96bd83bf81e539aa"
-"src/client.bend" = "6b90bdff823cd0bf0b3074c70b25f444bb3e3fc781af139a3d3f04e6326da24d"
-"src/cookie.bend" = "c68e150822c2992146a57c1e75ef204897bce9f144838a4d79ae75b5ef8d0fe1"
-"src/cors.bend" = "cbb4cbea1253117f88c7191318313993c930315e0f80ff5b14e7846b4cb97178"
-"src/echo.bend" = "fdeccb2b8ac950d5dafa33c6042622ffc6f21a1a4fce1d03728d34b2a1fc9e59"
-"src/entities.bend" = "1692a1a9b9fe64ab16de5bcfcc0f950a5f596aec661108fb700c957ff6e10795"
-"src/form.bend" = "7066db1ae6c70ff390cbc3a5c8b1ebb3b9d05adb85ace277a8536e4000dba35d"
-"src/html.bend" = "e4aabd63fba9601583742a32a7e717bce0f32f154465be7bfb530895daa064a6"
-"src/http.bend" = "1aabfb00533973447095f16cd78cdd6ba7f66b4437c49a5b1f56528ccca37471"
-"src/packed.bend" = "05abd2729b143c4ab745154e0d314fc43956a17b7ac5c28b612072f48fa94da7"
-"src/pct.bend" = "0d82b32dace1116101b8eac14bcfdb9e401700fc7c74145dd90ef5de4b36c64b"
-"src/qs.bend" = "871fa3ad27f2021616b1122055fa80ecdd39fcc7b063966a8b0a7c568fe4d7f3"
-"src/redirect.bend" = "ad30d26af0a00392294f8dae111bff89244ebcc38f018d404ea6a98804385457"
-"src/server.bend" = "bfc384bf1d88af2e8740121529a74aadb68c7a41dad6030096618dea94d3935e"
-"src/step.bend" = "d3bae1b9bec1c5fedfe99f22c4e461720c680c563e9d386aa407604b209fc16c"
-"src/unescape.bend" = "7068d3fab719872db2a964154c12383c02ae5789ab03047bb162d2798ac01953"
-"src/url.bend" = "7c2a70772f630e5586e21b176f110bf1b441369b0be82a08ac0c9f5a492a0000"
-"src/wire.bend" = "9de03a70fb89a08860a6f76f960331f4cd60c43c873e43f6c41af122a0314656"
-"src/wirespec.bend" = "4edf2bba8db93d4fa35005e3389af3e2becea56e34fc4a0d27e62e712e2d03b2"
+"README.md" = "7514b8422da7b423ba65207860fa150287eabd1efa9ba5d421f0be7d4fe7d8ab"
+"main.bend" = "a3f8f2270d44244774463bcbd80057c46327ce9114680591ba41c3aba868fb23"
+"src/args.bend" = "f71b842ef08f459e059e782fb8420fb333b1edb82471a794d3819d391b36e2f8"
+"src/check.bend" = "a2525cc16e43de9f79860ef3b7d10774c10f76ace082651c1a17bfd979b161b5"
+"src/cli.bend" = "640cee194e479152e907f8bde44746750c26e32cfe0310660be1f0a8b46c1da8"
 [packages.0x856d414a32087762da315b6efc605eaa]
 [packages.0x856d414a32087762da315b6efc605eaa.source]
 kind = "hub"
@@ -95,25 +112,6 @@ LICENSE = "c6273324dfad426e6642b106cfabf5a32ea65b5f352f76cff751c1716c929274"
 "value.bend" = "5f9bd0ad8a09286a1f71cf9544a82d3474807ba5f83784a1323d33aa244ed6e3"
 "yaml.bend" = "99bcca17ebee1c7e49be7b45e246b7f45309ce6a452dac17805c8f2b9f9a612d"
 "yaml11.bend" = "5b2d9ba5ba6ea284fa832d337d4c5a49f46643e9fc5cee364c0810829b959e30"
-[packages.0x8abe7473e8854cc69c687ee77b7d72e3]
-[packages.0x8abe7473e8854cc69c687ee77b7d72e3.source]
-kind = "hub"
-[packages.0x8abe7473e8854cc69c687ee77b7d72e3.files]
-LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
-"main.bend" = "172fd00bf5fd2dc5c8f253924d826f47931396b5a374598ccd4267a172111fdb"
-"src/clock.bend" = "df15d5e4a353975a227034990a7a825dfd6aeaa21cd73342eeddd6f80966352e"
-"src/dir.bend" = "7179eae7cf0211a93d26453a18ea185b53096cc55ef1d8eb3498ccba5a6ef7a4"
-"src/effs/clock.c" = "74271a272dd81f96930185c48ed1fb047df67b1d3dae310d410607a5507a8884"
-"src/effs/clock.js" = "f7017981780593be09acf6d9213629620d33ecf5f42822dabe00c6bccbc62386"
-"src/effs/dir.c" = "af2b26062fa05f2cef91ffa0060a160416a4c1863deccc8ee798dbaa30ed9200"
-"src/effs/dir.js" = "2cc3073734f75426516bc65e5d42e3a02895a349bc13a63c55d7c4dbf78edabf"
-"src/effs/rename.c" = "61aa32964631920c441c87ef2eb95d5c0aaf311d6a158b6f1e214856ad4f985d"
-"src/effs/rename.js" = "fb0e2271b6c4a1db1f28c36aeac9b74fd72fe97b5700dd73b936922926b465d0"
-"src/errno.bend" = "bca5af1e719fc89dd9b7c783f13c5e828da2650e8d5b39e1885bfde4bd95e0f3"
-"src/step.bend" = "cb1f8823808f9fe6ba3a8f64b34327a62c8f9939b63f24f0e4be312fa3210649"
-"src/str.bend" = "dc338178b4545ac3c3717da7bbae8e7196aaca343157724125ac0488609f4d1f"
-"src/sys.bend" = "9b95080562e2a2ed647bd6586fcb0d9aa3c4864ed3debee079062e60fac07dd9"
-"src/text.bend" = "ce9b6bdfe5a3cc9de42497bddb584e486ca502d9922e8edb989a8024b131d160"
 [packages.0x9bf2c4100bf9328348d215e7ae1657de]
 [packages.0x9bf2c4100bf9328348d215e7ae1657de.source]
 kind = "hub"
@@ -121,32 +119,40 @@ kind = "hub"
 "dns.bend" = "4f13455fc5cb6150a23f431e8a2cc09c56ab0aa8a4b2935f1d89e689b1ff7843"
 "effs/dns.c" = "5d216d6c8c86e78e49fb84939790c496e68500f3e6fa18bf2b8b96aea5ab71af"
 "effs/dns.js" = "3abdd6528b6c8b885639b81a2542fdfb2668af78e2a16c70b45b94dfc50d1010"
-[packages.0xa81e161008ecc2f297c0a3065cb9b188]
-[packages.0xa81e161008ecc2f297c0a3065cb9b188.source]
+[packages.0xe28b074f0c4da17a66d68ce9fdacf4fc]
+[packages.0xe28b074f0c4da17a66d68ce9fdacf4fc.source]
 kind = "hub"
-[packages.0xa81e161008ecc2f297c0a3065cb9b188.files]
+[packages.0xe28b074f0c4da17a66d68ce9fdacf4fc.files]
 LICENSE = "309f5aae946e4db157750e002fb179a74ed0fe27fce09a7be68a6977b14f205f"
-"main.bend" = "030530d356d712d66fc58daa6bf81c81379d3132547b7e7a42de436c374e9e27"
-"src/lazy.bend" = "5e0ec859ceea76521a7a04c78edfe47dafe9b036166602af7f085079f6f7d7e5"
-"src/lex.bend" = "2b6857aa4a69f79ccdbec71e8ccf906f668cb45bf6e5759ecef48a04b0a9fa17"
-"src/parse.bend" = "03be50cae0939f1695c3219ef007774e62f4b23066dd0bf3b450b95b5a358985"
-"src/print.bend" = "32a92e32f9e58cb028c59209c6aeb2b408f0510d199b31cff172c09bbb68fd6a"
-"src/pull.bend" = "c682f4f968f78b10bf39351130aa48fc9ade47c01f5bb2b4b74a061df7afb141"
-"src/value.bend" = "be1f4959ca09f749556f761fb491714d5f047350f1292513c8396caccea683da"
+"README.md" = "6473d7ea60e6957d91ac3c9bd7e026d39a2f0069103ef01d9270e6ae7e4efffc"
+"main.bend" = "172fd00bf5fd2dc5c8f253924d826f47931396b5a374598ccd4267a172111fdb"
+"src/clock.bend" = "ac2ada56d5edd0a6ecc297df46321412ef6f49826e97891afddce2b4a71bff88"
+"src/dir.bend" = "d5890a2e0c2c457fb6242cc0c7ec781e665fbebd3b65254ccd69857026496e28"
+"src/effs/clock.c" = "74271a272dd81f96930185c48ed1fb047df67b1d3dae310d410607a5507a8884"
+"src/effs/clock.js" = "f7017981780593be09acf6d9213629620d33ecf5f42822dabe00c6bccbc62386"
+"src/effs/dir.c" = "af2b26062fa05f2cef91ffa0060a160416a4c1863deccc8ee798dbaa30ed9200"
+"src/effs/dir.js" = "2cc3073734f75426516bc65e5d42e3a02895a349bc13a63c55d7c4dbf78edabf"
+"src/effs/rename.c" = "61aa32964631920c441c87ef2eb95d5c0aaf311d6a158b6f1e214856ad4f985d"
+"src/effs/rename.js" = "fb0e2271b6c4a1db1f28c36aeac9b74fd72fe97b5700dd73b936922926b465d0"
+"src/errno.bend" = "6bd2177fcfce148d49c01a9df328b44799e96fed752f30a4ceeac0953d4ba5e8"
+"src/step.bend" = "0c4cfeab43d169a98e5c3dd571e0b6f7da7d8cce77d26a7538aee7315f66f29f"
+"src/str.bend" = "20126cd148ecc8edca1ed6d93124ec71422e3dc9efa3ab08df27fed7552647fb"
+"src/sys.bend" = "26c1b0ae4ad4e1e66e61a82a61a5d018b13448c720c4b83d993120584e453ae6"
+"src/text.bend" = "ce9b6bdfe5a3cc9de42497bddb584e486ca502d9922e8edb989a8024b131d160"
 [names]
 "bend-kit-bytes@0.3.2.0" = "0x185ae03c75e3e75be1171471f68b43cb"
 "bend-kit-dns@0.6.0.2" = "0x9bf2c4100bf9328348d215e7ae1657de"
 "bend-kit-wire@0.4.6.1" = "0x1afdf90dbe41c30b1df4594db039b02a"
-"ezhttp@0.23.0.0" = "0x7367809738fddd234b8d2bed772ad2cf"
-"ezjson@1.2.0.0" = "0xa81e161008ecc2f297c0a3065cb9b188"
-"ezmcp@0.2.0.0" = "0x6b75cc24ae78878f45f867de73d7929d"
-"ezsys@0.1.0.0" = "0x8abe7473e8854cc69c687ee77b7d72e3"
-"shake@0.8.0.0" = "0x5a44d8a54be79db966199d0fa91fe8e6"
+"ezhttp@0.26.0.0" = "0x0b59049ea5717d6f2fd30293c7271ede"
+"ezjson@1.5.0.0" = "0x597f8af3f77d8983aacfa076df42d235"
+"ezmcp@0.5.0.0" = "0x244a8dc4388b93088fc9417f57a9eccb"
+"ezsys@0.2.0.0" = "0xe28b074f0c4da17a66d68ce9fdacf4fc"
+"shake@0.9.0.0" = "0x64697f57fea19681b5fa4f87014ce63d"
 [tools]
 [tools.bolt]
 git = "https://github.com/Emerging-Patterns/bolt"
-rev = "26391508a28b69077aaf59b75a80f774a455bca5"
-tag = "v1.66.0"
+rev = "1290c9f0708031ce7678bff7b020df50d9d7d570"
+tag = "v1.67.0"
 root = "."
-narHash = "sha256-gldg9U4c/Rq1W/9sdhxSPCbujQ8LpHR8edQwbM3tNXM="
+narHash = "sha256-CYrSS0HoU4VEiagnoTbf7oLj6hRTzs6IvPFDAFIxdo0="
 entry = "main.bend"

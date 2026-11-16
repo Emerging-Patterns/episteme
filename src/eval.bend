@@ -34,9 +34,9 @@ import ./read.bend as Rd
 import ./score.bend as Sc
 import ./store.bend as St
 import ./ask.bend as A
-import ezsys@0.1.0.0/main.bend as Sys
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezsys@0.2.0.0/main.bend as Sys
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # an eval question: its id, its text, its filter and its gold spans
 type Q is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)

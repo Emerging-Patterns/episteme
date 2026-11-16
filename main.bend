@@ -59,13 +59,13 @@ import ./src/gold.bend as G
 import ./src/eval.bend as Ev
 import ./src/tool.bend as T
 import ./src/cli.bend as Cl
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
-import ezmcp@0.2.0.0/main.bend as Mcp
-import ezmcp@0.2.0.0/src/rpc.bend as Rpc
-import ezmcp@0.2.0.0/src/server.bend as Server
-import ezsys@0.1.0.0/main.bend as Sys
-import shake@0.8.0.0/main.bend as Shake
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
+import ezmcp@0.5.0.0/main.bend as Mcp
+import ezmcp@0.5.0.0/src/rpc.bend as Rpc
+import ezmcp@0.5.0.0/src/server.bend as Server
+import ezsys@0.2.0.0/main.bend as Sys
+import shake@0.9.0.0/main.bend as Shake
 
 # the counts of lights added
 def stat.lights(ls: List<&2, St.Light>, sts: List<&2, Cl.Stat>) -> List<&2, Cl.Stat>:
