@@ -7,3 +7,4 @@ result-*
 bin/
 *.gpu
 __pycache__/
+.direnv/
