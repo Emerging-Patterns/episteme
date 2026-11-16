@@ -36,11 +36,11 @@ import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
 # a canon question: its id, its text, its answer and its gold chunk ids
-type Q is Data:
+type Q is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Q{id: String, question: String, answer: String, chunks: List<&2, String>}
 
 # a row of the chunks table: its book, its code-point offsets and its text
-type Chunk is Data:
+type Chunk is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Chunk{source: String, start: U32, end: U32, text: String}
 
 # --- the YAML ---
@@ -234,7 +234,7 @@ def Gold.chunks(+st: U32, ids: List<&2, String>) -> IO(List<&2, Chunk>):
         return c <> cs
 
 # a question with its gold chunks
-type Got is Data:
+type Got is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Got{q: Q, chunks: List<&2, Chunk>}
 
 # every question with its gold chunks, in order
@@ -296,6 +296,19 @@ def Gold.sliced(+book: String, chunk: Chunk, +path: String) -> IO(Unit):
         path ++ "[" ++ U32.show(start) ++ ":" ++ U32.show(end)
           ++ "] is not the chunk's text: offsets are not code-point offsets")
 
+# check the first chunk of cs against its book file under dir
+def Gold.check.first(+dir: String, cs: List<&2, Chunk>) -> IO(Unit):
+  match cs:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{+c, _more}:
+      match c:
+        case Chunk{+source, start, end, text}:
+          +path = dir ++ "/text/" ++ source ++ ".txt"
+          do IO<Unit>:
+            book : String <- St.Store.read(path)
+            Gold.sliced(book, Chunk{source, start, end, text}, path)
+
 # check the first gold chunk of the first question against its book file
 def Gold.check(+dir: String, gs: List<&2, Got>) -> IO(Unit):
   match gs:
@@ -304,16 +317,7 @@ def Gold.check(+dir: String, gs: List<&2, Got>) -> IO(Unit):
     case Con{g, _rest}:
       match g:
         case Got{_q, cs}:
-          match cs:
-            case Nil{}:
-              IO.pure(Unit, Unit{})
-            case Con{+c, _more}:
-              match c:
-                case Chunk{+source, start, end, text}:
-                  +path = dir ++ "/text/" ++ source ++ ".txt"
-                  do IO<Unit>:
-                    book : String <- St.Store.read(path)
-                    Gold.sliced(book, Chunk{source, start, end, text}, path)
+          Gold.check.first(dir, cs)
 
 # --- the command ---
 

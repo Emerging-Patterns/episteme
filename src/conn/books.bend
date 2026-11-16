@@ -45,7 +45,7 @@ import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
 # a span of a book: where it starts, in code points, and its text
-type Span is Data:
+type Span is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Span{at: U32, body: String}
 
 # the number of code points of a text, as a U32
@@ -167,6 +167,16 @@ def Books.ts(book: String, now: String) -> String:
 def Books.piece() -> Nat:
   20000n
 
+# the start of a group's first paragraph, at when it has none
+def Books.lead(at: U32, group: List<&2, P.Para>) -> U32:
+  match group:
+    case Nil{}:
+      at
+    case Con{para, _rest}:
+      match para:
+        case P.Para{_n, start, _end, _text}:
+          start
+
 # where a group's record starts: the span's start for a span's first
 # group, else the start of the group's first paragraph
 def Books.start(first: Bool, +at: U32, group: List<&2, P.Para>) -> U32:
@@ -174,13 +184,7 @@ def Books.start(first: Bool, +at: U32, group: List<&2, P.Para>) -> U32:
     case True{}:
       at
     case False{}:
-      match group:
-        case Nil{}:
-          at
-        case Con{para, _rest}:
-          match para:
-            case P.Para{_n, start, _end, _text}:
-              start
+      Books.lead(at, group)
 
 # one record per group of a span's paragraphs, in order, each numbering its
 # paragraphs from 1

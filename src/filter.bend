@@ -94,7 +94,7 @@ def Filter.wide(sel: Sel) -> Bool:
       String.eq(text, "chat:claude")
     case Prefix{+text}:
       Bool.or(String.eq(text, "chat:"),
-        Bool.or(String.eq(text, "chat:claude/"), String.eq(text, "")))
+        Bool.or(String.eq(text, "chat:claude/"), String.is_empty(text)))
 
 # True when some selector of sels would select every Claude chat
 def Filter.any_wide(sels: List<&2, Sel>) -> Bool:

@@ -54,7 +54,7 @@ def call_in(
   rest: List<&2, R.Record>
 ) -> Type:
   D1.Elem(R.Record, r,
-    C.Chat.put(C.Chat.call(small, ts, source, thread, parent, ptr, author, uuid, i, name, input), rest))
+    C.Chat.put(C.Chat.call(small, C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, name, input), rest))
 
 # a record of a tool call's record ahead of rest is the call's, with the
 # stamp, or one of rest
@@ -97,7 +97,7 @@ def tools_stamp(
   -uuid: String,
   -i: U32,
   -r: R.Record,
-  h: D1.Elem(R.Record, r, C.Chat.tools(bs, ts, source, thread, parent, ptr, author, uuid, i))
+  h: D1.Elem(R.Record, r, C.Chat.tools(bs, C.Spot{ts, source, thread, parent, ptr, author, uuid}, i))
 ) -> {Laws.chat.stamp(r) == (ts, source, thread, parent)
   : String & String & String & String}:
   match bs:
@@ -115,34 +115,31 @@ def tools_stamp(
         case C.Note{text}:
           M1.or_else({Laws.chat.stamp(r) == (ts, source, thread, parent)
               : String & String & String & String},
-            D1.Elem(R.Record, r, C.Chat.tools(rest, ts, source, thread, parent,
-              ptr, author, uuid, U32.inc(i))),
+            D1.Elem(R.Record, r, C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid}, U32.inc(i))),
             made_stamp("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
               "meta", thread, parent, P.Para.split(text), "", r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_stamp(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
         case C.Call{name, +input}:
           M1.or_else({Laws.chat.stamp(r) == (ts, source, thread, parent)
               : String & String & String & String},
-            D1.Elem(R.Record, r, C.Chat.tools(rest, ts, source, thread, parent,
-              ptr, author, uuid, U32.inc(i))),
+            D1.Elem(R.Record, r, C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid}, U32.inc(i))),
             call_stamp(Nat.is_le(String.length(input), C.Chat.inline()), ts, source,
               thread, parent, ptr, author, uuid, i, name, input, r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_stamp(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
         case C.Back{chars}:
           M1.or_else({Laws.chat.stamp(r) == (ts, source, thread, parent)
               : String & String & String & String},
-            D1.Elem(R.Record, r, C.Chat.tools(rest, ts, source, thread, parent,
-              ptr, author, uuid, U32.inc(i))),
+            D1.Elem(R.Record, r, C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid}, U32.inc(i))),
             made_stamp("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
               "tool", thread, parent,
               P.Para.split("tool result, " ++ U32.show(chars) ++ " chars"), ptr, r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_stamp(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
@@ -152,12 +149,12 @@ def Laws.chat_stamp(path, project, n, line, r, h):
     case C.Line{+author, +uuid, +ts, +session, +parent, +blocks}:
       M1.or_else({Laws.chat.stamp(r) == (ts, "chat:claude/" ++ project, session, parent)
           : String & String & String & String},
-        D1.Elem(R.Record, r, C.Chat.tools(blocks, ts, "chat:claude/" ++ project,
-          session, parent, "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0)),
+        D1.Elem(R.Record, r, C.Chat.tools(blocks, C.Spot{ts, "chat:claude/" ++ project, session, parent,
+            "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, 0)),
         made_stamp("claude:" ++ uuid, ts, "chat:claude/" ++ project, author,
           session, parent, P.Para.split(C.Chat.said(blocks)), "", r,
-          C.Chat.tools(blocks, ts, "chat:claude/" ++ project, session, parent,
-            "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0), h),
+          C.Chat.tools(blocks, C.Spot{ts, "chat:claude/" ++ project, session, parent,
+              "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, 0), h),
         hr => tools_stamp(blocks, ts, "chat:claude/" ++ project, session, parent,
           "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0, r, hr))
 
@@ -266,7 +263,7 @@ def tools_ptr(
   -uuid: String,
   -i: U32,
   -r: R.Record,
-  h: D1.Elem(R.Record, r, C.Chat.tools(bs, ts, source, thread, parent, ptr, author, uuid, i))
+  h: D1.Elem(R.Record, r, C.Chat.tools(bs, C.Spot{ts, source, thread, parent, ptr, author, uuid}, i))
 ) -> ptr_claim(r, ptr):
   match bs:
     case Nil{}:
@@ -281,32 +278,32 @@ def tools_ptr(
             U32.inc(i), r, h)
         case C.Note{text}:
           ptr_made(True{}, r, ptr,
-            C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+            C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
               U32.inc(i)),
             made_ptr("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
               "meta", thread, parent, P.Para.split(text), "", r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_ptr(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
         case C.Call{name, +input}:
           ptr_made(Nat.is_le(String.length(input), C.Chat.inline()), r, ptr,
-            C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+            C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
               U32.inc(i)),
             call_ptr(Nat.is_le(String.length(input), C.Chat.inline()), ts, source,
               thread, parent, ptr, author, uuid, i, name, input, r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_ptr(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
         case C.Back{chars}:
           ptr_made(False{}, r, ptr,
-            C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+            C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
               U32.inc(i)),
             made_ptr("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source,
               "tool", thread, parent,
               P.Para.split("tool result, " ++ U32.show(chars) ++ " chars"), ptr, r,
-              C.Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid,
+              C.Chat.tools(rest, C.Spot{ts, source, thread, parent, ptr, author, uuid},
                 U32.inc(i)), h),
             hr => tools_ptr(rest, ts, source, thread, parent, ptr, author, uuid,
               U32.inc(i), r, hr))
@@ -315,12 +312,12 @@ def Laws.chat_ptr(path, project, n, line, r, h):
   match line:
     case C.Line{+author, +uuid, +ts, +session, +parent, +blocks}:
       ptr_made(True{}, r, "file:" ++ path ++ ":" ++ U32.show(n),
-        C.Chat.tools(blocks, ts, "chat:claude/" ++ project, session, parent,
-          "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0),
+        C.Chat.tools(blocks, C.Spot{ts, "chat:claude/" ++ project, session, parent,
+            "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, 0),
         made_ptr("claude:" ++ uuid, ts, "chat:claude/" ++ project, author,
           session, parent, P.Para.split(C.Chat.said(blocks)), "", r,
-          C.Chat.tools(blocks, ts, "chat:claude/" ++ project, session, parent,
-            "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0), h),
+          C.Chat.tools(blocks, C.Spot{ts, "chat:claude/" ++ project, session, parent,
+              "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, 0), h),
         hr => tools_ptr(blocks, ts, "chat:claude/" ++ project, session, parent,
           "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0, r, hr))
 
@@ -371,27 +368,27 @@ def tools_in(
   +author: String,
   +uuid: String,
   +i: U32
-) -> Laws.chat.in(C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, Laws.chat.after(pre, i), b),
-  C.Chat.tools(List.append(&2, C.Block, pre, b <> post), ts, source, thread, parent, ptr, author, uuid, i)):
+) -> Laws.chat.in(C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, Laws.chat.after(pre, i), b),
+  C.Chat.tools(List.append(&2, C.Block, pre, b <> post), C.Spot{ts, source, thread, parent, ptr, author, uuid}, i)):
   match pre:
     case Nil{}:
-      in_here(C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, b),
-        C.Chat.tools(post, ts, source, thread, parent, ptr, author, uuid, U32.inc(i)))
+      in_here(C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, b),
+        C.Chat.tools(post, C.Spot{ts, source, thread, parent, ptr, author, uuid}, U32.inc(i)))
     case Con{+x, +rest}:
-      in_keep(C.Chat.tool(ts, source, thread, parent, ptr, author, uuid,
+      in_keep(C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid},
           Laws.chat.after(rest, U32.inc(i)), b),
-        C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, x),
-        C.Chat.tools(List.append(&2, C.Block, rest, b <> post), ts, source, thread,
-          parent, ptr, author, uuid, U32.inc(i)),
+        C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, x),
+        C.Chat.tools(List.append(&2, C.Block, rest, b <> post),
+            C.Spot{ts, source, thread, parent, ptr, author, uuid}, U32.inc(i)),
         tools_in(rest, b, post, ts, source, thread, parent, ptr, author, uuid,
           U32.inc(i)))
 
 def Laws.chat_blocks(path, project, n, author, uuid, ts, session, parent, pre, b, post):
-  in_keep(C.Chat.tool(ts, "chat:claude/" ++ project, session, parent,
-      "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, Laws.chat.after(pre, 0), b),
+  in_keep(C.Chat.tool(C.Spot{ts, "chat:claude/" ++ project, session, parent,
+      "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, Laws.chat.after(pre, 0), b),
     R.Record.make("claude:" ++ uuid, ts, "chat:claude/" ++ project, author, session,
       parent, C.Chat.said(List.append(&2, C.Block, pre, b <> post)), ""),
-    C.Chat.tools(List.append(&2, C.Block, pre, b <> post), ts, "chat:claude/" ++ project,
-      session, parent, "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0),
+    C.Chat.tools(List.append(&2, C.Block, pre, b <> post), C.Spot{ts, "chat:claude/" ++ project, session, parent,
+        "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, 0),
     tools_in(pre, b, post, ts, "chat:claude/" ++ project, session, parent,
       "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, 0))

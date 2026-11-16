@@ -86,13 +86,13 @@ import ezjson@1.2.0.0/main.bend as Json
 import ezjson@1.2.0.0/src/value.bend as Value
 
 # a reader instance: its URL and its slot count
-type Slot is Data:
+type Slot is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Slot{url: String, slots: U32}
 
 # the settings: the shard size in reader tokens, characters per token
 # times 100 (255 is 2.55), the reader pool and the excerpt budget in
 # tokens
-type Config is Data:
+type Config is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Config{shard_tokens: U32, chars_per_token: U32, pool: List<&2, Slot>,
     budget_tokens: U32}
 
@@ -471,7 +471,7 @@ def Store.parsed(lines: List<&2, String>) -> Maybe<&2, List<&2, R.Record>>:
       Store.cons(R.Record.of_line(SCon{head, tail}), Store.parsed(rest))
 
 # a log batch: the connector that wrote it, its cursor, its records
-type Batch is Data:
+type Batch is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Batch{conn: String, cursor: String, recs: List<&2, R.Record>}
 
 # a batch of its header fields, or None when one is missing
@@ -563,7 +563,7 @@ def Store.batch.head(+file: String) -> IO(Batch):
     Store.head.open(res, file)
 
 # a log batch's number and records
-type Numbered is Data:
+type Numbered is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Numbered{num: U32, recs: List<&2, R.Record>}
 
 # the records of the batches, in order
@@ -679,7 +679,7 @@ def Store.shard(+path: String) -> IO(S.Shard):
     Store.shard.of(S.Shard.of_json(text), path)
 
 # a tail and the last log batch packed into its shard size
-type Tail is Data:
+type Tail is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Tail{shard: S.Shard, covered: U32}
 
 # a tail of its parsed parts, or None
@@ -778,7 +778,7 @@ def Store.put.go(ss: List<&2, S.Shard>, +dir: String, +covered: U32) -> IO(Unit)
 # a frozen shard's size: its code points, its paragraphs, the latest ts
 # among its records ("" when it holds none), and how many records start in
 # it (its items from a record's first paragraph)
-type Sz is Data:
+type Sz is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Sz{chars: U32, paras: U32, last: String, recs: U32}
 
 # 1 for an item from its record's first paragraph, else 0
@@ -1066,7 +1066,7 @@ def Store.shards(chars: U32, +sels: List<&2, F.Sel>) -> IO(List<&2, S.Shard>):
 # points and no items, sized its paragraph count and path its file. A
 # shard that was read has no count and no path. last is an unread shard's
 # latest record ts and recs how many records start in it
-type Light is Data:
+type Light is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Light{shard: S.Shard, sized: Maybe<&2, Nat>, path: String, last: String, recs: U32}
 
 # shards that were read, as lights
@@ -1296,7 +1296,7 @@ def Store.cursor(+conn: String) -> IO(String):
     +dir : String <- Store.path("log")
     +names : List<&2, String> <- Store.names(dir)
     +got : String <- Store.scan(Store.after(names, U32.sub(from, U32.min(from, 1))), dir, conn, "")
-    Store.cursor.if(Bool.and(String.is_empty(got), Bool.not(U32.is_eq(from, 0))), got, names, dir, conn)
+    Store.cursor.if(Bool.and(String.is_empty(got), U32.is_ne(from, 0)), got, names, dir, conn)
 
 # remove a directory and everything under it
 def Store.remove(+path: String) -> IO(Unit):

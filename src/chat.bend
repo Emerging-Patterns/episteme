@@ -62,78 +62,67 @@ def Chat.said(bs: List<&2, Block>) -> String:
 def Chat.inline() -> Nat:
   4000n
 
+# where a line's block records go: the timestamp, source, thread and parent
+# they share, the pointer to the line, the line's author and its uuid
+type Spot is Data:
+  Spot{ts: String, source: String, thread: String, parent: String, ptr: String,
+    author: String, uuid: String}
+
 # the record of a tool call at index idx of its line, by the line's author:
 # its name and input when small, else a pointer to the line whose body is
 # the name and the input's size in code points
-def Chat.call(
-  small: Bool,
-  +ts: String,
-  +source: String,
-  +thread: String,
-  +parent: String,
-  +ptr: String,
-  +author: String,
-  +uuid: String,
-  +idx: U32,
-  name: String,
-  +input: String
-) -> Maybe<&2, R.Record>:
+def Chat.call(small: Bool, at: Spot, +idx: U32, name: String, +input: String) -> Maybe<&2, R.Record>:
   match small:
     case True{}:
-      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, author,
-        thread, parent, name ++ "\n" ++ input, "")
+      match at:
+        case Spot{ts, source, thread, parent, _ptr, author, +uuid}:
+          R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, author,
+            thread, parent, name ++ "\n" ++ input, "")
     case False{}:
-      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, author,
-        thread, parent,
-        name ++ ", " ++ U32.show(U32.from_nat(String.length(input))) ++ " chars", ptr)
+      match at:
+        case Spot{ts, source, thread, parent, ptr, author, +uuid}:
+          R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, author,
+            thread, parent,
+            name ++ ", " ++ U32.show(U32.from_nat(String.length(input))) ++ " chars", ptr)
+
+# the record of a note at index idx of its line: its text, by "meta"
+def Chat.note(at: Spot, +idx: U32, text: String) -> Maybe<&2, R.Record>:
+  match at:
+    case Spot{ts, source, thread, parent, _ptr, _author, +uuid}:
+      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, "meta",
+        thread, parent, text, "")
+
+# the record of a tool result at index idx of its line: a pointer to the
+# line, by "tool", its body the result's size
+def Chat.back(at: Spot, +idx: U32, chars: U32) -> Maybe<&2, R.Record>:
+  match at:
+    case Spot{ts, source, thread, parent, ptr, _author, +uuid}:
+      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, "tool",
+        thread, parent, "tool result, " ++ U32.show(chars) ++ " chars", ptr)
 
 # the record a block makes on its own, at index idx of its line: a call's
 # (Chat.call), a result's pointer to the line, by "tool", or a note's text,
 # by "meta"; said and mute blocks make none
-def Chat.tool(
-  +ts: String,
-  +source: String,
-  +thread: String,
-  +parent: String,
-  +ptr: String,
-  +author: String,
-  +uuid: String,
-  +idx: U32,
-  blk: Block
-) -> Maybe<&2, R.Record>:
+def Chat.tool(+at: Spot, +idx: U32, blk: Block) -> Maybe<&2, R.Record>:
   match blk:
     case Said{_text}:
       None{}
     case Note{text}:
-      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, "meta",
-        thread, parent, text, "")
+      Chat.note(at, idx, text)
     case Call{name, +input}:
-      Chat.call(Nat.is_le(String.length(input), Chat.inline()), ts, source, thread,
-        parent, ptr, author, uuid, idx, name, input)
+      Chat.call(Nat.is_le(String.length(input), Chat.inline()), at, idx, name, input)
     case Back{chars}:
-      R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(idx), ts, source, "tool",
-        thread, parent, "tool result, " ++ U32.show(chars) ++ " chars", ptr)
+      Chat.back(at, idx, chars)
     case Mute{}:
       None{}
 
 # the records the blocks make on their own, the first at index idx
-def Chat.tools(
-  bs: List<&2, Block>,
-  +ts: String,
-  +source: String,
-  +thread: String,
-  +parent: String,
-  +ptr: String,
-  +author: String,
-  +uuid: String,
-  +idx: U32
-) -> List<&2, R.Record>:
+def Chat.tools(bs: List<&2, Block>, +at: Spot, +idx: U32) -> List<&2, R.Record>:
   match bs:
     case Nil{}:
       []
     case Con{b, rest}:
-      Chat.put(Chat.tool(ts, source, thread, parent, ptr, author, uuid, idx, b),
-        Chat.tools(rest, ts, source, thread, parent, ptr, author, uuid, U32.inc(idx)))
+      Chat.put(Chat.tool(at, idx, b), Chat.tools(rest, at, U32.inc(idx)))
 
 # the records of a line read from the file at path, line number num, of the
 # project: first the said text as claude:<uuid> (none when it has no
@@ -144,8 +133,8 @@ def Chat.records(+path: String, +project: String, +num: U32, line: Line) -> List
     case Line{+author, +uuid, +ts, +session, +parent, +blocks}:
       Chat.put(R.Record.make("claude:" ++ uuid, ts, "chat:claude/" ++ project,
         author, session, parent, Chat.said(blocks), ""),
-        Chat.tools(blocks, ts, "chat:claude/" ++ project, session, parent,
-          "file:" ++ path ++ ":" ++ U32.show(num), author, uuid, 0))
+        Chat.tools(blocks, Spot{ts, "chat:claude/" ++ project, session, parent,
+          "file:" ++ path ++ ":" ++ U32.show(num), author, uuid}, 0))
 
 # --- reading a line's JSON ---
 
@@ -286,7 +275,7 @@ def Chat.human(side: Bool, meta: Bool, +kind: String) -> String:
     case True{}:
       "agent"
     case False{}:
-      Chat.human.of(String.eq(kind, "human"), String.eq(kind, ""), meta, kind)
+      Chat.human.of(String.eq(kind, "human"), String.is_empty(kind), meta, kind)
 
 # what a reminder the harness puts into a line opens with
 def Chat.note.open() -> String:

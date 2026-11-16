@@ -69,12 +69,12 @@ import ezjson@1.2.0.0/src/value.bend as Value
 # how far a run got: the cursor, the records read and not yet appended
 # (newest session first), their code points, the records appended and the
 # messages read so far, and the batches appended
-type Run is Data:
+type Run is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Run{pos: List<&2, C.Seen>, recs: List<&2, List<&2, R.Record>>,
     chars: Nat, total: U32, msgs: U32, batches: U32}
 
 # where Honcho is and the key it takes
-type Api is Data:
+type Api is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Api{base: String, key: String}
 
 # the code points of records a batch gathers before it is appended

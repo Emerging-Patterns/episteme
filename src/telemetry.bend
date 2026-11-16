@@ -222,27 +222,34 @@ def Tele.chars(ss: List<&2, S.Shard>) -> Nat:
         case S.Shard{_n, _items, _sources, chars, _frozen}:
           Nat.add(U32.to_nat(chars), Tele.chars(rest))
 
-# a question's telemetry line: when it was asked and by which command
-# (via), the question, its filter, since and the authors it names, its
-# milliseconds, its exit
-# code and refusal ("" when it ran), the size of every source the filter
-# hits (all, before the since, beside their paragraph counts ap), each
-# shard the run read (hits, numbered for the run, beside their paragraph
-# counts hp and names, with reads rs), and the run's totals: code points
-# in, excerpts and code points out, then what it returned: each excerpt's
-# record id, author and paragraph numbers. The counts are given, not counted, so
-# a shard the question did not load is listed with the count its source's
-# size index holds
+# a question as its telemetry line names it: when it was asked and by
+# which command (via), the question, its filter, since and the authors it
+# names, its milliseconds, its exit code and refusal ("" when it ran)
+type Asked is Data:
+  Asked{ts: String, via: String, question: String, filter: List<&2, F.Sel>,
+    since: Maybe<&2, String>, who: List<&2, String>, ms: Nat, code: U32,
+    why: String}
+
+# the opening fields of a question's telemetry line, from the question
+def Tele.asked(q: Asked) -> List<&1, String & Value.Json>:
+  match q:
+    case Asked{ts, via, question, filter, since, who, ms, code, why}:
+      [("ts", Json.str(ts)), ("via", Json.str(via)),
+        ("question", Json.str(question)), ("filter", Json.arr(Tele.sels(filter))),
+        ("since", Tele.since(since)), ("authors", Json.arr(Tele.who(who))),
+        ("ms", Tele.nat(ms)), ("code", Tele.u32(code)),
+        ("refused", Json.str(why))]
+
+# a question's telemetry line: the question (q, Tele.asked), the size of
+# every source the filter hits (all, before the since, beside their
+# paragraph counts ap), each shard the run read (hits, numbered for the
+# run, beside their paragraph counts hp and names, with reads rs), and the
+# run's totals: code points in, excerpts and code points out, then what it
+# returned: each excerpt's record id, author and paragraph numbers. The
+# counts are given, not counted, so a shard the question did not load is
+# listed with the count its source's size index holds
 def Tele.line.with(
-  ts: String,
-  via: String,
-  question: String,
-  filter: List<&2, F.Sel>,
-  since: Maybe<&2, String>,
-  who: List<&2, String>,
-  ms: Nat,
-  code: U32,
-  why: String,
+  q: Asked,
   all: List<&2, S.Shard>,
   ap: List<&2, Nat>,
   +hits: List<&2, S.Shard>,
@@ -251,34 +258,21 @@ def Tele.line.with(
   +rs: List<&2, Rd.Read>,
   +xs: List<&2, E.Ex>
 ) -> String:
-  Json.print(Json.obj([("ts", Json.str(ts)), ("via", Json.str(via)),
-    ("question", Json.str(question)), ("filter", Json.arr(Tele.sels(filter))),
-    ("since", Tele.since(since)), ("authors", Json.arr(Tele.who(who))),
-    ("ms", Tele.nat(ms)), ("code", Tele.u32(code)),
-    ("refused", Json.str(why)),
+  Json.print(Json.obj(List.append(&1, String & Value.Json, Tele.asked(q), [
     ("sources", Json.arr(Tele.size.all(Tele.sizes(all, ap)))),
     ("shards", Json.arr(Tele.shards(hits, hp, names, rs))),
     ("in_chars", Tele.nat(Tele.chars(hits))),
     ("excerpts", Tele.nat(List.length(&2, E.Ex, xs))),
     ("out_chars", Tele.nat(Sc.Score.chars(xs))),
-    ("returned", Json.arr(Tele.exs(xs)))]))
+    ("returned", Json.arr(Tele.exs(xs)))])))
 
 # Tele.line.with, each shard's paragraphs counted from the shard
 def Tele.line(
-  ts: String,
-  via: String,
-  question: String,
-  filter: List<&2, F.Sel>,
-  since: Maybe<&2, String>,
-  who: List<&2, String>,
-  ms: Nat,
-  code: U32,
-  why: String,
+  q: Asked,
   +all: List<&2, S.Shard>,
   +hits: List<&2, S.Shard>,
   names: List<&2, Rd.Name>,
   +rs: List<&2, Rd.Read>,
   +xs: List<&2, E.Ex>
 ) -> String:
-  Tele.line.with(ts, via, question, filter, since, who, ms, code, why, all, Tele.counts(all),
-    hits, Tele.counts(hits), names, rs, xs)
+  Tele.line.with(q, all, Tele.counts(all), hits, Tele.counts(hits), names, rs, xs)

@@ -9,7 +9,9 @@
 # import those modules and nothing that does IO. The IO shell (src/store.bend,
 # src/ingest.bend, src/conn/, src/reader.bend, src/pool.bend, src/ask.bend,
 # src/gold.bend, src/eval.bend, main.bend) only runs what the core decides;
-# what it does is trusted in each module's header, tests/smoke.sh runs it end
+# main.bend's pure parts live in src/cli.bend. What the shell does is trusted
+# in each module's header, and its defs and types no law can import carry
+# `# noqa: L001` with the reason; tests/smoke.sh runs it end
 # to end on a synthetic book, a synthetic transcript, a fake Honcho, synthetic
 # git repos and an intent file, and tests/live.sh, run by hand, runs the
 # reader pool against live readers.
@@ -29,7 +31,8 @@
 # laws/IntentAppendsOnChange.bend (the intent file),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
-# laws/TelemetryLineOfARun.bend (telemetry), and
+# laws/TelemetryLineOfARun.bend (telemetry),
+# laws/CliNamesItsCommands.bend (the command line, src/cli.bend), and
 # laws/HitsCountRecalled.bend and laws/CoverageAddsOverExcerpts.bend (the
 # eval).
 #
@@ -53,6 +56,7 @@ import ./laws/ChatProjectPasses.bend as ChatProjectPasses
 import ./laws/ChatRecordsKeepEveryBlock.bend as ChatRecordsKeepEveryBlock
 import ./laws/ChatSourceDirName.bend as ChatSourceDirName
 import ./laws/ClaudeCursorReadsBack.bend as ClaudeCursorReadsBack
+import ./laws/CliNamesItsCommands.bend as CliNamesItsCommands
 import ./laws/CoverageAddsOverExcerpts.bend as CoverageAddsOverExcerpts
 import ./laws/CutEndsAtLastFeed.bend as CutEndsAtLastFeed
 import ./laws/CutReplyFails.bend as CutReplyFails
@@ -154,6 +158,9 @@ import ./laws/ShardRendersLabelledText.bend as ShardRendersLabelledText
 import ./laws/ShardsCoverEveryParagraph.bend as ShardsCoverEveryParagraph
 import ./laws/ShardSourcesSorted.bend as ShardSourcesSorted
 import ./laws/ShiftMovesOffsets.bend as ShiftMovesOffsets
+import ./laws/ShowFindsRecordAndParagraphs.bend as ShowFindsRecordAndParagraphs
+import ./laws/ShowRunsCommandOutput.bend as ShowRunsCommandOutput
+import ./laws/ShowWantsIdAndParagraph.bend as ShowWantsIdAndParagraph
 import ./laws/SinceDateIsMidnight.bend as SinceDateIsMidnight
 import ./laws/SinceDropsOldExcerpts.bend as SinceDropsOldExcerpts
 import ./laws/SinceKeepsFullTime.bend as SinceKeepsFullTime
@@ -162,6 +169,7 @@ import ./laws/SinceRefusesNoSeconds.bend as SinceRefusesNoSeconds
 import ./laws/SinceRefusesShortMonth.bend as SinceRefusesShortMonth
 import ./laws/SinceRefusesWord.bend as SinceRefusesWord
 import ./laws/SourceDirsAreSafeAndDistinct.bend as SourceDirsAreSafeAndDistinct
+import ./laws/SourcesCountsEachSource.bend as SourcesCountsEachSource
 import ./laws/SourceSplitIsOnePass.bend as SourceSplitIsOnePass
 import ./laws/SubagentPromptByAgent.bend as SubagentPromptByAgent
 import ./laws/TelemetryLineOfARun.bend as TelemetryLineOfARun

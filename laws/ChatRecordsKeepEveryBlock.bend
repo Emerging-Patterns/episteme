@@ -84,7 +84,7 @@ law chat_blocks:
   for +pre: List<&2, C.Block>
   for +b: C.Block
   for +post: List<&2, C.Block>
-  chat.in(C.Chat.tool(ts, "chat:claude/" ++ project, session, parent,
-      "file:" ++ path ++ ":" ++ U32.show(n), author, uuid, chat.after(pre, 0), b),
+  chat.in(C.Chat.tool(C.Spot{ts, "chat:claude/" ++ project, session, parent,
+      "file:" ++ path ++ ":" ++ U32.show(n), author, uuid}, chat.after(pre, 0), b),
     C.Chat.records(path, project, n,
       C.Line{author, uuid, ts, session, parent, List.append(&2, C.Block, pre, b <> post)}))

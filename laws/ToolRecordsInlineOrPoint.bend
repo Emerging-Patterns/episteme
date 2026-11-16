@@ -1,4 +1,4 @@
-# `Chat.tool(.., ptr, author, uuid, i, b)`: for `b` a `Call` whose input has
+# `Chat.tool(Spot{.., ptr, author, uuid}, i, b)`: for `b` a `Call` whose input has
 # at most 4000 code points, the record `claude:<uuid>:<i>` of its name and
 # input, by `author`, with no `ptr`; for a longer input, the record whose body
 # is `<name>, <size> chars`, by `author`, with `ptr`; for `b` a `Back`, the
@@ -21,7 +21,7 @@ law call_inline:
   for name: String
   for +input: String
   for h: {Nat.is_le(String.length(input), 4000n) == True{} : Bool}
-  {C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, C.Call{name, input})
+  {C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, C.Call{name, input})
     == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, author,
       thread, parent, name ++ "\n" ++ input, "") : Maybe<&2, R.Record>}
 
@@ -40,7 +40,7 @@ law call_pointer:
   for name: String
   for +input: String
   for h: {Nat.is_le(String.length(input), 4000n) == False{} : Bool}
-  {C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, C.Call{name, input})
+  {C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, C.Call{name, input})
     == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, author,
       thread, parent,
       name ++ ", " ++ U32.show(U32.from_nat(String.length(input))) ++ " chars", ptr)
@@ -58,7 +58,7 @@ law back_pointer:
   for +uuid: String
   for +i: U32
   for chars: U32
-  {C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, C.Back{chars})
+  {C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, C.Back{chars})
     == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, "tool",
       thread, parent, "tool result, " ++ U32.show(chars) ++ " chars", ptr)
     : Maybe<&2, R.Record>}

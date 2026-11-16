@@ -40,7 +40,7 @@ import ./store.bend as St
 
 # a worker: its number, its instance, its slot there and whether the
 # instance ranked the run
-type Worker is Data:
+type Worker is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Worker{id: U32, url: String, slot: U32, ranked: Bool}
 
 # the workers of cnt more slots of the instance at url, from slot on,

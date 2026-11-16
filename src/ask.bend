@@ -182,6 +182,14 @@ def Ask.renum(sh: S.Shard, num: U32) -> S.Shard:
     case S.Shard{_n, items, sources, chars, frozen}:
       S.Shard{num, items, sources, chars, frozen}
 
+# whether a read named any labels
+def Ask.any(labels: List<&2, String>) -> Bool:
+  match labels:
+    case Nil{}:
+      False{}
+    case Con{_label, _rest}:
+      True{}
+
 # whether an unread shard is read now: it has a file, and every shard is
 # wanted or its read named labels
 def Ask.wanted(path: String, every: Bool, labels: List<&2, String>) -> Bool:
@@ -193,11 +201,7 @@ def Ask.wanted(path: String, every: Bool, labels: List<&2, String>) -> Bool:
         case True{}:
           True{}
         case False{}:
-          match labels:
-            case Nil{}:
-              False{}
-            case Con{_label, _rest}:
-              True{}
+          Ask.any(labels)
 
 # sh, or the shard in its file under sh's run number when need
 def Ask.load.if(need: Bool, +sh: S.Shard, +path: String) -> IO(S.Shard):
@@ -253,7 +257,7 @@ def Ask.named(got: Maybe<&2, List<&2, Rd.Read>>) -> List<&2, Rd.Read>:
 
 # a run's reads (None when no reader instance is healthy) beside its
 # shards, those the excerpts need read from their files
-type Reads is Data:
+type Reads is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Reads{got: Maybe<&2, List<&2, Rd.Read>>, hits: List<&2, S.Shard>}
 
 # read the shards with the pool. When every instance ranked the run, each
@@ -467,7 +471,7 @@ def Ask.out(
 # a question's run before delivery: its excerpts merged in time order, its
 # reads in shard order, the run's shards' own names, and how many labels
 # the shards do not have
-type Got is Data:
+type Got is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Got{xs: List<&2, E.Ex>, rs: List<&2, Rd.Read>, names: List<&2, Rd.Name>, unknown: U32}
 
 # each shard's excerpts merged, those before the since dropped and, when the
@@ -511,7 +515,7 @@ def Ask.done(got: Got, json: Bool, +cfg: St.Config, +t0: Nat) -> IO(U32):
         return Rd.Read.code(rs)
 
 # why a run did not happen, and the exit code `ask` stops with
-type Refusal is Data:
+type Refusal is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Refusal{code: U32, why: String}
 
 # the run when the reads came back, else the refusal and its exit code 2
@@ -532,7 +536,7 @@ def Ask.came(
 # a question's run or refusal beside what telemetry needs of it: every
 # shard the filter hits, the shards it read, numbered for the run, and
 # their own names
-type Ran is Data:
+type Ran is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Ran{all: List<&2, S.Shard>, ap: List<&2, Nat>, hits: List<&2, S.Shard>, hp: List<&2, Nat>,
     names: List<&2, Rd.Name>, res: Result<&2, &2, Refusal, Got>}
 
@@ -653,7 +657,8 @@ def Ask.logged(
   match ran:
     case Ran{all, ap, hits, hp, names, +res}:
       do IO<Result<&2, &2, Refusal, Got>>:
-        Ask.tele(T.Tele.line.with(ts, via, question, filter, since, who, ms, Ask.code(res), Ask.why(res),
+        Ask.tele(T.Tele.line.with(
+          T.Asked{ts, via, question, filter, since, who, ms, Ask.code(res), Ask.why(res)},
           all, ap, hits, hp, names, Ask.rs(res), Ask.xs(res)))
         return res
 

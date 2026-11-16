@@ -14,8 +14,14 @@ def wide_eq(sel):
   match sel:
     case F.Exact{_t}:
       {==}
-    case F.Prefix{_t}:
-      {==}
+    case F.Prefix{t}:
+      match t:
+        case SNil{}:
+          {==}
+        case SCon{h, _rest}:
+          match h:
+            case Chr{_x}:
+              {==}
 
 # the code's test over the selectors is the specification's
 law any_wide_eq:

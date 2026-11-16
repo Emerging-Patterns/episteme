@@ -40,7 +40,7 @@ law note_is_metas_record:
   for uuid: String
   for i: U32
   for text: String
-  {C.Chat.tool(ts, source, thread, parent, ptr, author, uuid, i, C.Note{text})
+  {C.Chat.tool(C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, C.Note{text})
     == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, "meta",
       thread, parent, text, "")
     : Maybe<&2, R.Record>}

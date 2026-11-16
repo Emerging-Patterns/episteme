@@ -6,14 +6,14 @@ import ../laws/ToolRecordsInlineOrPoint.bend as Laws
 
 def Laws.call_inline(ts, source, thread, parent, ptr, author, uuid, i, name, input, h):
   %Equal.sym(Bool, Nat.is_le(String.length(input), 4000n), True{}, h)
-    : {C.Chat.call(_, ts, source, thread, parent, ptr, author, uuid, i, name, input)
+    : {C.Chat.call(_, C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, name, input)
       == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, author,
         thread, parent, name ++ "\n" ++ input, "") : Maybe<&2, R.Record>}
   {==}
 
 def Laws.call_pointer(ts, source, thread, parent, ptr, author, uuid, i, name, input, h):
   %Equal.sym(Bool, Nat.is_le(String.length(input), 4000n), False{}, h)
-    : {C.Chat.call(_, ts, source, thread, parent, ptr, author, uuid, i, name, input)
+    : {C.Chat.call(_, C.Spot{ts, source, thread, parent, ptr, author, uuid}, i, name, input)
       == R.Record.make("claude:" ++ uuid ++ ":" ++ U32.show(i), ts, source, author,
         thread, parent,
         name ++ ", " ++ U32.show(U32.from_nat(String.length(input))) ++ " chars", ptr)
