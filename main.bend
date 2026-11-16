@@ -8,7 +8,12 @@
 # `sources` hold it. `episteme show <id>[#<n>]` prints the current record of
 # the log with the id, `Live.find` (laws/LiveKeepsLastVersion.bend): the last
 # record with it, and none when that one is a removal (the text after the
-# last `#` is a paragraph number when it reads as one) as `Excerpt.render` writes one excerpt, with all its
+# last `#` is a paragraph number when it reads as one). When the id names a
+# source (`Live.source`) whose directory of shards of the configured size
+# holds files, and the shards are not behind the log, it reads only that
+# directory's shards and takes `Live.pick` of the records they hold, which
+# is the same record (laws/ShowReadsOneSource.bend); otherwise it reads the
+# whole log as `Excerpt.render` writes one excerpt, with all its
 # paragraphs or paragraph `n`; then, for a `ptr` of `file:<path>:<line>`, that
 # line of the file, and for `git:<repo>@<hash>`, what `git --no-lazy-fetch -C
 # <repo> show --stat --patch --end-of-options <hash>` prints. Commands run
@@ -36,6 +41,7 @@
 import Base
 import ./src/para.bend as P
 import ./src/record.bend as R
+import ./src/shard.bend as S
 import ./src/excerpt.bend as E
 import ./src/live.bend as L
 import ./src/store.bend as St
@@ -195,13 +201,50 @@ def show.found(got: Maybe<&2, R.Record>, num: Maybe<&2, U32>, +arg: String) -> I
         case R.Record{_id, _ts, _source, _author, _thread, _parent, paras, _ptr}:
           show.rec(Cl.Cli.picked(num, paras), rec, arg)
 
+# the current record with the id, from a pass over the whole log
+def show.log(+id: String) -> IO(Maybe<&2, R.Record>):
+  do IO<Maybe<&2, R.Record>>:
+    log : List<&2, R.Record> <- St.Store.log()
+    return L.Live.find(id, log)
+
+# the record with the id among those a source directory's shards hold, or
+# the log's when the directory holds nothing
+def show.dir(empty: Bool, +dir: String, +id: String) -> IO(Maybe<&2, R.Record>):
+  match empty:
+    case True{}:
+      show.log(id)
+    case False{}:
+      do IO<Maybe<&2, R.Record>>:
+        ss : List<&2, S.Shard> <- St.Store.shards.in(dir)
+        return L.Live.pick(id, L.Live.held(ss))
+
+# the current record with the id: from the shards of the source it names
+# when it names one and the shards are not behind the log, else from the log
+def show.lookup(
+  behind: Maybe<&2, String>,
+  src: Maybe<&2, String>,
+  +cap: U32,
+  +id: String
+) -> IO(Maybe<&2, R.Record>):
+  match behind src:
+    case None{} Some{named}:
+      do IO<Maybe<&2, R.Record>>:
+        +dir : String <- St.Store.src(cap, named)
+        names : List<&2, String> <- St.Store.names(dir)
+        show.dir(List.is_empty(&2, String, names), dir, id)
+    case _ _:
+      show.log(id)
+
 # the record or paragraph a Want names
 def show.want(wt: Cl.Want, +arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
   match wt:
     case Cl.Want{+id, num}:
       do IO<Result<&2, &2, String, Cl.Shown>>:
-        log : List<&2, R.Record> <- St.Store.log()
-        show.found(L.Live.find(id, log), num, arg)
+        cfg : St.Config <- St.Store.config()
+        +cap : U32 <- St.Store.cap(cfg)
+        behind : Maybe<&2, String> <- St.Store.behind(cap)
+        got : Maybe<&2, R.Record> <- show.lookup(behind, L.Live.source(id), cap, id)
+        show.found(got, num, arg)
 
 # a record, or one paragraph of it, and what its pointer points at; or the
 # refusal when there is none

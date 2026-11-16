@@ -122,6 +122,7 @@ import ./proofs/ShardSourcesSorted.bend as PShardSourcesSorted
 import ./proofs/ShardsGiveBackRecords.bend as PShardsGiveBackRecords
 import ./proofs/ShiftMovesOffsets.bend as PShiftMovesOffsets
 import ./proofs/ShowFindsRecordAndParagraphs.bend as PShowFindsRecordAndParagraphs
+import ./proofs/ShowReadsOneSource.bend as PShowReadsOneSource
 import ./proofs/ShowRunsCommandOutput.bend as PShowRunsCommandOutput
 import ./proofs/ShowWantsIdAndParagraph.bend as PShowWantsIdAndParagraph
 import ./proofs/SinceDateIsMidnight.bend as PSinceDateIsMidnight

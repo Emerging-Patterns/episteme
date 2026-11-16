@@ -164,6 +164,7 @@ import ./laws/ShardSourcesSorted.bend as ShardSourcesSorted
 import ./laws/ShardsGiveBackRecords.bend as ShardsGiveBackRecords
 import ./laws/ShiftMovesOffsets.bend as ShiftMovesOffsets
 import ./laws/ShowFindsRecordAndParagraphs.bend as ShowFindsRecordAndParagraphs
+import ./laws/ShowReadsOneSource.bend as ShowReadsOneSource
 import ./laws/ShowRunsCommandOutput.bend as ShowRunsCommandOutput
 import ./laws/ShowWantsIdAndParagraph.bend as ShowWantsIdAndParagraph
 import ./laws/SinceDateIsMidnight.bend as SinceDateIsMidnight

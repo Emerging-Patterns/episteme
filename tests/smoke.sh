@@ -583,6 +583,14 @@ rc=0; "$bin" ingest records "$work/bad.jsonl" > /dev/null 2> "$work/err.txt" || 
 [ "$rc" = 1 ] || fail "records with a bad line exited $rc, not 1"
 grep -q 'line 2 is no record' "$work/err.txt" || fail "the bad line is not named: $(cat "$work/err.txt")"
 [ "$(batches)" = "$n" ] || fail "records with a bad line appended a batch"
+# show reads only the shards of the source an id names: with a log batch
+# unreadable it still finds a record, and still says a removed one is gone
+chmod 000 "$log/00000001.jsonl"
+"$bin" show 'note:x@one' > "$work/out.txt" || fail "show from the source's shards failed"
+grep -q '^note:x@one#1: The lamp is out.$' "$work/out.txt" || fail "show from the shards: $(cat "$work/out.txt")"
+rc=0; "$bin" show 'note:x@two' > /dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "show from the shards of a removed record exited $rc, not 1"
+chmod 644 "$log/00000001.jsonl"
 mkdir "$EPISTEME_HOME/lock"
 rc=0; "$bin" ingest records "$work/in2.jsonl" > /dev/null 2>&1 || rc=$?
 [ "$rc" = 75 ] || fail "a records ingest while the lock exists exited $rc, not 75"
