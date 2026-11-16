@@ -10,9 +10,9 @@
 # ones, in order (`Cli.strs`).
 import Base
 import ../src/cli.bend as Cl
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
-import shake@0.8.0.0/main.bend as Shake
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
+import shake@0.9.0.0/main.bend as Shake
 
 # the id a show bound
 def cli.picked.id(got: Maybe<&2, Shake.Matched>) -> Maybe<&2, String>:

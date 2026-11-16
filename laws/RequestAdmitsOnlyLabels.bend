@@ -36,8 +36,8 @@
 import Base
 import ../src/shard.bend as S
 import ../src/read.bend as Rd
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # the reader's system prompt, word for word
 def reader_prompt() -> String:

@@ -10,8 +10,8 @@ import ./excerpt.bend as E
 import ./read.bend as Rd
 import ./score.bend as Sc
 import ./para.bend as P
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # one source's size among the shards a filter hits: its shards, their
 # code points and their paragraphs

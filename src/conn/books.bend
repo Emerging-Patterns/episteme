@@ -40,9 +40,9 @@ import ../para.bend as P
 import ../record.bend as R
 import ../store.bend as St
 import ../ingest.bend as In
-import ezsys@0.1.0.0/main.bend as Sys
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezsys@0.2.0.0/main.bend as Sys
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # a span of a book: where it starts, in code points, and its text
 type Span is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)

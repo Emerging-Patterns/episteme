@@ -11,8 +11,8 @@
 # are ezjson's own; `tests/serve.sh` checks both shapes.
 import Base
 import ./filter.bend as F
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # an ask call's question, its filter, its since value and the authors it
 # names

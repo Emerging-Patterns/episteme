@@ -12,8 +12,8 @@ import Base
 import ./para.bend as P
 import ./record.bend as R
 import ./live.bend as L
-import ezjson@1.2.0.0/main.bend as Json
-import ezjson@1.2.0.0/src/value.bend as Value
+import ezjson@1.5.0.0/main.bend as Json
+import ezjson@1.5.0.0/src/value.bend as Value
 
 # --- one line ---
 

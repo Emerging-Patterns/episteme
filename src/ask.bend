@@ -133,8 +133,8 @@ import ./store.bend as St
 import ./pool.bend as Pl
 import ./reader.bend as Rr
 import ./telemetry.bend as T
-import ezjson@1.2.0.0/src/value.bend as Value
-import ezsys@0.1.0.0/main.bend as Sys
+import ezjson@1.5.0.0/src/value.bend as Value
+import ezsys@0.2.0.0/main.bend as Sys
 
 # the shards ss numbered num, num + 1, ... in order: one run reads shards
 # of several sources, each numbered from 1, and a read names its shard by
