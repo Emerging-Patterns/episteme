@@ -7,7 +7,8 @@ POST /v1/episteme/run {"question", "shards": [{"source", "n"}, ...]}: F2 then
 ranks every paragraph of the run's shards together and takes them best
 first until BUDGET tokens (characters / 2.55), and answers "ranked": true
 when its store held every named shard, with "states", how many of the
-run's shard states it found on the GPU, in RAM, on disk, or had to prefill. episteme then reads each shard by
+run's shard states it found on the GPU, in RAM, on disk, or had to prefill,
+and how many it did not need ("kept"). episteme then reads each shard by
 name, POST /v1/episteme/read {"question", "source", "n"}, without its text
 (laws/RankedReadNamesShard.bend), and each read answers the shard's share,
 in the chat completion's shape. A shard read with no notice is ranked alone,
@@ -47,6 +48,17 @@ looser one drops statements: two lines that differ in one word of ten (a
 commit that moves a pin to another version, "both can" against "neither
 can") say different things, and a short line said twice was said twice.
 REPEAT 0 takes every paragraph.
+
+A shard's attention scores for a question are kept (the last SCORES
+shard-and-question pairs, a few hundred bytes each): the same question over
+the same shard text scores the same, so asked again it needs neither the
+shard's state nor a pass of the model, and a question asked each hour of a
+source that grows costs its new shards only. A run of one shard keeps its
+scores apart, its null being another (see wordnull). The server writes them
+to F2_SCORES when it is told to stop and every ten minutes they have changed,
+and reads them at its start, so a restart does not cost each standing
+question a cold read of every state; a file by another model, other nulls
+or another version of this code is left unread.
 
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
@@ -93,10 +105,10 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states).
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt).
 """
-import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, sys, threading, time
+import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -128,6 +140,7 @@ SLABS = int(os.environ.get("SLABS", "12"))
 SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
+SCORES_MAX = int(os.environ.get("SCORES", "65536"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
 FLOOR = float(os.environ.get("FLOOR", "0.001"))
@@ -136,9 +149,10 @@ REPEAT = float(os.environ.get("REPEAT", "0.98"))
 REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
+SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.pt"
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
-META = threading.RLock()  # TERMS and RUNS
+META = threading.RLock()  # TERMS, SCORES and RUNS
 WANT = [0]  # runs waiting for or holding the GPU lock
 
 
@@ -551,6 +565,77 @@ def terms(k, sh):
     return counts
 
 
+SCORES = collections.OrderedDict()  # (shard key, question, whether the run had other shards) -> its paragraphs' attention scores
+CHANGED = [False]  # whether SCORES holds a score its file lacks
+KEEPING = threading.Lock()  # one writer of the scores' file at a time
+
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CODE = hashlib.sha1(b"".join(open(os.path.join(HERE, f), "rb").read() for f in ("f2serve.py", "model.py"))).hexdigest()
+
+
+def made_by():
+    """what a kept score depends on besides the shard's text and the
+    question: the model, the nulls, and this reader's code as it was read
+    when the process began (a change to how a score is made must not find
+    the scores the old code made)"""
+    return [model.VERSION, WORDNULLS, NULL, CODE]
+
+
+def keep(path):
+    """the kept scores written at path, least recently used first: their
+    keys, their lengths and one tensor of them end to end"""
+    with KEEPING:
+        with META:
+            items, CHANGED[0] = list(SCORES.items()), False
+        if items:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            write({"by": made_by(), "keys": [k for k, _ in items], "lens": [len(v) for _, v in items],
+                   "flat": torch.cat([v for _, v in items])}, path)
+
+
+def recall(path):
+    """the scores kept at path taken into SCORES; how many. A file that is
+    missing, empty, unreadable or not made by this model, these nulls and
+    this code gives none"""
+    if not kept(path):
+        return 0
+    try:
+        d = torch.load(path, weights_only=True)
+        if d["by"] != made_by():
+            return 0
+        at, got = 0, []
+        for k, n in zip(d["keys"], d["lens"]):
+            got.append((tuple(k), d["flat"][at:at + n].clone()))
+            at += n
+    except Exception:
+        return 0
+    with META:
+        for k, v in got[-SCORES_MAX:] if SCORES_MAX > 0 else []:
+            SCORES[k] = v
+        return len(SCORES)
+
+
+def keeper(path, every=600):
+    """the scores written every `every` seconds they have changed"""
+    while True:
+        time.sleep(every)
+        if CHANGED[0]:
+            try:
+                keep(path)
+            except OSError:
+                pass
+
+
+def stop(*_):
+    """told to stop: the scores written, then out"""
+    try:
+        if CHANGED[0]:
+            keep(SCORES_PATH)
+    finally:
+        os._exit(0)
+
+
 SERIAL = itertools.count()  # a number for each run
 
 
@@ -560,7 +645,7 @@ class Run:
     def __init__(self, shards):
         self.shards = shards
         self.serial, self.words = next(SERIAL), None
-        self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill
+        self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill; kept, when its scores were kept and no state was needed
         self.keys = [key(s["text"]) for s in shards]
         self.paras = []  # (shard index, label number, characters, text)
         self.authors = []  # each paragraph's author, None for a shard known by its text alone
@@ -594,18 +679,25 @@ class Run:
         return out
 
     def attention(self, q):
-        """per paragraph, in shard order. The shards whose state is on the GPU
-        are scored first, then those in RAM, then the rest: a run bigger than
-        the tiers then hits what they hold, where a fixed order under LRU
-        evicts each state just before it is needed and never hits."""
+        """per paragraph, in shard order. A shard whose scores for q are
+        kept is not scored again. Of the rest, the shards whose state is on
+        the GPU are scored first, then those in RAM, then the others: a run
+        bigger than the tiers then hits what they hold, where a fixed order
+        under LRU evicts each state just before it is needed and never hits."""
         tier = lambda k: 0 if k in STATES.gpu else 1 if k in STATES.ram else 2
+        many, got = len(self.shards) > 1, {}
+        with META:
+            for i, k in enumerate(self.keys):
+                if (k, q, many) in SCORES:
+                    SCORES.move_to_end((k, q, many))
+                    got[i] = SCORES[(k, q, many)].tolist()
+                    self.came["kept"] += 1
         with Turn():
-            order = sorted(range(len(self.shards)), key=lambda i: tier(self.keys[i]))
+            order = sorted((i for i in range(len(self.shards)) if i not in got), key=lambda i: tier(self.keys[i]))
             cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
                     if tier(k) == 1 or tier(k) == 2 and STATES.kept(k)]
         loading = {}  # the next AHEAD states the GPU lacks, staged for it while it works
-        left = collections.Counter(self.keys)
-        got = {}
+        left = collections.Counter(self.keys[i] for i in order)
         for at in range(0, len(order), BATCH):
             with Turn():  # one batch: another run's batch may come between two of this one's
                 batch = []
@@ -620,7 +712,13 @@ class Run:
                     state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial, self.pool)
                     batch.append((i, self.keys[i], state, null))
                 for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
-                    got[i] = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).tolist()
+                    score = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).float().cpu()
+                    got[i] = score.tolist()
+                    with META:
+                        SCORES[(self.keys[i], q, many)] = score
+                        CHANGED[0] = True
+                        while len(SCORES) > SCORES_MAX:
+                            SCORES.popitem(last=False)
         return [x for i in range(len(self.shards)) for x in got[i]]
 
     def spread(self, fused):
@@ -781,5 +879,9 @@ if __name__ == "__main__":
     HIGH = memory_high()
     RAM_BYTES = under(RAM_BYTES, HIGH, HEADROOM)
     warm()
-    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB" % (PORT, RAM_BYTES / 1e9), flush=True)
+    had = recall(SCORES_PATH)
+    threading.Thread(target=keeper, args=(SCORES_PATH,), daemon=True).start()
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores" % (PORT, RAM_BYTES / 1e9, had), flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
