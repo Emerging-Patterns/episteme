@@ -37,6 +37,17 @@ merely ranks next. Each paragraph's fused score then gains NEIGHBOUR times
 the better of its two neighbours' in the shard, and after that SHARD times
 the best score in its shard.
 
+Taking them best first, a paragraph that repeats one already taken is passed
+over and the budget goes to the next: both of REPEAT_WORDS words or more, and
+the same words in the same order but for at most one in fifty of the longer's
+(REPEAT 0.98). A record holds the same text many times over (one brief sent
+to several agents, a line that opens every session, a notice printed in every
+volume), and the best-scored copy says it once. The test is strict because a
+looser one drops statements: two lines that differ in one word of ten (a
+commit that moves a pin to another version, "both can" against "neither
+can") say different things, and a short line said twice was said twice.
+REPEAT 0 takes every paragraph.
+
 A shard's state (model.prefill: its keys and values int8, its
 linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
 RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
@@ -82,10 +93,10 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states).
 """
-import collections, copy, ctypes, hashlib, itertools, json, math, os, random, re, sys, threading, time
+import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, sys, threading, time
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -121,6 +132,8 @@ WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
 FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
+REPEAT = float(os.environ.get("REPEAT", "0.98"))
+REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
 CHARS_PER_TOKEN = 2.55
@@ -209,6 +222,26 @@ STEMS = {}  # word -> stem(word): a run's paragraphs hold millions of words, few
 
 def words(s):
     return [STEMS.get(w) or STEMS.setdefault(w, stem(w)) for w in re.findall(r"[a-z0-9]+", s.lower())]
+
+
+def said(text):
+    """a paragraph's words as written, lowercase, in order"""
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def repeats(a, b):
+    """whether word lists a and b say the same thing over: each of
+    REPEAT_WORDS words or more, and the same words in the same order but for
+    at most a share 1 - REPEAT of the longer's"""
+    n, m = sorted((len(a), len(b)))
+    if REPEAT <= 0 or n < REPEAT_WORDS or n < REPEAT * m:
+        return False
+    if a == b:
+        return True
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    if sm.quick_ratio() * (n + m) / 2 < REPEAT * m:  # too few words in common, whatever their order
+        return False
+    return sum(x.size for x in sm.get_matching_blocks()) >= REPEAT * m
 
 
 def key(text):
@@ -611,9 +644,10 @@ class Run:
         return [x + SHARD * best[p[0]] for p, x in zip(self.paras, fused)]
 
     def pick(self, q, budget, who=()):
-        """shard key -> label numbers, best first until the budget; with
-        authors named in who, only paragraphs by one of them are taken, and
-        of those only the ones whose attention score reaches FLOOR"""
+        """shard key -> label numbers, best first until the budget, but for
+        a paragraph that repeats one taken before it; with authors named in
+        who, only paragraphs by one of them are taken, and of those only the
+        ones whose attention score reaches FLOOR"""
         def z(s):
             n = len(s)
             mean = sum(s) / max(n, 1)
@@ -622,15 +656,20 @@ class Run:
         att = self.attention(q)
         fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(att))]
         fused = self.lift(self.spread(fused))
-        out, used = {k: [] for k in self.keys}, 0.0
+        out, used, taken = {k: [] for k in self.keys}, 0.0, []
         for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
             if who and (self.authors[i] not in who or att[i] < FLOOR):
                 continue
-            cost = self.paras[i][2] / CHARS_PER_TOKEN
+            _, label, chars, line = self.paras[i]
+            text = said(line[len(line) - chars:])  # the line less its label
+            if any(repeats(text, t) for t in taken):
+                continue
+            cost = chars / CHARS_PER_TOKEN
             if used + cost > budget and used > 0:
                 break
-            out[self.keys[self.paras[i][0]]].append(self.paras[i][1])
+            out[self.keys[self.paras[i][0]]].append(label)
             used += cost
+            taken.append(text)
         return {k: sorted(v) for k, v in out.items()}
 
 
