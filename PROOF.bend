@@ -6,6 +6,7 @@ import ./proofs/AuthorKeepsNamedAuthors.bend as PAuthorKeepsNamedAuthors
 import ./proofs/BareDotIsNoSource.bend as PBareDotIsNoSource
 import ./proofs/BlankLinesSeparateParagraphs.bend as PBlankLinesSeparateParagraphs
 import ./proofs/BookPacksIntoShards.bend as PBookPacksIntoShards
+import ./proofs/ChangedRecordKeepsItsPlace.bend as PChangedRecordKeepsItsPlace
 import ./proofs/ChatSourceDirName.bend as PChatSourceDirName
 import ./proofs/CliNamesItsCommands.bend as PCliNamesItsCommands
 import ./proofs/CoverageAddsOverExcerpts.bend as PCoverageAddsOverExcerpts

@@ -12,7 +12,8 @@
 # every field (`input_same`); x when no current record has its id
 # (`input_new`); and when it differs, the removal of its id and then x
 # (`input_changed`), so x is the current record with its id whatever came
-# before (`input_current`) and its source is packed again. A removal makes
+# before (`input_current`) and its source is packed again, x where the
+# version it changes was (laws/ChangedRecordKeepsItsPlace.bend). A removal makes
 # its id current in no record (`removal_clears`). A run touches no id the
 # input lacks (`input_frame`), except that with `--complete` it then
 # removes each current record whose id the input lacks, in order

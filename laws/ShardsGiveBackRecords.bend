@@ -5,8 +5,9 @@
 # consecutive paragraphs of one record id, in order, the shards' items read
 # in order (`Shard.lines`). Packing records `xs` and reading them back gives
 # `xs` exactly when every record of `xs` has a paragraph and no record of
-# `xs` has the id of the one before it (`Live.of` gives such lists: it
-# keeps one record per id), for records with fewer than 2^32 paragraphs.
+# `xs` has the id of the one before it (a source's current records are such
+# a list: no two of them have one id, laws/ChangedRecordKeepsItsPlace.bend),
+# for records with fewer than 2^32 paragraphs.
 # This is what lets a source's shards be packed again from what they hold,
 # with no read of the log (laws/SourceShardsHoldCurrentRecords.bend).
 # also rests on: laws/ShardsCoverEveryParagraph.bend

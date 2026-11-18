@@ -4,7 +4,7 @@ How to work in this repository. It is written for coding agents, and it holds fo
 
 ## What episteme is
 
-episteme answers a question from the raw record: one append-only log of records, packed into frozen shards that small local reader models scan, returning verbatim excerpts. Each shard holds one source, `<kind>:<name>`, as the records a caller gives with `episteme ingest records` name it; episteme reads no source itself. The log is never rewritten: a record is changed by a later record with its id and removed by a later removal of its id (laws/LiveKeepsLastVersion.bend), and its source's shards are then packed again. What episteme guarantees is one file per guarantee under `laws/`; `LAWS.bend`'s header says how they are laid out, and what is trusted rather than proved is said on the code (`# Trusted, not proved:`).
+episteme answers a question from the raw record: one append-only log of records, packed into frozen shards that small local reader models scan, returning verbatim excerpts. Each shard holds one source, `<kind>:<name>`, as the records a caller gives with `episteme ingest records` name it; episteme reads no source itself. The log is never rewritten: a record is changed by a later record with its id and removed by a later removal of its id (laws/LiveKeepsLastVersion.bend), and its source's shards are then packed again, a changed record where its earlier version was (laws/ChangedRecordKeepsItsPlace.bend). What episteme guarantees is one file per guarantee under `laws/`; `LAWS.bend`'s header says how they are laid out, and what is trusted rather than proved is said on the code (`# Trusted, not proved:`).
 
 ## Build and check
 

@@ -9,16 +9,19 @@
 # less the removals: appending a record `x` to `xs` drops every record with
 # x's id from the current records and puts `x` last, unless `x` is a removal
 # (`live_last`). Taking the current records first changes nothing that comes
-# after (`live_append`), which is what lets a source's shards be packed again
-# from the records they hold (laws/SourceShardsHoldCurrentRecords.bend); and
-# records none of which shares an id with an earlier record leave the earlier
-# ones' current records as they were and follow them (`live_fresh`), which is
-# what lets a source's shards be extended. `Live.find(id, xs)`, which `episteme
+# after (`live_append`), and records none of which shares an id with an
+# earlier record leave the earlier ones' current records as they were and
+# follow them (`live_fresh`). `Live.find(id, xs)`, which `episteme
 # show` runs over the log in one pass, is the first record with the id among
 # `Live.of(xs)`, of which there is at most one: none when no record has the id
 # or its last is a removal (`find_live`). A source whose records each have an
 # id no earlier record of it has, and none of which is a removal, has every
 # record current: for it `Live.of` is the identity.
+#
+# This file says which version of an id counts, in one list of records: a
+# batch's own, or the log's for `show`. It does not say where a source's
+# shards keep a changed record: that is at the place of its earlier version,
+# not last as in `Live.of` (laws/ChangedRecordKeepsItsPlace.bend).
 import Base
 import ../src/record.bend as R
 import ../src/live.bend as L
