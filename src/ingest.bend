@@ -55,8 +55,10 @@
 # It answers how many shards it wrote, counting the `.json` files of the
 # source directories without reading them.
 #
-# A source's shards are then the pack of its current records
-# (laws/SourceShardsHoldCurrentRecords.bend) on one condition this shell
+# A source's shards are then the pack of its current records, a changed
+# record where its earlier version was
+# (laws/SourceShardsHoldCurrentRecords.bend,
+# laws/ChangedRecordKeepsItsPlace.bend), on one condition this shell
 # trusts: when a batch holds no removal of a source, its records of that
 # source are their own current records and have ids no earlier record of the
 # source has. `episteme ingest records` puts a removal of an id ahead of

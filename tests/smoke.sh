@@ -6,7 +6,7 @@
 # stale shard size, a crash in the middle of a run, the ingest lock (a
 # second ingest refused, the lock removed after a failed one), ask (with
 # and without --since), its telemetry line and eval without readers, and
-# changes and removals. Each ingest case ends with no id twice in the log,
+# changes and removals (a changed record keeps its place). Each ingest case ends with no id twice in the log,
 # but the records', whose changes reuse ids, and
 # shards byte for byte as a reshard writes them. EPISTEME
 # names the binary (default bin/episteme, built with
@@ -324,6 +324,11 @@ grep -q 'The crow flies' "$xdir"/*.json || fail "the shards lost the new record"
 "$bin" show 'note:y@k' > /dev/null || fail "a complete run over note:x removed note:y"
 [ -e "$EPISTEME_HOME/repack/8000/note:x" ] && fail "a repack left its swap directory"
 [ -e "$EPISTEME_HOME/repack/8000/note:x.old" ] && fail "a repack left the old shards"
+# a record changed again keeps its place, ahead of the record that follows it
+rec 'note:x@one' 2000-01-01T00:00:00.001Z note:x 'The lamp is dim.' > "$work/in3.jsonl"
+"$bin" ingest records "$work/in3.jsonl" > "$work/recs.txt"
+grep -q '^note:x: 2 records$' "$work/recs.txt" || fail "a change alone gave: $(cat "$work/recs.txt")"
+cat "$xdir"/*.json | tr -d '\n' | grep -q 'lamp is dim.*crow flies' || fail "a changed record left its place"
 fresh 8000 "records"
 n=$(batches)
 { rec 'note:x@four' 2000-01-01T00:00:00.004Z note:x 'Fine.'; echo '{"id":"note:x@bad","source":"note:x","text":"no ts"}'; } > "$work/bad.jsonl"
@@ -335,7 +340,7 @@ grep -q 'line 2 is no record' "$work/err.txt" || fail "the bad line is not named
 # unreadable it still finds a record, and still says a removed one is gone
 chmod 000 "$log/00000001.jsonl"
 "$bin" show 'note:x@one' > "$work/out.txt" || fail "show from the source's shards failed"
-grep -q '^note:x@one#1: The lamp is out.$' "$work/out.txt" || fail "show from the shards: $(cat "$work/out.txt")"
+grep -q '^note:x@one#1: The lamp is dim.$' "$work/out.txt" || fail "show from the shards: $(cat "$work/out.txt")"
 rc=0; "$bin" show 'note:x@two' > /dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "show from the shards of a removed record exited $rc, not 1"
 chmod 644 "$log/00000001.jsonl"

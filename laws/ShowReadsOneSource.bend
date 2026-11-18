@@ -11,13 +11,18 @@
 # directory of shards of the configured size, when the shards are not behind
 # the log, `show` reads that one directory and takes the first record with
 # the id among the records its shards hold (`Live.pick` over `Live.held`).
-# Those shards are `Shard.pack(cap, 1, Live.of(xs))`, `xs` the source's
-# records in log order (laws/SourceShardsHoldCurrentRecords.bend), and that
-# pick is `Live.find(id, xs)`, what a pass over the log gives
-# (`show_shards`), for records with fewer than 2^32 paragraphs that each
-# have one. Every other id, and every id while the shards are behind the
-# log, is found with `Live.find` over the whole log, as before.
-# also rests on: laws/LiveKeepsLastVersion.bend and laws/ShardsGiveBackRecords.bend
+# Those shards are `Shard.pack(cap, 1, m)`, `m` the source's current records
+# after the batches `bs` of its records the log holds, each batch applied to
+# what the ones before it left (`after(bs, [])`,
+# laws/SourceShardsHoldCurrentRecords.bend), and that pick is
+# `Live.find(id, xs)`, `xs` the records of those batches in log order
+# (`flat(bs)`): what a pass over the log gives (`show_shards`), for records
+# with fewer than 2^32 paragraphs that each have one. So a changed record
+# keeping its place in the shards changes nothing `show` prints. Every other
+# id, and every id while the shards are behind the log, is found with
+# `Live.find` over the whole log, as before.
+# also rests on: laws/LiveKeepsLastVersion.bend,
+# laws/ChangedRecordKeepsItsPlace.bend and laws/ShardsGiveBackRecords.bend
 import Base
 import ../src/record.bend as R
 import ../src/shard.bend as S
@@ -40,13 +45,14 @@ law source_named:
   for h: {noat(key) == True{} : Bool}
   {L.Live.source(String.append(src, SCon{'@', key})) == Some{src} : Maybe<&2, String>}
 
-# LAW: the record with the id among those the source's shards hold is the
-# current record the log gives, or none
+# LAW: the record with the id among those the source's shards hold after
+# the batches bs is the current record the batches' records give in log
+# order, or none
 law show_shards:
   for +cap: U32
   for +id: String
-  for +xs: List<&2, R.Record>
-  for hc: D2.counted(xs)
-  for hf: D1.filled(xs)
-  {L.Live.pick(id, L.Live.held(S.Shard.pack(cap, 1, L.Live.of(xs)))) == L.Live.find(id, xs)
-    : Maybe<&2, R.Record>}
+  for +bs: List<&2, List<&2, R.Record>>
+  for hc: D1.counted_all(bs)
+  for hf: D1.filled_all(bs)
+  {L.Live.pick(id, L.Live.held(S.Shard.pack(cap, 1, D1.after(bs, []))))
+    == L.Live.find(id, D1.flat(bs)) : Maybe<&2, R.Record>}

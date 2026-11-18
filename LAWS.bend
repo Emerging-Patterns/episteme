@@ -24,7 +24,8 @@
 # laws/ResolveKeepsNamedParagraphs.bend (excerpts),
 # laws/IngestKeepsRecordsThatFit.bend (ingest),
 # laws/RecordsInputChanges.bend (records given as JSON lines),
-# laws/LiveKeepsLastVersion.bend (current records: changes and removals),
+# laws/LiveKeepsLastVersion.bend (current records: changes and removals;
+# laws/ChangedRecordKeepsItsPlace.bend says where a changed one is kept),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
 # laws/TelemetryLineOfARun.bend (telemetry),
@@ -42,6 +43,7 @@ import ./laws/AuthorKeepsNamedAuthors.bend as AuthorKeepsNamedAuthors
 import ./laws/BareDotIsNoSource.bend as BareDotIsNoSource
 import ./laws/BlankLinesSeparateParagraphs.bend as BlankLinesSeparateParagraphs
 import ./laws/BookPacksIntoShards.bend as BookPacksIntoShards
+import ./laws/ChangedRecordKeepsItsPlace.bend as ChangedRecordKeepsItsPlace
 import ./laws/ChatSourceDirName.bend as ChatSourceDirName
 import ./laws/CliNamesItsCommands.bend as CliNamesItsCommands
 import ./laws/CoverageAddsOverExcerpts.bend as CoverageAddsOverExcerpts

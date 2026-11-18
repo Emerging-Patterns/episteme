@@ -3,7 +3,8 @@
 # same id, and removed by appending a removal: a record with its id whose
 # pointer is "removed". The current records of a list are the last record of
 # each id, unless that one is a removal; a source's shards hold its current
-# records, and `show` finds the current record of an id. A batch that
+# records, a changed one where its earlier version was (`Live.next`), and
+# `show` finds the current record of an id. A batch that
 # changes a record holds a removal of its id ahead of the new version, so a
 # batch of a source that changes or removes a record holds a removal. Pure:
 # no IO.
@@ -157,10 +158,71 @@ def Live.lines(ss: List<&2, S.Shard>) -> List<&2, S.Shard.Line()>:
 def Live.held(ss: List<&2, S.Shard>) -> List<&2, R.Record>:
   Live.firsts(Live.lines(ss), None{})
 
-# a source's shards packed again, from shard 1, from the current records of
-# what they hold followed by the records ys
-def Live.repack(+cap: U32, ss: List<&2, S.Shard>, ys: List<&2, R.Record>) -> List<&2, S.Shard>:
-  S.Shard.pack(cap, 1, Live.of(List.append(&2, R.Record, Live.held(ss), ys)))
+# --- a batch applied to a source's current records ---
+
+# what a current record becomes after a batch, ahead of rest: itself when
+# the batch names no record with its id, else the batch's last version of
+# the id, nothing when that is a removal
+def Live.kept.one(
+  named: Bool,
+  rec: R.Record,
+  last: Maybe<&2, R.Record>,
+  rest: List<&2, R.Record>
+) -> List<&2, R.Record>:
+  match named:
+    case False{}:
+      rec <> rest
+    case True{}:
+      match last:
+        case None{}:
+          rest
+        case Some{y}:
+          y <> rest
+
+# the records m after the batch ys, each at its place: a record whose id ys
+# names in its last version, or gone when that is a removal, every other as
+# it was
+def Live.kept(m: List<&2, R.Record>, +ys: List<&2, R.Record>) -> List<&2, R.Record>:
+  match m:
+    case Nil{}:
+      []
+    case Con{+r, rest}:
+      Live.kept.one(Live.has(Live.id(r), ys), r, Live.find(Live.id(r), ys), Live.kept(rest, ys))
+
+# rec ahead of rest unless it has the id
+def Live.less.if(hit: Bool, rec: R.Record, rest: List<&2, R.Record>) -> List<&2, R.Record>:
+  match hit:
+    case True{}:
+      rest
+    case False{}:
+      rec <> rest
+
+# the records of zs whose id is not id, in order
+def Live.less(+id: String, zs: List<&2, R.Record>) -> List<&2, R.Record>:
+  match zs:
+    case Nil{}:
+      []
+    case Con{+z, rest}:
+      Live.less.if(String.eq(Live.id(z), id), z, Live.less(id, rest))
+
+# the records of zs whose id no record of m has, in order
+def Live.added(m: List<&2, R.Record>, zs: List<&2, R.Record>) -> List<&2, R.Record>:
+  match m:
+    case Nil{}:
+      zs
+    case Con{r, rest}:
+      Live.added(rest, Live.less(Live.id(r), zs))
+
+# a source's current records m after the batch ys: m with each record at
+# its place in the last version ys gives its id, less those ys removes, then
+# the current records of ys whose ids m lacks
+def Live.next(+m: List<&2, R.Record>, +ys: List<&2, R.Record>) -> List<&2, R.Record>:
+  List.append(&2, R.Record, Live.kept(m, ys), Live.added(m, Live.of(ys)))
+
+# a source's shards packed again, from shard 1, from the records they hold
+# after the batch ys
+def Live.repack(+cap: U32, ss: List<&2, S.Shard>, +ys: List<&2, R.Record>) -> List<&2, S.Shard>:
+  S.Shard.pack(cap, 1, Live.next(Live.held(ss), ys))
 # --- the source an id names ---
 
 # what the text from chr on gives: the text before its last "@" when the
