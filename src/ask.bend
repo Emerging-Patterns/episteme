@@ -23,19 +23,26 @@
 # laws/RunNoticeNamesShards.bend), then `Pool.try` reads them with the
 # configured pool, by name on the instances whose answer was ranked
 # (laws/RankedReadNamesShard.bend). Each shard's read (`Read.ordered`, shard order,
-# laws/EveryShardIsRead.bend) is resolved with `Excerpt.resolve` on its labels
+# laws/EveryShardIsRead.bend) is narrowed to its printed labels
+# (`Rank.narrow` of `Rank.items` for `budget_tokens` and `chars_per_token`,
+# laws/BestRankedArePrinted.bend) and resolved with `Excerpt.resolve` on them
 # (laws/ReplyIsOkOrFailed.bend), and the per-shard lists go to `Excerpt.merge`
-# in that order. Without `--json` it prints `Excerpt.render` of the merged
-# excerpts when `Read.fits` passes for `budget_tokens` and `chars_per_token`,
-# else writes each source's excerpts to `runs/<ISO time>/<source with / as
-# _>.md` (the directory made with `mkdir` without `-p`, so a name in use is
-# never shared: `<ISO time>-1`, `-2`, ... up to 99 are tried next) and
-# `INDEX.md` (one line per source: file, source, excerpt count, first and last
-# ts) under `Store.home()` and prints the directory; then a blank line and
-# `Read.footer`, its wall time from the start of the command. With `--json` it
-# prints one object `{"excerpts": [{"id", "source", "ts", "author", "paras":
-# [[n, start, end, text]]}], "reads": [Read...]}` and the footer on stderr. It
-# exits with `Read.code` of the reads.
+# in that order; the reads as they came are resolved and merged the same way,
+# and the count of unknown labels is theirs. Without `--json` it prints
+# `Excerpt.render` of the narrowed reads' merged excerpts and, when the run
+# is not whole (`Rank.whole`), also writes the excerpts of the reads as they
+# came, each source's to `runs/<ISO time>/<source with / as _>.md` (the
+# directory made with `mkdir` without `-p`, so a name in use is never shared:
+# `<ISO time>-1`, `-2`, ... up to 99 are tried next) and `INDEX.md` (one line
+# per source: file, source, excerpt count, first and last ts) under
+# `Store.home()`, and prints `Read.more` of the directory; then a blank line
+# and `Read.footer`, its wall time from the start of the command. With
+# `--json` it prints one object `{"excerpts": [{"id", "source", "ts",
+# "author", "paras": [[n, start, end, text]]}], "reads": [Read...]}` of the
+# narrowed reads and their excerpts, and the footer on stderr; it writes no
+# run files. It exits with `Read.code` of the reads. The eval and the
+# telemetry line take the narrowed reads and their excerpts too: what a
+# question printed.
 #
 # Why it is trusted: It is IO sequencing over
 # laws/FilterHitsChosenSources.bend, laws/ChatFilterNamesAProject.bend,
@@ -44,7 +51,9 @@
 # laws/MergeOrdersByTime.bend, laws/RecalledMeansOverlap.bend,
 # laws/RequestAdmitsOnlyLabels.bend, laws/ReplyIsOkOrFailed.bend,
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
-# laws/ExcerptsFitBudget.bend and the store; `tests/smoke.sh` checks the
+# laws/ExcerptsFitBudget.bend, laws/BestRankedArePrinted.bend and the store;
+# `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
+# printed and all of it in the run files, and `tests/smoke.sh` checks the
 # refusal, the refusal when the shards are behind the log, and a pool with no
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
@@ -129,6 +138,7 @@ import ./shard.bend as S
 import ./filter.bend as F
 import ./excerpt.bend as E
 import ./read.bend as Rd
+import ./rank.bend as Rk
 import ./store.bend as St
 import ./pool.bend as Pl
 import ./reader.bend as Rr
@@ -434,26 +444,28 @@ def Ask.spill(+xs: List<&2, E.Ex>) -> IO(String):
     Ask.files(srcs, dir, xs)
     return dir
 
-# print the excerpts when they fit the budget, else write them to run files
-# and print where
-def Ask.deliver(fits: Bool, text: String, +xs: List<&2, E.Ex>) -> IO(Unit):
-  match fits:
+# print the excerpts; when the run is not whole, also write all the readers
+# named to run files and print where
+def Ask.deliver(whole: Bool, text: String, +all: List<&2, E.Ex>) -> IO(Unit):
+  match whole:
     case True{}:
       IO.write(text)
     case False{}:
       do IO<Unit>:
-        dir : String <- Ask.spill(xs)
-        IO.print(dir)
+        IO.write(text)
+        dir : String <- Ask.spill(all)
+        IO.print(Rd.Read.more(dir))
 
 # print the run: one JSON object, the footer on stderr; or the excerpts,
 # then the footer
 def Ask.out(
   json: Bool,
-  +xs: List<&2, E.Ex>,
+  xs: List<&2, E.Ex>,
   +rs: List<&2, Rd.Read>,
   names: List<&2, Rd.Name>,
   +foot: String,
-  +cfg: St.Config
+  all: List<&2, E.Ex>,
+  whole: Bool
 ) -> IO(Unit):
   match json:
     case True{}:
@@ -461,31 +473,43 @@ def Ask.out(
         IO.print(Rd.Read.report(xs, rs, names))
         IO.print_err(foot)
     case False{}:
-      match cfg:
-        case St.Config{_tokens, per, _pool, budget}:
-          +text = E.Excerpt.render(xs)
-          do IO<Unit>:
-            Ask.deliver(Rd.Read.fits(String.length(text), budget, per), text, xs)
-            IO.print("\n" ++ foot)
+      do IO<Unit>:
+        Ask.deliver(whole, E.Excerpt.render(xs), all)
+        IO.print("\n" ++ foot)
 
-# a question's run before delivery: its excerpts merged in time order, its
-# reads in shard order, the run's shards' own names, and how many labels
-# the shards do not have
+# a question's run before delivery: the excerpts it prints, merged in time
+# order, its reads in shard order with only their printed labels, the run's
+# shards' own names, how many labels the shards do not have, the excerpts
+# of all the readers named, and whether the run is whole (it prints them
+# all)
 type Got is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
-  Got{xs: List<&2, E.Ex>, rs: List<&2, Rd.Read>, names: List<&2, Rd.Name>, unknown: U32}
+  Got{xs: List<&2, E.Ex>, rs: List<&2, Rd.Read>, names: List<&2, Rd.Name>, unknown: U32,
+    all: List<&2, E.Ex>, whole: Bool}
 
-# each shard's excerpts merged, those before the since dropped and, when the
-# question names authors, those by another author, beside the reads and the
+# excerpts of every shard merged, those before the since dropped and, when
+# the question names authors, those by another author
+def Ask.merged(
+  lists: List<&2, List<&2, E.Ex>>,
+  since: Maybe<&2, String>,
+  who: List<&2, String>
+) -> List<&2, E.Ex>:
+  F.Filter.by(who, F.Filter.after(since, E.Excerpt.merge(lists)))
+
+# the run of the narrowed reads' excerpts (near) and of the excerpts of the
+# reads as they came (full), each merged, beside the narrowed reads and the
 # shards' names
 def Ask.got(
-  got: List<&2, List<&2, E.Ex>> & U32,
-  since: Maybe<&2, String>,
+  near: List<&2, List<&2, E.Ex>> & U32,
+  full: List<&2, List<&2, E.Ex>> & U32,
+  whole: Bool,
+  +since: Maybe<&2, String>,
   +who: List<&2, String>,
   rs: List<&2, Rd.Read>,
   names: List<&2, Rd.Name>
 ) -> Got:
-  (lists, unknown) = got
-  Got{F.Filter.by(who, F.Filter.after(since, E.Excerpt.merge(lists))), rs, names, unknown}
+  (lists, _strays) = near
+  (every, unknown) = full
+  Got{Ask.merged(lists, since, who), rs, names, unknown, Ask.merged(every, since, who), whole}
 
 # the first source of a shard's sources, or ""
 def Ask.source(srcs: List<&2, String>) -> String:
@@ -506,32 +530,49 @@ def Ask.names(ss: List<&2, S.Shard>) -> List<&2, Rd.Name>:
           Rd.Name{Ask.source(sources), n} <> Ask.names(rest)
 
 # the run after its reads, printed with the footer; answers the exit code
-def Ask.done(got: Got, json: Bool, +cfg: St.Config, +t0: Nat) -> IO(U32):
+def Ask.done(got: Got, json: Bool, +t0: Nat) -> IO(U32):
   match got:
-    case Got{+xs, +rs, +names, unknown}:
+    case Got{xs, +rs, +names, unknown, all, whole}:
       do IO<U32>:
         t1 : Nat <- IO.now()
-        Ask.out(json, xs, rs, names, Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0)), cfg)
+        Ask.out(json, xs, rs, names, Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0)), all, whole)
         return Rd.Read.code(rs)
 
 # why a run did not happen, and the exit code `ask` stops with
 type Refusal is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Refusal{code: U32, why: String}
 
+# the run of the reads rs: the reads narrowed to their printed labels
+# (Rank.narrow, for the budget), their excerpts and those of rs as they came
+def Ask.cut(
+  +hits: List<&2, S.Shard>,
+  +rs: List<&2, Rd.Read>,
+  +items: List<&2, Rk.Item>,
+  +budget: U32,
+  +per: U32,
+  since: Maybe<&2, String>,
+  who: List<&2, String>,
+  names: List<&2, Rd.Name>
+) -> Got:
+  +near = Rk.Rank.narrow(rs, items, budget, per)
+  Ask.got(Rd.Read.excerpts(hits, near), Rd.Read.excerpts(hits, rs),
+    Rk.Rank.whole(items, budget, per), since, who, near, names)
+
 # the run when the reads came back, else the refusal and its exit code 2
 def Ask.came(
   got: Maybe<&2, List<&2, Rd.Read>>,
   +hits: List<&2, S.Shard>,
+  cfg: St.Config,
   since: Maybe<&2, String>,
-  +who: List<&2, String>,
+  who: List<&2, String>,
   names: List<&2, Rd.Name>
 ) -> Result<&2, &2, Refusal, Got>:
-  match got:
-    case None{}:
+  match got cfg:
+    case None{} _:
       Fail{Refusal{2, Pl.Pool.none()}}
-    case Some{got}:
+    case Some{got} St.Config{_tokens, per, _pool, budget}:
       +rs = Rd.Read.ordered(hits, got)
-      Done{Ask.got(Rd.Read.excerpts(hits, rs), since, who, rs, names)}
+      Done{Ask.cut(hits, rs, Rk.Rank.items(hits, rs), budget, per, since, who, names)}
 
 # a question's run or refusal beside what telemetry needs of it: every
 # shard the filter hits, the shards it read, numbered for the run, and
@@ -546,13 +587,14 @@ def Ask.ran(
   all: List<&2, S.Shard>,
   ap: List<&2, Nat>,
   hp: List<&2, Nat>,
+  cfg: St.Config,
   since: Maybe<&2, String>,
-  +who: List<&2, String>,
+  who: List<&2, String>,
   +names: List<&2, Rd.Name>
 ) -> Ran:
   match reads:
     case Reads{got, +hits}:
-      Ran{all, ap, hits, hp, names, Ask.came(got, hits, since, who, names)}
+      Ran{all, ap, hits, hp, names, Ask.came(got, hits, cfg, since, who, names)}
 
 # the shards' reads when the shards are not behind the log, else the
 # refusal and its exit code 1
@@ -575,14 +617,14 @@ def Ask.reads(
         +ss : List<&2, S.Shard> = Ask.shards(kept)
         +names : List<&2, Rd.Name> = Ask.names(ss)
         reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question, who)
-        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), since, who, names)
+        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), cfg, since, who, names)
 
 # a result's exit code: its refusal's, else Read.code of its reads
 def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
   match res:
     case Fail{Refusal{code, _why}}:
       code
-    case Done{Got{_xs, rs, _names, _unknown}}:
+    case Done{Got{_xs, rs, _names, _unknown, _all, _whole}}:
       Rd.Read.code(rs)
 
 # a result's refusal, or ""
@@ -598,7 +640,7 @@ def Ask.rs(res: Result<&2, &2, Refusal, Got>) -> List<&2, Rd.Read>:
   match res:
     case Fail{_r}:
       []
-    case Done{Got{_xs, rs, _names, _unknown}}:
+    case Done{Got{_xs, rs, _names, _unknown, _all, _whole}}:
       rs
 
 # a result's excerpts, or none
@@ -606,7 +648,7 @@ def Ask.xs(res: Result<&2, &2, Refusal, Got>) -> List<&2, E.Ex>:
   match res:
     case Fail{_r}:
       []
-    case Done{Got{xs, _rs, _names, _unknown}}:
+    case Done{Got{xs, _rs, _names, _unknown, _all, _whole}}:
       xs
 
 # a failed telemetry write on stderr
@@ -722,7 +764,7 @@ def Ask.go(
     +t0 : Nat <- IO.now()
     +cfg : St.Config <- St.Store.config()
     got : Got <- Ask.gather("ask", cfg, filter, since, who, question)
-    Ask.done(got, json, cfg, t0)
+    Ask.done(got, json, t0)
 
 # the refusal on stderr and exit 2
 def Ask.refuse(why: String) -> IO(U32):
@@ -775,39 +817,36 @@ def Ask.run(
 
 # --- for the server ---
 
-# the excerpts when they fit the budget, else the run files' directory and
-# their INDEX.md
-def Ask.text(fits: Bool, text: String, +xs: List<&2, E.Ex>) -> IO(String):
-  match fits:
+# the excerpts; when the run is not whole, also where all the readers named
+# were written, and their INDEX.md
+def Ask.text(whole: Bool, text: String, +all: List<&2, E.Ex>) -> IO(String):
+  match whole:
     case True{}:
       IO.pure(String, text)
     case False{}:
       do IO<String>:
-        dir : String <- Ask.spill(xs)
-        return "The excerpts are over the budget; they are in " ++ dir ++ ":\n\n"
-          ++ Rd.Read.index(Rd.Read.sources(xs, []), xs)
+        dir : String <- Ask.spill(all)
+        return String.concat([text, Rd.Read.more(dir), "\n\n",
+          Rd.Read.index(Rd.Read.sources(all, []), all)])
 
 # a run delivered as text: the excerpts (or where they were written), a
 # blank line and the footer
-def Ask.told(got: Got, +cfg: St.Config, +t0: Nat) -> IO(String):
+def Ask.told(got: Got, +t0: Nat) -> IO(String):
   match got:
-    case Got{+xs, +rs, +names, unknown}:
-      match cfg:
-        case St.Config{_tokens, per, _pool, budget}:
-          +text = E.Excerpt.render(xs)
-          do IO<String>:
-            body : String <- Ask.text(Rd.Read.fits(String.length(text), budget, per), text, xs)
-            t1 : Nat <- IO.now()
-            return body ++ "\n" ++ Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0))
+    case Got{xs, +rs, +names, unknown, all, whole}:
+      do IO<String>:
+        body : String <- Ask.text(whole, E.Excerpt.render(xs), all)
+        t1 : Nat <- IO.now()
+        return body ++ "\n" ++ Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0))
 
 # the run as text, or its refusal
-def Ask.reply(res: Result<&2, &2, Refusal, Got>, +cfg: St.Config, +t0: Nat) -> IO(Result<&2, &2, String, String>):
+def Ask.reply(res: Result<&2, &2, Refusal, Got>, +t0: Nat) -> IO(Result<&2, &2, String, String>):
   match res:
     case Fail{Refusal{_code, why}}:
       IO.pure(Result<&2, &2, String, String>, Fail{why})
     case Done{got}:
       do IO<Result<&2, &2, String, String>>:
-        text : String <- Ask.told(got, cfg, t0)
+        text : String <- Ask.told(got, t0)
         return Done{text}
 
 # a question whose since value read, from the since on
@@ -823,9 +862,9 @@ def Ask.answer.dated(
     case Done{since}:
       do IO<Result<&2, &2, String, String>>:
         +t0 : Nat <- IO.now()
-        +cfg : St.Config <- St.Store.config()
+        cfg : St.Config <- St.Store.config()
         got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", cfg, filter, since, who, question)
-        Ask.reply(got, cfg, t0)
+        Ask.reply(got, t0)
 
 # a question over a filter that passed its check, answered as text rather
 # than printed: the excerpts and footer `ask` prints, or a refusal (a

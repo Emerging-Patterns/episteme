@@ -1,9 +1,11 @@
 # `Read.fits(chars, budget, per)` is True exactly when `chars <= budget * per
-# / 100`, computed in `Nat` so it never overflows.
+# / 100`, computed in `Nat` so it never overflows. It is the test of which of
+# the labels a run's readers named are printed
+# (laws/BestRankedArePrinted.bend).
 import Base
 import ../src/read.bend as Rd
 
-# LAW: excerpts are printed when their length is at most
+# LAW: characters fit the budget when they are at most
 # budget_tokens * chars_per_token / 100, computed without overflow
 law fits_budget:
   for chars: Nat

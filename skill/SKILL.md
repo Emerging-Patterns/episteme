@@ -43,7 +43,9 @@ Excerpts come in record order, not by relevance, so read the whole result before
 
 ## Reading the output
 
-Each excerpt is a header line `### <record id> | <source> | <ts> | <author>`, then one line `<record id>#<n>: <text>` per paragraph. A large result goes to files under `$EPISTEME_HOME/runs/<time>/` (one `<source>.md` each, and `INDEX.md`), and ask prints that directory.
+Each excerpt is a header line `### <record id> | <source> | <ts> | <author>`, then one line `<record id>#<n>: <text>` per paragraph.
+
+**What is printed is the best ranked, not all that was found.** When the readers named more than fits, the excerpts end with a line naming a directory under `$EPISTEME_HOME/runs/<time>/` that holds all of it in the same format: one `<source>.md` per source, in time order, and `INDEX.md` listing them. When the printed excerpts do not answer the question, or it asks for everything on a subject, sift those files before asking again: search them for the names and terms you need and read around the hits. They are several times what was printed, so do not read them whole.
 
 - **Cite every claim** as `<record id>#<n>`. Make no claim the excerpts do not hold.
 - **Later excerpts are the current state.** When two disagree, the later one is what holds now; say what changed.

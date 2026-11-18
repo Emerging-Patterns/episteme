@@ -17,7 +17,7 @@
 # zero-padded to 8 digits and directories made with `mkdir -p`. `Store.config`
 # reads `config.json`, first writing `{"shard_tokens": 16384,
 # "chars_per_token": 255, "pool": [["http://127.0.0.1:18111", 4]],
-# "budget_tokens": 60000}` when it is missing, and stops, naming the field,
+# "budget_tokens": 4000}` when it is missing, and stops, naming the field,
 # when one is missing or of the wrong kind (`pool` must be an array of `[url,
 # slots]`). `Store.cap` is `shard_tokens * chars_per_token / 100` characters
 # and stops with a message when the product overflows 32 bits or the size is
@@ -103,8 +103,8 @@ type Slot is Data:  # noqa: L001 IO shell type: no law can import this module (f
   Slot{url: String, slots: U32}
 
 # the settings: the shard size in reader tokens, characters per token
-# times 100 (255 is 2.55), the reader pool and the excerpt budget in
-# tokens
+# times 100 (255 is 2.55), the reader pool and the budget of the excerpts
+# a question prints, in tokens
 type Config is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Config{shard_tokens: U32, chars_per_token: U32, pool: List<&2, Slot>,
     budget_tokens: U32}
@@ -383,7 +383,7 @@ def Store.config.parsed(got: Maybe<&2, Value.Json>) -> IO(Config):
 
 # the config.json written on the first run
 def Store.config.default() -> String:
-  "{\"shard_tokens\": 16384, \"chars_per_token\": 255, \"pool\": [[\"http://127.0.0.1:18111\", 4]], \"budget_tokens\": 60000}\n"
+  "{\"shard_tokens\": 16384, \"chars_per_token\": 255, \"pool\": [[\"http://127.0.0.1:18111\", 4]], \"budget_tokens\": 4000}\n"
 
 # the settings from a read of config.json; a missing one is written with
 # the defaults first

@@ -46,7 +46,7 @@ def tele.shard(num: U32) -> S.Shard:
 
 # a read of the run's shard 1 that named p2
 def tele.read() -> Rd.Read:
-  Rd.Read{1, "u", ["p2"], True{}, "", 30, 5, 0, 7}
+  Rd.Read{1, "u", ["p2"], [], True{}, "", 30, 5, 0, 7}
 
 # LAW: an example: a run of one shard, for a question that names an author,
 # whose read kept one paragraph of three code points

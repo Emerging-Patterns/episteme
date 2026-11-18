@@ -11,8 +11,12 @@ run's shard states it found on the GPU, in RAM, on disk, or had to prefill,
 and how many it did not need ("kept"). episteme then reads each shard by
 name, POST /v1/episteme/read {"question", "source", "n"}, without its text
 (laws/RankedReadNamesShard.bend), and each read answers the shard's share,
-in the chat completion's shape. A shard read with no notice is ranked alone,
-with SHARD_BUDGET.
+in the chat completion's shape, {"ids": [...], "ranks": [...]}: beside each
+label its place among those the run took, 1 the best. episteme prints the
+best ranked that fit its own budget (config.json's budget_tokens) and keeps
+all of them in run files (laws/BestRankedArePrinted.bend), so BUDGET is how
+deep a question can be sifted, not how much it prints. A shard read with no
+notice is ranked alone, with SHARD_BUDGET.
 
 A question that names authors (laws/AuthorKeepsNamedAuthors.bend) has them
 in its notice, "authors": [...]: the run is scored as any other, over every
@@ -115,7 +119,7 @@ until it barely answers, and it also evicts whenever the process's resident
 memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
-env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (4000), SHARD_BUDGET (120),
+env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt).
 """
@@ -135,7 +139,7 @@ import store
 import model
 
 PORT = int(os.environ.get("PORT", "18112"))
-BUDGET = float(os.environ.get("BUDGET", "4000"))
+BUDGET = float(os.environ.get("BUDGET", "32000"))
 SHARD_BUDGET = float(os.environ.get("SHARD_BUDGET", "120"))
 CACHE_BYTES = float(os.environ.get("CACHE_GB", "7")) * 1e9
 RAM_BYTES = float(os.environ.get("RAM_GB", "24")) * 1e9
@@ -809,10 +813,12 @@ class Run:
         return [x + SHARD * best[p[0]] for p, x in zip(self.paras, fused)]
 
     def pick(self, q, budget, who=()):
-        """shard key -> label numbers, best first until the budget, but for
-        a paragraph that repeats one taken before it; with authors named in
-        who, only paragraphs by one of them are taken, and of those only the
-        ones whose attention score reaches FLOOR"""
+        """shard key -> (label number, rank) pairs in label order, the
+        paragraphs taken best first until the budget, but for a paragraph
+        that repeats one taken before it, each with its place among those
+        taken, from 1; with authors named in who, only paragraphs by one of
+        them are taken, and of those only the ones whose attention score
+        reaches FLOOR"""
         def z(s):
             n = len(s)
             mean = sum(s) / max(n, 1)
@@ -838,15 +844,15 @@ class Run:
             cost = chars / CHARS_PER_TOKEN
             if used + cost > budget and used > 0:
                 break
-            out[self.keys[self.paras[i][0]]].append(label)
-            used += cost
             taken.append(text)
+            out[self.keys[self.paras[i][0]]].append((label, len(taken)))
+            used += cost
         return {k: sorted(v) for k, v in out.items()}
 
 
 STATES = States()
 STORE = store.Store()
-RUNS = collections.OrderedDict()  # question -> ({shard key: label numbers}, {(source, n): shard key})
+RUNS = collections.OrderedDict()  # question -> ({shard key: (label number, rank) pairs}, {(source, n): shard key})
 
 
 def notice(question, names, who=()):
@@ -867,7 +873,8 @@ def notice(question, names, who=()):
 
 
 def answer(text, question):
-    """a shard's labels by its text: its share of the run, else ranked alone"""
+    """a shard's labels and their ranks by its text: its share of the run,
+    else ranked alone"""
     k = key(text)
     with META:
         picks, _ = RUNS.get(question, ({}, {}))
@@ -877,8 +884,9 @@ def answer(text, question):
 
 
 def answer_named(source, n, question):
-    """a shard's labels by its own name: its share of the run, else ranked
-    alone from the store; None when the store has no such shard"""
+    """a shard's labels and their ranks by its own name: its share of the
+    run, else ranked alone from the store; None when the store has no such
+    shard"""
     with META:
         picks, names = RUNS.get(question, ({}, {}))
         k = names.get((source, n))
@@ -935,7 +943,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(500, {"error": repr(e)[:300]})
         self.send(200, {"object": "chat.completion", "model": "f2",
                         "choices": [{"index": 0, "finish_reason": "stop", "message": {
-                            "role": "assistant", "content": json.dumps({"ids": ["p%d" % n for n in labels]})}}],
+                            "role": "assistant", "content": json.dumps({
+                                "ids": ["p%d" % n for n, _ in labels], "ranks": [r for _, r in labels]})}}],
                         "timings": {"prompt_n": 0, "prompt_ms": ms, "cache_n": 0, "predicted_ms": 0}})
 
     def log_message(self, fmt, *args):

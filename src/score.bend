@@ -140,7 +140,7 @@ def Score.prompt(rs: List<&2, Rd.Read>) -> Nat & Nat:
       (0n, 0n)
     case Con{r, rest}:
       match r:
-        case Rd.Read{_shard, _inst, _labels, _ok, _why, pn, pm, _cn, _ms}:
+        case Rd.Read{_shard, _inst, _labels, _ranks, _ok, _why, pn, pm, _cn, _ms}:
           Score.prompt.add(U32.to_nat(pn), U32.to_nat(pm), Score.prompt(rest))
 
 # a row with its prompt tokens and milliseconds

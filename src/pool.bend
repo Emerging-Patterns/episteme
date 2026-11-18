@@ -264,7 +264,7 @@ def Pool.insts(bad: List<&2, Rd.Read>, seen: List<&2, String>) -> List<&2, Strin
       seen
     case Con{rd, rest}:
       match rd:
-        case Rd.Read{_shard, inst, _labels, _ok, _why, _pn, _pm, _cn, _ms}:
+        case Rd.Read{_shard, inst, _labels, _ranks, _ok, _why, _pn, _pm, _cn, _ms}:
           Pool.insts(rest, S.Shard.insert(seen, inst))
 
 # True on a hit, else what later finds
@@ -282,7 +282,7 @@ def Pool.failed_on(bad: List<&2, Rd.Read>, +num: U32, +url: String) -> Bool:
       False{}
     case Con{rd, rest}:
       match rd:
-        case Rd.Read{+shard, +inst, _labels, _ok, _why, _pn, _pm, _cn, _ms}:
+        case Rd.Read{+shard, +inst, _labels, _ranks, _ok, _why, _pn, _pm, _cn, _ms}:
           Pool.failed_on.if(Bool.and(U32.is_eq(shard, num), String.eq(inst, url)),
             _u => Pool.failed_on(rest, num, url))
 

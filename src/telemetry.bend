@@ -158,7 +158,7 @@ def Tele.read(got: Maybe<&2, Rd.Read>) -> List<&1, String & Value.Json>:
       [("ok", Json.bool(False{})), ("ms", Tele.u32(0)), ("labels", Tele.u32(0))]
     case Some{rd}:
       match rd:
-        case Rd.Read{_shard, _inst, labels, ok, _why, _pn, _pm, _cn, ms}:
+        case Rd.Read{_shard, _inst, labels, _ranks, ok, _why, _pn, _pm, _cn, ms}:
           [("ok", Json.bool(ok)), ("ms", Tele.u32(ms)),
             ("labels", Tele.nat(List.length(&2, String, labels)))]
 

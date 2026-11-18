@@ -28,8 +28,10 @@
 # streamable HTTP at /mcp with ezmcp, until the process stops. Each call does
 # what its command does and answers its text as the tool result: `ask` reads
 # its arguments with `Tool.ask` (laws/ToolQueryIsCliQuery.bend) and runs
-# `Ask.answer`; `show` and `sources` run `show.text` and `sources.text`, the
-# functions their commands print. A refusal the command would stop with (no
+# `Ask.answer`, whose text is what `ask` prints, with the run files'
+# `INDEX.md` after `Read.more`'s line when the run is not whole; `show` and
+# `sources` run `show.text` and `sources.text`, the functions their commands
+# print. A refusal the command would stop with (no
 # filter, no question, a malformed since, shards behind the log, no healthy
 # reader, no such record) is a tool result with isError, and the server goes
 # on; a show without an id is refused as invalid params. A store too broken

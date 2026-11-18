@@ -10,13 +10,15 @@ import ezjson@1.5.0.0/main.bend as Json
 import ezjson@1.5.0.0/src/value.bend as Value
 
 # one reader call: the shard it read, the instance that read it, the labels
-# it named, whether it answered (False when the call failed, which is never
-# an empty answer), why it failed, and the server's timings: prompt tokens
-# processed, their milliseconds, prompt tokens reused from the cache, and
-# the call's milliseconds (prompt and generation)
+# it named, the ranks it gave them (the rank of the label in the same place,
+# 1 the best of the run; none from a reader that does not rank), whether it
+# answered (False when the call failed, which is never an empty answer), why
+# it failed, and the server's timings: prompt tokens processed, their
+# milliseconds, prompt tokens reused from the cache, and the call's
+# milliseconds (prompt and generation)
 type Read is Data:
-  Read{shard: U32, inst: String, labels: List<&2, String>, ok: Bool,
-    why: String, prompt_n: U32, prompt_ms: U32, cache_n: U32, ms: U32}
+  Read{shard: U32, inst: String, labels: List<&2, String>, ranks: List<&2, U32>,
+    ok: Bool, why: String, prompt_n: U32, prompt_ms: U32, cache_n: U32, ms: U32}
 
 # --- the request ---
 
@@ -116,6 +118,40 @@ def Read.answer.of(got: Maybe<&2, Value.Json>) -> Maybe<&2, List<&2, String>>:
     case Some{js}:
       Read.arr(Json.get(js, "ids"))
 
+# a rank read from a JSON value, 0 when it is no whole number
+def Read.rank(got: Maybe<&2, U32>) -> U32:
+  match got:
+    case None{}:
+      0
+    case Some{num}:
+      num
+
+# the ranks of JSON values, in order
+def Read.ranks.each(js: List<&2, Value.Json>) -> List<&2, U32>:
+  match js:
+    case Nil{}:
+      []
+    case Con{head, rest}:
+      Read.rank(Json.as_u32(head)) <> Read.ranks.each(rest)
+
+# the ranks of a parsed answer, none when it is not JSON
+def Read.ranks.of(got: Maybe<&2, Value.Json>) -> List<&2, U32>:
+  match got:
+    case None{}:
+      []
+    case Some{js}:
+      Read.ranks.each(Json.items(Json.get(js, "ranks")))
+
+# the ranks of the reader's answer {"ids": [...], "ranks": [...]}, in
+# order, the rank of the id in the same place: none when the answer names
+# no ranks, 0 for one that is no whole number
+def Read.ranks(content: Maybe<&2, String>) -> List<&2, U32>:
+  match content:
+    case None{}:
+      []
+    case Some{text}:
+      Read.ranks.of(Json.parse(text))
+
 # the ids of the reader's answer {"ids": [...]}, or None when it is not
 # JSON or its ids is not an array of strings
 def Read.answer(content: Maybe<&2, String>) -> Maybe<&2, List<&2, String>>:
@@ -172,7 +208,7 @@ def Read.clip(sh: String) -> String:
 
 # a failed read: no labels, ok False, and why
 def Read.fail(shard: U32, inst: String, why: String) -> Read:
-  Read{shard, inst, [], False{}, why, 0, 0, 0, 0}
+  Read{shard, inst, [], [], False{}, why, 0, 0, 0, 0}
 
 # the read of a 200 reply's ids: ok with them and the timings, or failed
 # when there are none
@@ -187,9 +223,15 @@ def Read.got(
     case None{}:
       Read.fail(shard, inst, "the reply holds no ids: " ++ Read.clip(text))
     case Some{ls}:
-      Read{shard, inst, ls, True{}, "", Read.num(tm, "prompt_n"),
+      Read{shard, inst, ls, [], True{}, "", Read.num(tm, "prompt_n"),
         Read.num(tm, "prompt_ms"), Read.num(tm, "cache_n"),
         U32.add(Read.num(tm, "prompt_ms"), Read.num(tm, "predicted_ms"))}
+
+# a read with the ranks its reply gave its labels, when it is ok
+def Read.rated(rd: Read, ranks: List<&2, U32>) -> Read:
+  match rd:
+    case Read{shard, inst, labels, _ranks, +ok, why, pn, pm, cn, ms}:
+      Read{shard, inst, labels, Bool.pick(List<&2, U32>, ok, ranks, []), ok, why, pn, pm, cn, ms}
 
 # the read of a 200 reply's parsed body, or failed when it is not JSON
 def Read.parsed(got: Maybe<&2, Value.Json>, shard: U32, inst: String, +text: String) -> Read:
@@ -197,7 +239,8 @@ def Read.parsed(got: Maybe<&2, Value.Json>, shard: U32, inst: String, +text: Str
     case None{}:
       Read.fail(shard, inst, "the reply is not JSON: " ++ Read.clip(text))
     case Some{+js}:
-      Read.got(Read.answer(Read.content(js)), shard, inst, Json.get(js, "timings"), text)
+      Read.rated(Read.got(Read.answer(Read.content(js)), shard, inst, Json.get(js, "timings"), text),
+        Read.ranks(Read.content(js)))
 
 # the read of a reply by whether its status is 200
 def Read.reply.if(ok: Bool, shard: U32, inst: String, status: U32, +text: String) -> Read:
@@ -217,7 +260,7 @@ def Read.reply(shard: U32, inst: String, +status: U32, text: String) -> Read:
 # whether a read is ok
 def Read.ok(rd: Read) -> Bool:
   match rd:
-    case Read{_shard, _inst, _labels, ok, _why, _pn, _pm, _cn, _ms}:
+    case Read{_shard, _inst, _labels, _ranks, ok, _why, _pn, _pm, _cn, _ms}:
       ok
 
 # --- the run ---
@@ -280,7 +323,7 @@ def Read.find(+num: U32, rs: List<&2, Read>) -> Maybe<&2, Read>:
       None{}
     case Con{+rd, rest}:
       match rd:
-        case Read{+shard, _inst, _labels, _ok, _why, _pn, _pm, _cn, _ms}:
+        case Read{+shard, _inst, _labels, _ranks, _ok, _why, _pn, _pm, _cn, _ms}:
           Read.find.if(U32.is_eq(shard, num), rd, _u => Read.find(num, rest))
 
 # a found read ahead of rest, or a failed read of shard num when none was
@@ -310,7 +353,7 @@ def Read.labels(got: Maybe<&2, Read>) -> List<&2, String>:
       []
     case Some{r}:
       match r:
-        case Read{_shard, _inst, labels, ok, _why, _pn, _pm, _cn, _ms}:
+        case Read{_shard, _inst, labels, _ranks, ok, _why, _pn, _pm, _cn, _ms}:
           Bool.pick(List<&2, String>, ok, labels, [])
 
 # a shard's resolved excerpts and unknown labels ahead of the rest's
@@ -461,7 +504,7 @@ def Read.failures(rs: List<&2, Read>, +names: List<&2, Name>) -> String:
       ""
     case Con{r, rest}:
       match r:
-        case Read{shard, inst, _labels, _ok, why, _pn, _pm, _cn, _ms}:
+        case Read{shard, inst, _labels, _ranks, _ok, why, _pn, _pm, _cn, _ms}:
           Read.failure(Read.name(names, shard, 1), inst, why) ++ Read.failures(rest, names)
 
 # the footer of a run: the shards read and failed, each failed shard named
@@ -475,6 +518,12 @@ def Read.footer(+rs: List<&2, Read>, names: List<&2, Name>, unknown: U32, ms: Na
     "wall time: ", Read.secs(ms), " s"])
 
 # --- files and JSON ---
+
+# the line after the printed excerpts of a run that is not whole: where all
+# the readers named was written
+def Read.more(dir: String) -> String:
+  String.concat(["\nThe readers named more than is printed above: the best ranked is printed, and all of it is in ",
+    dir, "/ (one file per source, in time order; INDEX.md lists them)"])
 
 # a source's run file: its name with every / as _, then .md
 def Read.file(src: String) -> String:
@@ -556,7 +605,7 @@ def Read.name.n(nm: Name) -> U32:
 # number
 def Read.to_json(rd: Read, +names: List<&2, Name>) -> Value.Json:
   match rd:
-    case Read{+shard, inst, labels, ok, why, prompt_n, prompt_ms, cache_n, ms}:
+    case Read{+shard, inst, labels, _ranks, ok, why, prompt_n, prompt_ms, cache_n, ms}:
       Json.obj([("shard", Read.u32(shard)),
         ("source", Json.str(Read.name.source(Read.name(names, shard, 1)))),
         ("n", Read.u32(Read.name.n(Read.name(names, shard, 1)))), ("inst", Json.str(inst)),
