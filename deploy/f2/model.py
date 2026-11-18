@@ -3,9 +3,13 @@ query scale doubled (its q_norm, stored as 1 + w, becomes 2 (1 + w) - 1).
 Layer 11 is the last and only its attention weights are read, so it keeps
 no values and computes no output or MLP.
 
-A shard's state is the model's cache after the prompt up to the question.
-A question's score for each paragraph is the attention its tokens pay to
-the paragraph's line in heads 3 and 4 of layer 11, averaged over the
+A shard's state is the model's cache after the prompt up to the question,
+less the keys and values of layer 3: of the three full-attention layers (3,
+7 and 11) the question's tokens look back at the shard in layers 7 and 11
+only, and in layer 3 at the question alone. What the shard says still
+reaches them there through the linear-attention states of the layers
+between. A question's score for each paragraph is the attention its tokens
+pay to the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens."""
 import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,11 +21,12 @@ import store
 DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
+ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
 HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-VERSION = "12|11:2.0|%s|v4" % DIR  # what a kept state depends on
+VERSION = "12|11:2.0|%s|v5" % DIR  # what a kept state depends on
 
 tok = AutoTokenizer.from_pretrained(DIR)
 
@@ -42,6 +47,19 @@ def grouped(module, query, key, value, attention_mask, scaling, dropout=0.0, **k
 
 
 ALL_ATTENTION_FUNCTIONS.register("grouped", grouped)
+
+
+def alone(attn, stock, **kwargs):
+    """layer 3's attention: as stock while a shard is prefilled; when a tail
+    is read (grouped), the tail's tokens attend to the tail alone. The state
+    holds no keys of the shard for this layer, so its cache starts empty
+    (stack), and of the mask, which has a column for each of the shard's
+    tokens and then one for each of the tail's, only the tail's columns
+    apply"""
+    mask = kwargs.get("attention_mask")
+    if attn.config._attn_implementation == "grouped" and mask is not None:
+        kwargs["attention_mask"] = mask[..., -kwargs["hidden_states"].shape[-2]:]
+    return stock(**kwargs)
 
 
 class Zero(torch.nn.Module):
@@ -99,6 +117,8 @@ def load():
     w = top.self_attn.q_norm.weight
     with torch.no_grad():
         w.copy_((1 + w.float()) * 2.0 - 1)
+    low = m.model.layers[ALONE].self_attn
+    low.forward = functools.partial(alone, low, low.forward)
     full = [i for i, t in enumerate(cfg.layer_types) if t == "full_attention"]
     return m, full.index(SCALED)
 
@@ -123,8 +143,11 @@ def template(text):
 def pack(cache):
     """the cache's keys and values as int8, in place: keys with one scale per
     channel over the tokens, values with one per token (KIVI, 2402.02750).
-    The linear-attention recurrent states (fp32) are kept in bf16"""
-    for layer in cache.layers:
+    The linear-attention recurrent states (fp32) are kept in bf16. Layer 3's
+    keys and values are dropped: no tail reads them (alone)"""
+    for li, layer in enumerate(cache.layers):
+        if li == ALONE:
+            layer.keys, layer.values = layer.keys[..., :0, :].clone(), layer.values[..., :0, :].clone()
         states = getattr(layer, "recurrent_states", None)
         if isinstance(states, dict):
             layer.recurrent_states = {i: t.to(torch.bfloat16) if torch.is_tensor(t) and t.dtype == torch.float32 else t
@@ -192,9 +215,9 @@ def stack(caches, room):
     """one bf16 cache for several shards' packed caches, the caches left as
     they are: the linear-attention states stacked, the full-attention keys and
     values dequantized into one buffer, right-padded with zeros to the longest
-    shard and then by room more tokens for the tail (Roomy). The layers are
-    fresh objects with fresh tensors, so the tail pass touches no shard's own
-    state"""
+    shard and then by room more tokens for the tail (Roomy); layer 3's buffer
+    is the tail's room alone. The layers are fresh objects with fresh tensors,
+    so the tail pass touches no shard's own state"""
     out = copy.copy(caches[0])
     out.layers = [copy.copy(layer) for layer in caches[0].layers]
     top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
@@ -211,11 +234,12 @@ def stack(caches, room):
                 setattr(layer, d, fresh)
         else:
             layer = out.layers[li] = Roomy()
-            layer.is_initialized, layer.dtype, layer.used = True, torch.bfloat16, top
+            held = 0 if li == ALONE else top
+            layer.is_initialized, layer.dtype, layer.used = True, torch.bfloat16, held
             for name in ("keys", "values"):
                 x0 = getattr(rows[0], name)
                 layer.device = x0.device
-                buf = torch.zeros((len(rows), *x0.shape[1:-2], top + room, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
+                buf = torch.zeros((len(rows), *x0.shape[1:-2], held + room, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
                 for b, r in enumerate(rows):
                     x, sc = getattr(r, name), vars(r).get(name + "_scale")
                     # int8 times its fp32 scale, rounded to bf16 as it is written
