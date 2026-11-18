@@ -60,9 +60,10 @@ and reads them at its start, so a restart does not cost each standing
 question a cold read of every state; a file by another model, other nulls
 or another version of this code is left unread.
 
-A shard's state (model.prefill: its keys and values int8, its
-linear-attention states bf16) is kept on the GPU (CACHE_GB), then in host
-RAM (RAM_GB), then on disk under F2_STATES; a miss everywhere is a prefill.
+A shard's state (model.prefill: the keys and values of the layers a
+question reads the shard in, int8, and its linear-attention states, bf16)
+is kept on the GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk
+under F2_STATES; a miss everywhere is a prefill.
 A state is written beside its file, flushed to the disk and then renamed,
 and an empty file counts as a miss.
 A run scores the shards whose state is on the GPU first, then those in RAM,
