@@ -60,6 +60,16 @@ and reads them at its start, so a restart does not cost each standing
 question a cold read of every state; a file by another model, other nulls
 or another version of this code is left unread.
 
+The same file says which shards were asked about last, whatever made it.
+A reader that starts reads their states back from disk into RAM, the last
+asked first, until RAM_GB is full (WARM 0 reads none back): a first
+question over a large source is nothing but the reading of its states
+(a quarter of a second each from a hard disk, two minutes for 448), and
+after a restart every question would be a first one. It reads one state at
+a time on its own thread and stands back while a run is being scored, so a
+question asked meanwhile has the disk; a state whose word null is not kept
+yet is left for the run that makes it.
+
 A shard's state (model.prefill: the keys and values of the layers a
 question reads the shard in, int8, and its linear-attention states, bf16)
 is kept on the GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk
@@ -105,7 +115,7 @@ until it barely answers, and it also evicts whenever the process's resident
 memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
-env: EPISTEME_HOME, PORT (18112), BUDGET (4000), SHARD_BUDGET (120),
+env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (4000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt).
 """
@@ -151,10 +161,12 @@ REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
 SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.pt"
+WARM = int(os.environ.get("WARM", "1"))
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
 META = threading.RLock()  # TERMS, SCORES and RUNS
 WANT = [0]  # runs waiting for or holding the GPU lock
+BUSY = [0]  # runs being scored
 
 
 class Turn:
@@ -416,6 +428,10 @@ class States:
         finally:
             self.slots.release()
 
+    @staticmethod
+    def null_path(k):
+        return "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
+
     def kept(self, k):
         """whether disk holds k's state: an empty file is not one"""
         return kept(self.path(k))
@@ -486,7 +502,7 @@ class States:
         draw, or WORDNULLS 0, it is the "N/A" score na"""
         if WORDNULLS <= 0:
             return na
-        path = "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
+        path = self.null_path(k)
         if kept(path):
             return torch.load(path, weights_only=True)
         words = pool() if pool is not None else []
@@ -615,6 +631,56 @@ def recall(path):
         for k, v in got[-SCORES_MAX:] if SCORES_MAX > 0 else []:
             SCORES[k] = v
         return len(SCORES)
+
+
+def lately(path):
+    """the keys of the shards the scores kept at path are of, the last
+    asked first, each once; none when the file is missing or unreadable.
+    Unlike recall it takes a file made by any model, nulls or code: a
+    shard's key is its text's"""
+    if not kept(path):
+        return []
+    try:
+        keys = torch.load(path, weights_only=True)["keys"]
+    except Exception:
+        return []
+    return list(dict.fromkeys(k[0] for k in reversed(keys)))
+
+
+def rewarm(keys):
+    """the kept states of the shards keys, in that order, read into RAM
+    until it is full: each read on this thread with no lock held, then put
+    in the tier under the GPU lock as a run would. While a run is being
+    scored (BUSY) it waits, so the run has the disk. Answers how many it
+    read and their bytes"""
+    n = size_all = 0
+    for k in keys:
+        while BUSY[0] > 0:
+            time.sleep(0.05)
+        wn = STATES.null_path(k)
+        if k in STATES.ram or k in STATES.gpu or not STATES.kept(k) or (WORDNULLS > 0 and not kept(wn)):
+            continue
+        try:
+            state, na = STATES.load(k)
+            null = torch.load(wn, weights_only=True) if WORDNULLS > 0 else na
+        except Exception:
+            continue
+        size = nbytes(state[1])
+        with Turn():
+            if STATES.ram_b + size > RAM_BYTES or tight():
+                break
+            if k not in STATES.ram and k not in STATES.gpu:
+                STATES.ram[k] = ((state, null), size)
+                STATES.ram_b += size
+                n, size_all = n + 1, size_all + size
+    return n, size_all
+
+
+def rewarming(path):
+    t0 = time.time()
+    n, size = rewarm(lately(path))
+    if n:
+        print("read back %d states, %.1f GB, in %.0f s" % (n, size / 1e9, time.time() - t0), flush=True)
 
 
 def keeper(path, every=600):
@@ -752,7 +818,13 @@ class Run:
             mean = sum(s) / max(n, 1)
             sd = math.sqrt(sum((x - mean) ** 2 for x in s) / (n - 1)) if n > 1 else 0.0
             return [(x - mean) / (sd + 1e-9) for x in s]
-        att = self.attention(q)
+        with META:
+            BUSY[0] += 1
+        try:
+            att = self.attention(q)
+        finally:
+            with META:
+                BUSY[0] -= 1
         fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(att))]
         fused = self.lift(self.spread(fused))
         out, used, taken = {k: [] for k in self.keys}, 0.0, []
@@ -882,6 +954,8 @@ if __name__ == "__main__":
     warm()
     had = recall(SCORES_PATH)
     threading.Thread(target=keeper, args=(SCORES_PATH,), daemon=True).start()
+    if WARM and RAM_BYTES > 0:
+        threading.Thread(target=rewarming, args=(SCORES_PATH,), daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores" % (PORT, RAM_BYTES / 1e9, had), flush=True)
