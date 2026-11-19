@@ -20,10 +20,11 @@
 #
 # `Echo.read(q, sh, rd)` is the read `rd` of the shard `sh` keeping, in
 # order, exactly its labels whose paragraph does not hold the question,
-# each with its rank, and is otherwise the same read. `Echo.reads(q, rs, ss)` does so to each read of `rs` with the
-# shard in its place of `ss`: `ask` gives it one read per shard in the
-# shards' order (laws/OrderedTakesFirstRead.bend). `ask` then ranks, prints
-# and files the reads so passed (laws/BestRankedArePrinted.bend), so a
+# each with its rank, and is otherwise the same read. `Echo.reads(q, rs, ss)`
+# does so to each read of `rs` with the shard in its place of `ss`: `ask`
+# gives it one read per shard in the shards' order
+# (laws/OrderedTakesFirstRead.bend). `ask` then ranks, prints and files the
+# reads so passed (laws/BestRankedArePrinted.bend), so a
 # paragraph that holds the question is not printed and is in no run file,
 # and its place in the budget goes to the next ranked.
 #
