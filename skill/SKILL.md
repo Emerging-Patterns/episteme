@@ -29,6 +29,7 @@ episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>
 - **For what one speaker said, pass `--author`** (the tool's `author`), with the user's name as the source writes it for the user's own lines. Only excerpts by the named authors come back (comma-separated, as the excerpt headers show them), and the reader spends its whole budget on their paragraphs, taking only those the question bears on. No excerpts means nothing of theirs was found on it in those sources; a short reply that only makes sense in its context can be missed, so report "nothing found", not "never said". Without it, a question like "what did the user say about X" is answered mostly with what the assistant said about X: the user's lines are under a hundredth of a transcript. Put the topic in the question, not the speaker.
 - **The session you are in may not be in the record yet.** Whatever feeds chats in runs when it runs, so what was said minutes ago is found in your own context, not by asking.
 - Ask one question at a time, in plain words; put the names and terms the record would use into it.
+- **An earlier asking of your question is not returned.** A paragraph that holds the whole question, eight words or more, in order (the command that asked it before, a script that lists it) is passed over, so asking again brings the same evidence, not the earlier askings. To find when something was asked, ask about it in other words or with fewer than eight.
 
 ## Principles for code
 

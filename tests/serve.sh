@@ -5,7 +5,8 @@
 # as an array read alike, and a pool with no healthy instance answered as a
 # tool error while the server keeps serving; then, with a reader that ranks
 # the run (tests/fixtures/ranker.py), the best ranked printed and all of it
-# kept in run files, by `ask` and by the tool. EPISTEME names the binary
+# kept in run files, by `ask` and by the tool, and a paragraph that holds the
+# question passed over. EPISTEME names the binary
 # (default bin/episteme); python3 is the MCP client and the ranking reader.
 set -euo pipefail
 
@@ -146,5 +147,16 @@ sed -i 's/"budget_tokens": 1}/"budget_tokens": 60000}/' "$EPISTEME_HOME/config.j
 [ "$(grep -c '^#[0-9]*: ' "$work/out.txt")" = "$named" ] || fail "a whole run does not print all $named paragraphs: $(head -c 600 "$work/out.txt")"
 grep -q ' all of it is in ' "$work/out.txt" && fail "a whole run names run files: $(cat "$work/out.txt")"
 [ "$(ls "$EPISTEME_HOME/runs" | wc -l)" = "$runs" ] || fail "a whole run wrote run files"
+
+# a paragraph that holds the question, eight words or more of it in order,
+# is an asking of it and is passed over, in whatever case and with whatever
+# signs it is asked; seven of the same words are a phrase, and it is printed
+"$bin" ask --filter book:tiny/ "the LANTERN keeper counted: seven gulls, before noon?" > "$work/out.txt" 2> "$work/err.txt" \
+  || fail "ask of a question a paragraph holds: $(cat "$work/err.txt")"
+grep -q 'seven gulls' "$work/out.txt" && fail "a paragraph that holds the question is printed: $(head -c 600 "$work/out.txt")"
+[ "$(grep -c '^#[0-9]*: ' "$work/out.txt")" = $((named - 1)) ] || fail "passing over one paragraph did not print the other $((named - 1)): $(head -c 600 "$work/out.txt")"
+"$bin" ask --filter book:tiny/ "lantern keeper counted seven gulls before noon" > "$work/out.txt" 2> "$work/err.txt" \
+  || fail "ask of seven words a paragraph holds: $(cat "$work/err.txt")"
+grep -q 'seven gulls' "$work/out.txt" || fail "a paragraph that holds a phrase of seven words is not printed: $(head -c 600 "$work/out.txt")"
 
 echo "serve: ok"

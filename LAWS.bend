@@ -28,7 +28,8 @@
 # laws/ChangedRecordKeepsItsPlace.bend says where a changed one is kept),
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask;
 # laws/BestRankedArePrinted.bend says which of the labels they name are
-# printed),
+# printed, laws/AskingsArePassedOver.bend which are passed over first as
+# earlier askings of the question),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
 # laws/TelemetryLineOfARun.bend (telemetry),
 # laws/CliNamesItsCommands.bend (the command line, src/cli.bend), and
@@ -41,6 +42,7 @@
 # laws/ShardLabelsNumberParagraphs.bend, a quantified law no guarantee
 # claims. They promise nothing beyond the equality each states.
 import Base
+import ./laws/AskingsArePassedOver.bend as AskingsArePassedOver
 import ./laws/AuthorKeepsNamedAuthors.bend as AuthorKeepsNamedAuthors
 import ./laws/BareDotIsNoSource.bend as BareDotIsNoSource
 import ./laws/BestRankedArePrinted.bend as BestRankedArePrinted
