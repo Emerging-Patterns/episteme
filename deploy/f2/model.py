@@ -19,15 +19,15 @@ are coded together, a few bits a channel (joint.py), and unpacked on the GPU
 into that same int8 layout, so a tail pass reads a state the same way
 either way; the scores are always those of the unpacked state, also for the
 question that prefills it."""
-import bisect, copy, functools, hashlib, os, torch
+import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 import joint
 import store
+from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
-DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
 ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
@@ -36,20 +36,8 @@ HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-BOOK_PATH = os.environ.get("F2_BOOK") or store.HOME + "/f2/book.pt"
-
-
-def read_book(path):
-    """the book kept at path and the first twelve hex digits of its file's
-    SHA-1, or (None, None) when there is no file"""
-    if not os.path.isfile(path) or not os.path.getsize(path):
-        return None, None
-    return torch.load(path, weights_only=True), hashlib.sha1(open(path, "rb").read()).hexdigest()[:12]
-
-
-BOOK, BOOK_ID = read_book(BOOK_PATH)
-PLAIN = "12|11:2.0|%s|v5" % DIR  # what a state kept with no book depends on
-VERSION = PLAIN if BOOK is None else "12|11:2.0|%s|v6|%s" % (DIR, BOOK_ID)  # what a kept state depends on
+# a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
+BOOK = None if BOOK_ID is None else torch.load(BOOK_PATH, weights_only=True)
 
 tok = AutoTokenizer.from_pretrained(DIR)
 

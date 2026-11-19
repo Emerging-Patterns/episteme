@@ -124,6 +124,8 @@ Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 Once the store has shards, EPISTEME_HOME=... python fit.py (reader stopped,
 a few minutes) makes the book; start the reader again after it.
+No state is removed here: EPISTEME_HOME=... python prune.py removes those
+no shard of the store names any more (names.py says the names).
 MALLOC_MMAP_THRESHOLD_=1048576 returns freed host states to the OS, and
 GLIBC_TUNABLES=glibc.malloc.hugetlb=1 backs them with huge pages, which
 makes a copy off the GPU ~30% faster.
@@ -151,6 +153,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import store
+import names
 import model
 
 PORT = int(os.environ.get("PORT", "18112"))
@@ -177,8 +180,7 @@ FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
 REPEAT = float(os.environ.get("REPEAT", "0.98"))
 REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
-STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
-WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
+STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
 SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.pt"
 WARM = int(os.environ.get("WARM", "1"))
 CHARS_PER_TOKEN = 2.55
@@ -290,8 +292,7 @@ def repeats(a, b):
     return sum(x.size for x in sm.get_matching_blocks()) >= REPEAT * m
 
 
-def key(text):
-    return hashlib.sha1(text.strip().encode()).hexdigest()
+key = names.key
 
 
 def parse(text):
@@ -397,15 +398,13 @@ class States:
         self.slots = threading.BoundedSemaphore(SAVES)
 
     def path(self, k):
-        return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
+        return names.state(k)
 
     @staticmethod
     def plain_path(k):
         """where k's state was kept before there was a book, or None when
         there is none now"""
-        if model.BOOK is None:
-            return None
-        return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.PLAIN).encode()).hexdigest())
+        return names.plain(k)
 
     @staticmethod
     def victim(tier, keep):
@@ -457,7 +456,7 @@ class States:
 
     @staticmethod
     def null_path(k):
-        return "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
+        return names.null(k)
 
     def kept(self, k):
         """whether disk holds k's state, as kept now or as kept before
