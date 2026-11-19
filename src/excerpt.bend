@@ -325,16 +325,33 @@ def Excerpt.merge(xs: List<&2, List<&2, Ex>>) -> List<&2, Ex>:
 
 # --- render ---
 
-# the paragraphs ps of record id, one line "<id>#<n>: <text>" each
-def Excerpt.render.paras(+id: String, ps: List<&2, P.Para>) -> String:
+# True when src is the source said last, that of the excerpt before; none
+# is said before the first
+def Excerpt.said(prev: Maybe<&2, String>, src: String) -> Bool:
+  match prev:
+    case None{}:
+      False{}
+    case Some{last}:
+      String.eq(last, src)
+
+# the line that names source src, nothing when it was said
+def Excerpt.render.source(said: Bool, src: String) -> String:
+  match said:
+    case True{}:
+      ""
+    case False{}:
+      "## " ++ src ++ "\n"
+
+# the paragraphs ps, one line "#<n>: <text>" each
+def Excerpt.render.paras(ps: List<&2, P.Para>) -> String:
   match ps:
     case Nil{}:
       ""
     case Con{pa, rest}:
       match pa:
         case P.Para{n, _start, _end, text}:
-          String.concat([id, "#", U32.show(n), ": ", text, "\n",
-            Excerpt.render.paras(id, rest)])
+          String.concat(["#", U32.show(n), ": ", text, "\n",
+            Excerpt.render.paras(rest)])
 
 # a blank line when more excerpts follow
 def Excerpt.render.gap(xs: List<&2, Ex>) -> String:
@@ -344,23 +361,66 @@ def Excerpt.render.gap(xs: List<&2, Ex>) -> String:
     case Con{_head, _tail}:
       "\n"
 
-# one excerpt's text, of rec and its paras
+# one excerpt's text, of rec and its paras: its line, then its paragraphs'
 def Excerpt.render.one(rec: R.Record, paras: List<&2, P.Para>) -> String:
+  match rec:
+    case R.Record{id, ts, _source, author, _thread, _parent, _rps, _ptr}:
+      String.concat(["### ", id, " | ", ts, " | ", author, "\n",
+        Excerpt.render.paras(paras)])
+
+# xs as text after an excerpt of source prev, or after none: a source is
+# named before the first excerpt of each run of it
+def Excerpt.render.after(xs: List<&2, Ex>, prev: Maybe<&2, String>) -> String:
+  match xs:
+    case Nil{}:
+      ""
+    case Con{x, +rest}:
+      match x:
+        case Ex{+rec, paras}:
+          String.concat([
+            Excerpt.render.source(Excerpt.said(prev, Excerpt.source(rec)), Excerpt.source(rec)),
+            Excerpt.render.one(rec, paras), Excerpt.render.gap(rest),
+            Excerpt.render.after(rest, Some{Excerpt.source(rec)})])
+
+# excerpts as text to be read whole, each source and each record id said
+# once: a line "## <source>" before an excerpt whose source is not that of
+# the one before it, then each excerpt its line "### <id> | <ts> |
+# <author>" and one line "#<n>: <text>" per paragraph, apart by a blank
+# line (laws/ExcerptsRenderAsText.bend)
+def Excerpt.render(xs: List<&2, Ex>) -> String:
+  Excerpt.render.after(xs, None{})
+
+# --- lines ---
+
+# the paragraphs ps of record id, one line "<id>#<n>: <text>" each
+def Excerpt.lines.paras(+id: String, ps: List<&2, P.Para>) -> String:
+  match ps:
+    case Nil{}:
+      ""
+    case Con{pa, rest}:
+      match pa:
+        case P.Para{n, _start, _end, text}:
+          String.concat([id, "#", U32.show(n), ": ", text, "\n",
+            Excerpt.lines.paras(id, rest)])
+
+# one excerpt's lines, of rec and its paras
+def Excerpt.lines.one(rec: R.Record, paras: List<&2, P.Para>) -> String:
   match rec:
     case R.Record{+id, ts, source, author, _thread, _parent, _rps, _ptr}:
       String.concat(["### ", id, " | ", source, " | ", ts, " | ",
-        author, "\n", Excerpt.render.paras(id, paras)])
+        author, "\n", Excerpt.lines.paras(id, paras)])
 
-# excerpts as text: each its line "### <id> | <source> | <ts> | <author>",
-# then one line "<id>#<n>: <text>" per paragraph, apart by a blank line
-def Excerpt.render(xs: List<&2, Ex>) -> String:
+# excerpts as text to be searched, every line naming its record: each its
+# line "### <id> | <source> | <ts> | <author>", then one line
+# "<id>#<n>: <text>" per paragraph, apart by a blank line
+def Excerpt.lines(xs: List<&2, Ex>) -> String:
   match xs:
     case Nil{}:
       ""
     case Con{x, +rest}:
       match x:
         case Ex{rec, paras}:
-          Excerpt.render.one(rec, paras) ++ Excerpt.render.gap(rest) ++ Excerpt.render(rest)
+          Excerpt.lines.one(rec, paras) ++ Excerpt.render.gap(rest) ++ Excerpt.lines(rest)
 
 # --- recall ---
 

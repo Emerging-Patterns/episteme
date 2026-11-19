@@ -31,7 +31,8 @@
 # and the count of unknown labels is theirs. Without `--json` it prints
 # `Excerpt.render` of the narrowed reads' merged excerpts and, when the run
 # is not whole (`Rank.whole`), also writes the excerpts of the reads as they
-# came, each source's to `runs/<ISO time>/<source with / as _>.md` (the
+# came, each source's as `Excerpt.lines` (every line names its record, for
+# searching) to `runs/<ISO time>/<source with / as _>.md` (the
 # directory made with `mkdir` without `-p`, so a name in use is never shared:
 # `<ISO time>-1`, `-2`, ... up to 99 are tried next), each page after the
 # first that holds an excerpt (`Rank.rest` with 99 pages at most,
@@ -58,7 +59,7 @@
 # laws/RequestAdmitsOnlyLabels.bend, laws/ReplyIsOkOrFailed.bend,
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
 # laws/ExcerptsFitBudget.bend, laws/BestRankedArePrinted.bend,
-# laws/NextBestAreInPages.bend and the store;
+# laws/NextBestAreInPages.bend, laws/ExcerptsRenderAsText.bend and the store;
 # `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
 # printed, all of it in the run files, the next best in a page and `show`
 # printing a run file, and `tests/smoke.sh` checks the
@@ -403,7 +404,7 @@ def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(U
       IO.pure(Unit, Unit{})
     case Con{+src, rest}:
       do IO<Unit>:
-        St.Store.save(dir ++ "/" ++ Rd.Read.file(src), E.Excerpt.render(Rd.Read.of_source(src, xs)))
+        St.Store.save(dir ++ "/" ++ Rd.Read.file(src), E.Excerpt.lines(Rd.Read.of_source(src, xs)))
         Ask.files(rest, dir, xs)
 
 # base for idx 0, else base-<idx>
