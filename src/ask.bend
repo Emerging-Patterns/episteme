@@ -58,11 +58,12 @@
 # laws/MergeOrdersByTime.bend, laws/RecalledMeansOverlap.bend,
 # laws/RequestAdmitsOnlyLabels.bend, laws/ReplyIsOkOrFailed.bend,
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
-# laws/ExcerptsFitBudget.bend, laws/BestRankedArePrinted.bend,
-# laws/NextBestAreInPages.bend, laws/ExcerptsRenderAsText.bend and the store;
+# laws/ExcerptsFitBudget.bend, laws/AskingsArePassedOver.bend,
+# laws/BestRankedArePrinted.bend, laws/NextBestAreInPages.bend,
+# laws/ExcerptsRenderAsText.bend and the store;
 # `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
-# printed, all of it in the run files, the next best in a page and `show`
-# printing a run file, and `tests/smoke.sh` checks the
+# printed, all of it in the run files, the next best in a page, `show`
+# printing a run file and a paragraph that holds the question passed over, and `tests/smoke.sh` checks the
 # refusal, the refusal when the shards are behind the log, and a pool with no
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
@@ -148,6 +149,7 @@ import ./filter.bend as F
 import ./excerpt.bend as E
 import ./read.bend as Rd
 import ./rank.bend as Rk
+import ./echo.bend as Ec
 import ./store.bend as St
 import ./pool.bend as Pl
 import ./reader.bend as Rr
@@ -656,6 +658,28 @@ def Ask.ran(
     case Reads{got, +hits}:
       Ran{all, ap, hits, hp, names, Ask.came(got, hits, cfg, since, who, names)}
 
+# the reads rs of the shards, one per shard in the shards' order, with the
+# earlier askings of the question passed over
+def Ask.passed.got(
+  got: Maybe<&2, List<&2, Rd.Read>>,
+  +hits: List<&2, S.Shard>,
+  question: String
+) -> Maybe<&2, List<&2, Rd.Read>>:
+  match got:
+    case None{}:
+      None{}
+    case Some{rs}:
+      Some{Ec.Echo.reads(Ec.Echo.words(question), Rd.Read.ordered(hits, rs), hits)}
+
+# a run's reads with the earlier askings of its question passed over
+# (laws/AskingsArePassedOver.bend): a label whose paragraph holds the
+# question is from here on as if no reader had named it, so it is not
+# ranked, printed, filed or counted in the telemetry
+def Ask.passed(reads: Reads, question: String) -> Reads:
+  match reads:
+    case Reads{got, +hits}:
+      Reads{Ask.passed.got(got, hits, question), hits}
+
 # the shards' reads when the shards are not behind the log, else the
 # refusal and its exit code 1
 def Ask.reads(
@@ -677,7 +701,8 @@ def Ask.reads(
         +ss : List<&2, S.Shard> = Ask.shards(kept)
         +names : List<&2, Rd.Name> = Ask.names(ss)
         reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question, who)
-        return Ask.ran(reads, Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), cfg, since, who, names)
+        return Ask.ran(Ask.passed(reads, question), Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), cfg,
+          since, who, names)
 
 # a result's exit code: its refusal's, else Read.code of its reads
 def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:

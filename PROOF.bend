@@ -2,6 +2,7 @@
 # `bend PROOF.bend` prints exactly `ALL PROOFS CHECK` as its first line.
 import Base
 import ./LAWS.bend as Laws
+import ./proofs/AskingsArePassedOver.bend as PAskingsArePassedOver
 import ./proofs/AuthorKeepsNamedAuthors.bend as PAuthorKeepsNamedAuthors
 import ./proofs/BareDotIsNoSource.bend as PBareDotIsNoSource
 import ./proofs/BestRankedArePrinted.bend as PBestRankedArePrinted
