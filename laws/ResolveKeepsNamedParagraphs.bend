@@ -26,9 +26,8 @@
 # record `a`, before `b` and `c` of one later `ts`. `ts` is ISO 8601 UTC, so
 # string order is time order, and stability puts records of equal `ts` in
 # shard order: together this is the `(ts, shard, paragraph)` order.
-# `Excerpt.render` writes each excerpt as `### <id> | <source> | <ts> |
-# <author>`, then `<id>#<n>: <text>` per paragraph, excerpts apart by a blank
-# line; a closed example checks it, and no guarantee rests on it.
+# `Excerpt.render` and `Excerpt.lines` write excerpts as text
+# (laws/ExcerptsRenderAsText.bend).
 # `Excerpt.recalled(g, xs)` scores the eval: a gold span `Gold{source, start,
 # end}` is recalled when some excerpt's record has `source` and holds a
 # paragraph whose start/end offsets overlap the span, `start < g.end` and

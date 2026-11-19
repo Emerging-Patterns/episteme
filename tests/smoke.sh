@@ -299,9 +299,10 @@ grep -q '^note:y: 1 records$' "$work/recs.txt" || fail "the first records run ga
 xdir=$shards/note:x
 [ -f "$xdir/tail.json" ] || fail "no shards of note:x"
 "$bin" show 'note:x@one#2' > "$work/out.txt" || fail "show of a given record's paragraph failed"
-grep -q '^note:x@one#2: The door is shut.$' "$work/out.txt" || fail "show printed: $(cat "$work/out.txt")"
+grep -q '^#2: The door is shut.$' "$work/out.txt" || fail "show printed: $(cat "$work/out.txt")"
+[ "$(head -n 2 "$work/out.txt" | cut -d' ' -f1-2 | tr '\n' ' ')" = "## note:x ### note:x@one " ] || fail "show does not open with the source and the record: $(cat "$work/out.txt")"
 "$bin" show 'note:y@k' > "$work/out.txt" || fail "show of a record with paras failed"
-grep -q '^note:y@k#1: abcd$' "$work/out.txt" || fail "show of paras: $(cat "$work/out.txt")"
+grep -q '^#1: abcd$' "$work/out.txt" || fail "show of paras: $(cat "$work/out.txt")"
 grep -q '^pointed line$' "$work/out.txt" || fail "show did not resolve the pointer: $(cat "$work/out.txt")"
 n=$(batches)
 "$bin" ingest records - < "$work/in1.jsonl" > "$work/recs.txt"
@@ -313,7 +314,7 @@ n=$(batches)
 "$bin" ingest records --complete "$work/in2.jsonl" > "$work/recs.txt"
 grep -q '^note:x: 4 records$' "$work/recs.txt" || fail "a change, a new record and a removal gave: $(cat "$work/recs.txt")"
 "$bin" show 'note:x@one' > "$work/out.txt" || fail "show of a changed record failed"
-grep -q '^note:x@one#1: The lamp is out.$' "$work/out.txt" || fail "show of a changed record: $(cat "$work/out.txt")"
+grep -q '^#1: The lamp is out.$' "$work/out.txt" || fail "show of a changed record: $(cat "$work/out.txt")"
 grep -q 'lamp is lit' "$work/out.txt" && fail "show of a changed record printed the old text"
 rc=0; "$bin" show 'note:x@one#2' > /dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "show of a paragraph the change dropped exited $rc, not 1"
@@ -340,7 +341,7 @@ grep -q 'line 2 is no record' "$work/err.txt" || fail "the bad line is not named
 # unreadable it still finds a record, and still says a removed one is gone
 chmod 000 "$log/00000001.jsonl"
 "$bin" show 'note:x@one' > "$work/out.txt" || fail "show from the source's shards failed"
-grep -q '^note:x@one#1: The lamp is dim.$' "$work/out.txt" || fail "show from the shards: $(cat "$work/out.txt")"
+grep -q '^#1: The lamp is dim.$' "$work/out.txt" || fail "show from the shards: $(cat "$work/out.txt")"
 rc=0; "$bin" show 'note:x@two' > /dev/null 2>&1 || rc=$?
 [ "$rc" = 1 ] || fail "show from the shards of a removed record exited $rc, not 1"
 chmod 644 "$log/00000001.jsonl"

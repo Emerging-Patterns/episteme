@@ -308,7 +308,8 @@ def serve.instructions() -> String:
     "episteme returns verbatim, cited excerpts of the primary record: the records ingested ",
     "into it, one source each. Readers only ",
     "pick paragraphs; nothing is summarized, so answer from the excerpts and cite every ",
-    "claim as <record id>#<n>. Later excerpts are the current state. Call sources first ",
+    "claim as <record id>#<n>: the id is on the excerpt's ### line, the number on the ",
+    "paragraph's. Later excerpts are the current state. Call sources first ",
     "when unsure what to filter on; pass the narrowest filter that can hold the answer, ",
     "and since for recent work. A footer naming failed shards means those ",
     "shards were not read: report it, and never read their gap as the record saying nothing."])
