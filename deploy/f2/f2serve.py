@@ -75,9 +75,22 @@ question asked meanwhile has the disk; a state whose word null is not kept
 yet is left for the run that makes it.
 
 A shard's state (model.prefill: the keys and values of the layers a
-question reads the shard in, int8, and its linear-attention states, bf16)
+question reads the shard in, and its linear-attention states, bf16)
 is kept on the GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk
 under F2_STATES; a miss everywhere is a prefill.
+
+A first question over a large source is the reading of its states, so its
+time is their bytes. With a book (F2_BOOK, made once by fit.py from shards
+of the store) a state's keys and values are coded together at a few bits a
+channel (joint.py) and the state on disk and in RAM is that packed one,
+about a third of the bytes; it is unpacked as it reaches the GPU, where a
+state is held as int8 either way, so a question over states the GPU holds
+costs what it did. A state leaving the GPU is then dropped and not copied
+back to RAM (RAM keeps the packed copy it was unpacked from while it has
+room, and the disk has it). A state kept before the book was made is read
+once more, coded, scored as coded and written packed, so the states of a
+store move over as they are asked about; its nulls are made again. With no
+book nothing here differs from a reader that never had one.
 A state is written beside its file, flushed to the disk and then renamed,
 and an empty file counts as a miss.
 A run scores the shards whose state is on the GPU first, then those in RAM,
@@ -109,6 +122,8 @@ Setup: a Python 3.12 venv with requirements.txt, and the weights:
   huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
 Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
 http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
+Once the store has shards, EPISTEME_HOME=... python fit.py (reader stopped,
+a few minutes) makes the book; start the reader again after it.
 MALLOC_MMAP_THRESHOLD_=1048576 returns freed host states to the OS, and
 GLIBC_TUNABLES=glibc.malloc.hugetlb=1 backs them with huge pages, which
 makes a copy off the GPU ~30% faster.
@@ -121,9 +136,9 @@ the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt).
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
 """
-import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time
+import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -385,6 +400,14 @@ class States:
         return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
 
     @staticmethod
+    def plain_path(k):
+        """where k's state was kept before there was a book, or None when
+        there is none now"""
+        if model.BOOK is None:
+            return None
+        return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + model.PLAIN).encode()).hexdigest())
+
+    @staticmethod
     def victim(tier, keep):
         """the least recently used key not in keep, else the least recently used"""
         return next((k for k in tier if k not in keep), next(iter(tier)))
@@ -399,7 +422,7 @@ class States:
             (state, null), s2 = self.gpu.pop(k2)
             self.used.pop(k2, None)
             self.gpu_b -= s2
-            if RAM_BYTES > 0 and k2 not in self.ram:
+            if RAM_BYTES > 0 and k2 not in self.ram and model.BOOK is None:  # with a book the GPU's copy is the unpacked one
                 self.put_ram(k2, (move(state, "cpu"), null), s2, keep)
 
     def put_ram(self, k, st, size, keep=()):
@@ -437,11 +460,15 @@ class States:
         return "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + model.VERSION).encode()).hexdigest())
 
     def kept(self, k):
-        """whether disk holds k's state: an empty file is not one"""
-        return kept(self.path(k))
+        """whether disk holds k's state, as kept now or as kept before
+        there was a book: an empty file is not one"""
+        return kept(self.path(k)) or kept(self.plain_path(k) or "")
 
     def load(self, k):
-        return torch.load(self.path(k), weights_only=False, map_location="cpu")
+        """k's state and its "N/A" score from disk; the one kept before
+        there was a book when there is no other"""
+        path = self.path(k)
+        return torch.load(path if kept(path) else self.plain_path(k), weights_only=False, map_location="cpu")
 
     def lift(self, state):
         """a copy of a state on the GPU and the event that says it has
@@ -539,30 +566,45 @@ class States:
         if staged is not None and staged[2][1] is not None:
             torch.cuda.current_stream().wait_event(staged[2][1])  # nothing here runs before the copy has arrived
         if k in self.ram:
-            (state, null), size = self.ram[k]
+            (state, null), _held = self.ram[k]
             self.ram.move_to_end(k)
-            st = (staged[2][0] if staged is not None else copy_to(state, model.DEV), null)
+            st = (model.unpack(staged[2][0] if staged is not None else copy_to(state, model.DEV)), null)
+            size = nbytes(st[0][1])
             self.n["ram"] += 1
             if self.own(k, size, keep, run):
                 return st
         elif staged is not None or self.kept(k):
             state, null = staged[:2] if staged is not None else self.load(k)
             there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
+            if model.BOOK is not None and not model.joined(state[1]):
+                # kept before there was a book: coded now, scored as coded, and written packed
+                there = (there[0], model.pack(there[1])) + tuple(there[2:])
+                state = host_copy(there)
+                there = model.unpack(there)
+                null = model.scores(there, "N/A")
+                self.slots.acquire()
+                self.writer.apply_async(self.save, (k, (state, null)))
+            else:
+                there = model.unpack(there)
             null = self.wordnull(k, there, null, pool)
-            st, size = (there, null), nbytes(state[1])
+            st, size, held = (there, null), nbytes(there[1]), nbytes(state[1])
             self.n["ram" if staged is not None and staged[3] else "disk"] += 1
             if self.own(k, size, keep, run):
                 if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
-                    self.put_ram(k, (state, null), size, keep)
+                    self.put_ram(k, (state, null), held, keep)
                 return st
-            self.spare(k, (state, null), size)
+            self.spare(k, (state, null), held)
         else:
             state = model.prefill(shard)
-            na = model.scores(state, "N/A")
-            st, size = (state, self.wordnull(k, state, na, pool)), nbytes(state[1])
+            there = model.unpack(state)
+            na = model.scores(there, "N/A")
+            st, size = (there, self.wordnull(k, there, na, pool)), nbytes(there[1])
             self.n["prefill"] += 1
             self.slots.acquire()
-            self.writer.apply_async(self.save, (k, (host_copy(state), na)))
+            host = host_copy(state)
+            self.writer.apply_async(self.save, (k, (host, na)))
+            if model.BOOK is not None:  # the GPU's copy will not come back to RAM, so RAM takes the packed one now
+                self.spare(k, (host, st[1]), nbytes(host[1]))
         self.put_gpu(k, st, size, keep)
         self.used[k] = run
         return st
@@ -662,8 +704,8 @@ def rewarm(keys):
         while BUSY[0] > 0:
             time.sleep(0.05)
         wn = STATES.null_path(k)
-        if k in STATES.ram or k in STATES.gpu or not STATES.kept(k) or (WORDNULLS > 0 and not kept(wn)):
-            continue
+        if k in STATES.ram or k in STATES.gpu or not kept(STATES.path(k)) or (WORDNULLS > 0 and not kept(wn)):
+            continue  # also a state kept before there was a book: the run that asks about it codes it
         try:
             state, na = STATES.load(k)
             null = torch.load(wn, weights_only=True) if WORDNULLS > 0 else na
@@ -916,6 +958,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/stats":
             self.send(200, {"gpu_states": len(STATES.gpu), "gpu_gb": STATES.gpu_b / 1e9,
                             "ram_states": len(STATES.ram), "ram_gb": STATES.ram_b / 1e9,
+                            "gpu_held_gb": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
                             "loads": dict(STATES.n), **rss()})
         else:
             self.send(404, {"error": "not found"})
@@ -940,6 +983,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "not found"})
             ms = (time.time() - t) * 1000
         except Exception as e:
+            traceback.print_exc()  # the reply holds the error's first line; where it came from goes to the log
             return self.send(500, {"error": repr(e)[:300]})
         self.send(200, {"object": "chat.completion", "model": "f2",
                         "choices": [{"index": 0, "finish_reason": "stop", "message": {
@@ -954,7 +998,7 @@ class Handler(BaseHTTPRequestHandler):
 def warm():
     """one prefill and one tail pass on a two-line shard, so the kernels are
     compiled and tuned before the first question rather than during it"""
-    model.scores(model.prefill(parse("== warm | 0 | f2 | w\n[p1] warm up\n")), "N/A")
+    model.scores(model.unpack(model.prefill(parse("== warm | 0 | f2 | w\n[p1] warm up\n"))), "N/A")
 
 
 if __name__ == "__main__":

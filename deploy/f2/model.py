@@ -10,23 +10,46 @@ only, and in layer 3 at the question alone. What the shard says still
 reaches them there through the linear-attention states of the layers
 between. A question's score for each paragraph is the attention its tokens
 pay to the paragraph's line in heads 3 and 4 of layer 11, averaged over the
-question's tokens."""
-import bisect, copy, functools, os, torch
+question's tokens.
+
+A state is kept packed (pack) and read unpacked (unpack). With no book
+(F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
+values and layer 11's keys as int8, a byte a channel. With a book the three
+are coded together, a few bits a channel (joint.py), and unpacked on the GPU
+into that same int8 layout, so a tail pass reads a state the same way
+either way; the scores are always those of the unpacked state, also for the
+question that prefills it."""
+import bisect, copy, functools, hashlib, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicLayer
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
+import joint
 import store
 
 DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
 ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
+MID = 7  # the full-attention layer whose keys and values a state holds
 HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
 ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
-VERSION = "12|11:2.0|%s|v5" % DIR  # what a kept state depends on
+BOOK_PATH = os.environ.get("F2_BOOK") or store.HOME + "/f2/book.pt"
+
+
+def read_book(path):
+    """the book kept at path and the first twelve hex digits of its file's
+    SHA-1, or (None, None) when there is no file"""
+    if not os.path.isfile(path) or not os.path.getsize(path):
+        return None, None
+    return torch.load(path, weights_only=True), hashlib.sha1(open(path, "rb").read()).hexdigest()[:12]
+
+
+BOOK, BOOK_ID = read_book(BOOK_PATH)
+PLAIN = "12|11:2.0|%s|v5" % DIR  # what a state kept with no book depends on
+VERSION = PLAIN if BOOK is None else "12|11:2.0|%s|v6|%s" % (DIR, BOOK_ID)  # what a kept state depends on
 
 tok = AutoTokenizer.from_pretrained(DIR)
 
@@ -124,6 +147,8 @@ def load():
 
 
 M, AT = load()
+if BOOK is not None:
+    BOOK = joint.Book(BOOK, DEV)
 
 
 def attention(name):
@@ -140,11 +165,45 @@ def template(text):
     return s[:cut], s[cut:]
 
 
+def angles(n):
+    """the cosines and sines of the rotary angles at positions 0..n-1"""
+    cos, sin = M.model.rotary_emb(torch.zeros(1, device=DEV), torch.arange(n, device=DEV)[None])
+    return cos[0].float(), sin[0].float()
+
+
+def floats(layer, name):
+    """a layer's keys or values as floats, whether held as bf16 or as int8
+    with a scale: [2 key-value heads, tokens, 256]"""
+    x, sc = getattr(layer, name), vars(layer).get(name + "_scale")
+    return (x.float() * sc)[0] if sc is not None else x.float()[0]
+
+
+def int8(layer, name, x, dim):
+    """x [2, tokens, 256] put on the layer as int8 with one scale per
+    channel over the tokens (dim -2, keys) or per token (dim -1, values:
+    KIVI, 2402.02750)"""
+    sc = x.abs().amax(dim, keepdim=True).clamp(min=1e-8) / 127
+    setattr(layer, name, (x / sc).round().to(torch.int8)[None])
+    setattr(layer, name + "_scale", sc[None])
+
+
+def joined(cache):
+    """whether a cache holds its keys and values coded together"""
+    return torch.is_tensor(vars(cache.layers[MID]).get("joint"))
+
+
 def pack(cache):
-    """the cache's keys and values as int8, in place: keys with one scale per
-    channel over the tokens, values with one per token (KIVI, 2402.02750).
-    The linear-attention recurrent states (fp32) are kept in bf16. Layer 3's
-    keys and values are dropped: no tail reads them (alone)"""
+    """the cache as a state keeps it, in place. Layer 3's keys and values
+    are dropped: no tail reads them (alone). The linear-attention recurrent
+    states (fp32) are kept in bf16. Layer 7's keys and values and layer 11's
+    keys are coded together when there is a book (joint.py): layer 7 then
+    holds the tokens' packed rows (joint), the values' root mean squares
+    (joint_rms) and the tokens kept exact (joint_at, joint_exact), and no
+    keys or values, and each linear-attention layer its recurrent states'
+    parts (low_left, low_right, low_rest, low_scale) in place of the
+    states; with no book they are int8 and bf16. A cache whose keys and
+    values are int8 already (a state kept before the book was made) is
+    coded from those"""
     for li, layer in enumerate(cache.layers):
         if li == ALONE:
             layer.keys, layer.values = layer.keys[..., :0, :].clone(), layer.values[..., :0, :].clone()
@@ -152,18 +211,76 @@ def pack(cache):
         if isinstance(states, dict):
             layer.recurrent_states = {i: t.to(torch.bfloat16) if torch.is_tensor(t) and t.dtype == torch.float32 else t
                                       for i, t in states.items()}
-        for name, dim in (("keys", -2), ("values", -1)):
-            x = getattr(layer, name, None)
-            if torch.is_tensor(x) and x.dtype == torch.bfloat16 and x.numel():
-                sc = x.float().abs().amax(dim, keepdim=True).clamp(min=1e-8) / 127
-                setattr(layer, name, (x.float() / sc).round().to(torch.int8))
-                setattr(layer, name + "_scale", sc)
+            if BOOK is not None and BOOK.rank:
+                # each matrix as its first singular triples and the rest in a few bits (joint.low)
+                parts = {i: joint.low(t, BOOK.rank, BOOK.resid) for i, t in layer.recurrent_states.items() if torch.is_tensor(t)}
+                for at, name in enumerate(("low_left", "low_right", "low_rest", "low_scale")):
+                    setattr(layer, name, {i: p[at] for i, p in parts.items()})
+                layer.recurrent_states = {i: t[..., :0, :0] if torch.is_tensor(t) else t for i, t in layer.recurrent_states.items()}
+    mid, top = cache.layers[MID], cache.layers[SCALED]
+    if BOOK is None:
+        for layer, name, dim in ((mid, "keys", -2), (mid, "values", -1), (top, "keys", -2)):
+            if getattr(layer, name).dtype != torch.int8:
+                int8(layer, name, floats(layer, name), dim)
+        return cache
+    cos, sin = angles(mid.keys.shape[-2])
+    x, rms = joint.rows(floats(mid, "keys"), floats(mid, "values"), floats(top, "keys"), cos, sin)
+    mid.joint, mid.joint_at, mid.joint_exact = BOOK.encode(x)
+    mid.joint_rms = rms.to(torch.float16)
+    for layer, name in ((mid, "keys"), (mid, "values"), (top, "keys")):
+        setattr(layer, name, getattr(layer, name)[..., :0, :].to(torch.bfloat16))
+        vars(layer).pop(name + "_scale", None)
     return cache
 
 
 @torch.no_grad()
-def prefill(shard):
-    """a shard's state: (prompt ids, cache, paragraph token spans, question template)"""
+def unpack(state):
+    """a state as a tail pass reads it, on the GPU: a state whose keys and
+    values are coded together gets them back as int8 (a copy; the packed
+    state is left as it is), any other is returned as it is"""
+    if not joined(state[1]):
+        return state
+    c = copy.copy(state[1])
+    c.layers = [copy.copy(layer) for layer in state[1].layers]
+    mid, top = c.layers[MID], c.layers[SCALED]
+    cos, sin = angles(mid.joint.shape[0])
+    k7, v7, k11 = joint.tensors(BOOK.decode(mid.joint, mid.joint_at, mid.joint_exact), mid.joint_rms.float(), cos, sin)
+    int8(mid, "keys", k7, -2)
+    int8(mid, "values", v7, -1)
+    int8(top, "keys", k11, -2)
+    for name in ("joint", "joint_at", "joint_exact", "joint_rms"):
+        delattr(mid, name)
+    made = {id(mid): {"keys", "values", "keys_scale", "values_scale"}, id(top): {"keys", "keys_scale"}}
+    for layer in c.layers:
+        if isinstance(vars(layer).get("low_left"), dict):
+            layer.recurrent_states = dict(layer.recurrent_states)
+            for i in layer.low_left:
+                layer.recurrent_states[i] = joint.lift(layer.low_left[i], layer.low_right[i], layer.low_rest[i],
+                                                       layer.low_scale[i], BOOK.resid).to(torch.bfloat16)
+            for name in ("low_left", "low_right", "low_rest", "low_scale"):
+                delattr(layer, name)
+            made.setdefault(id(layer), set()).add("recurrent_states")
+        # what is left of the packed state (the convolution states, a few kB) is copied: a packed state may come
+        # as views of one block (f2serve's lift), and a view kept here would keep the whole block on the GPU
+        for name, v in list(vars(layer).items()):
+            if name in made.get(id(layer), ()):
+                continue
+            if torch.is_tensor(v):
+                setattr(layer, name, v.clone())
+            elif isinstance(v, dict):
+                setattr(layer, name, {i: t.clone() if torch.is_tensor(t) else t for i, t in v.items()})
+    if torch.cuda.is_available():
+        # the work above is done before this returns: the caller may now drop the packed state, and a block
+        # freed while kernels that read it are still queued on this stream is handed to the next transfer on
+        # the lift's stream, which writes over it (seen as scores of noise and out-of-range indices)
+        torch.cuda.current_stream().synchronize()
+    return (state[0], c) + tuple(state[2:])
+
+
+@torch.no_grad()
+def prefill(shard, raw=False):
+    """a shard's state, packed: (prompt ids, cache, paragraph token spans,
+    question template); raw leaves the cache as the model made it"""
     head, tail = template(shard["text"])
     enc = tok(head, add_special_tokens=False, return_offsets_mapping=True)
     ids = enc["input_ids"]
@@ -180,7 +297,7 @@ def prefill(shard):
         ta = bisect.bisect_left(starts, base + a)
         tb = bisect.bisect_left(starts, base + b)
         spans.append((ta, max(tb, ta + 1)))
-    return ids, pack(cache), spans, tail
+    return ids, cache if raw else pack(cache), spans, tail
 
 
 @functools.lru_cache(maxsize=8)
