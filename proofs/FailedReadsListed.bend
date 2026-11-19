@@ -28,8 +28,8 @@ def Laws.failed_spec(rs):
       {==}
     case Con{r, +rest}:
       match r:
-        case Rd.Read{shard, inst, labels, +ok, why, pn, pm, cn, ms}:
-          failed_one(ok, Rd.Read{shard, inst, labels, ok, why, pn, pm, cn, ms}, rest,
+        case Rd.Read{shard, inst, labels, ranks, +ok, why, pn, pm, cn, ms}:
+          failed_one(ok, Rd.Read{shard, inst, labels, ranks, ok, why, pn, pm, cn, ms}, rest,
             Laws.failed_spec(rest))
 
 # a read's code after its ok test is the specification's
@@ -53,5 +53,5 @@ def Laws.code_failed(rs):
       {==}
     case Con{r, +rest}:
       match r:
-        case Rd.Read{_shard, _inst, _labels, ok, _why, _pn, _pm, _cn, _ms}:
+        case Rd.Read{_shard, _inst, _labels, _ranks, ok, _why, _pn, _pm, _cn, _ms}:
           code_one(ok, rest, Laws.code_failed(rest))

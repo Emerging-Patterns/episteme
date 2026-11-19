@@ -26,7 +26,9 @@
 # laws/RecordsInputChanges.bend (records given as JSON lines),
 # laws/LiveKeepsLastVersion.bend (current records: changes and removals;
 # laws/ChangedRecordKeepsItsPlace.bend says where a changed one is kept),
-# laws/RequestAdmitsOnlyLabels.bend (readers and ask),
+# laws/RequestAdmitsOnlyLabels.bend (readers and ask;
+# laws/BestRankedArePrinted.bend says which of the labels they name are
+# printed),
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
 # laws/TelemetryLineOfARun.bend (telemetry),
 # laws/CliNamesItsCommands.bend (the command line, src/cli.bend), and
@@ -41,6 +43,7 @@
 import Base
 import ./laws/AuthorKeepsNamedAuthors.bend as AuthorKeepsNamedAuthors
 import ./laws/BareDotIsNoSource.bend as BareDotIsNoSource
+import ./laws/BestRankedArePrinted.bend as BestRankedArePrinted
 import ./laws/BlankLinesSeparateParagraphs.bend as BlankLinesSeparateParagraphs
 import ./laws/BookPacksIntoShards.bend as BookPacksIntoShards
 import ./laws/ChangedRecordKeepsItsPlace.bend as ChangedRecordKeepsItsPlace
@@ -97,6 +100,7 @@ import ./laws/RecordsInputChanges.bend as RecordsInputChanges
 import ./laws/RecordsSplitOnlyWhenTooBig.bend as RecordsSplitOnlyWhenTooBig
 import ./laws/ReplyIsOkOrFailed.bend as ReplyIsOkOrFailed
 import ./laws/ReplyReadsLabelsAndTimings.bend as ReplyReadsLabelsAndTimings
+import ./laws/ReplyReadsRanks.bend as ReplyReadsRanks
 import ./laws/RankedReadNamesShard.bend as RankedReadNamesShard
 import ./laws/RequestAdmitsOnlyLabels.bend as RequestAdmitsOnlyLabels
 import ./laws/RunNoticeNamesShards.bend as RunNoticeNamesShards

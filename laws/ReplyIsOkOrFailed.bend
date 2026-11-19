@@ -12,7 +12,7 @@ import ./defs/ReadOk.bend as D1
 # a read's labels
 def read.labels(rd: Rd.Read) -> List<&2, String>:
   match rd:
-    case Rd.Read{_shard, _inst, labels, _ok, _why, _pn, _pm, _cn, _ms}:
+    case Rd.Read{_shard, _inst, labels, _ranks, _ok, _why, _pn, _pm, _cn, _ms}:
       labels
 
 # the ids a parsed reply body names: its first choice's content read as

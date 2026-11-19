@@ -3,15 +3,18 @@
 # sources, show (a record, and a missing one), ask refused without a filter
 # or a question and with a malformed since, a filter given as a string and
 # as an array read alike, and a pool with no healthy instance answered as a
-# tool error while the server keeps serving. EPISTEME names the binary
-# (default bin/episteme); python3 is the MCP client.
+# tool error while the server keeps serving; then, with a reader that ranks
+# the run (tests/fixtures/ranker.py), the best ranked printed and all of it
+# kept in run files, by `ask` and by the tool. EPISTEME names the binary
+# (default bin/episteme); python3 is the MCP client and the ranking reader.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${EPISTEME:-$here/../bin/episteme}
 work=$(mktemp -d)
 pid=
-trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; rm -rf "$work"' EXIT
+rpid=
+trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; [ -n "$rpid" ] && kill "$rpid" 2>/dev/null; rm -rf "$work"' EXIT
 
 export EPISTEME_HOME=$work/home
 mkdir -p "$EPISTEME_HOME"
@@ -83,5 +86,39 @@ out=$(call ask '{"question": "what", "filter": ["book:tiny/"]}')
 [ "$out" = "$want" ] || fail "ask with an array filter: $out"
 out=$(call sources '{}')
 case "$out" in "False	"*) ;; *) fail "sources after a refused ask: $out" ;; esac
+
+# a reader that ranks the run names two paragraphs of each shard. A budget
+# of 80 characters prints only the best ranked, the 63 characters of the
+# gulls, and keeps the two of every shard in run files
+rport=${RANKER_PORT:-18132}
+python3 "$here/fixtures/ranker.py" "$rport" &
+rpid=$!
+for _ in $(seq 100); do
+  python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$rport/health', timeout=1)" 2> /dev/null && break
+  sleep 0.1
+done
+printf '{"shard_tokens": 100, "chars_per_token": 8000, "pool": [["http://127.0.0.1:%s", 2]], "budget_tokens": 1}\n' "$rport" \
+  > "$EPISTEME_HOME/config.json"
+"$bin" ask --filter book:tiny/ "what" > "$work/out.txt" 2> "$work/err.txt" || fail "ask of the ranking reader: $(cat "$work/err.txt")"
+[ "$(grep -c '^book:tiny/tiny-book@[0-9]*#[0-9]*: ' "$work/out.txt")" = 1 ] || fail "not one paragraph printed: $(head -c 600 "$work/out.txt")"
+grep -q 'seven gulls' "$work/out.txt" || fail "the best ranked is not printed: $(cat "$work/out.txt")"
+run=$(sed -n 's/^.* all of it is in \(.*\)\/ (one file per source.*$/\1/p' "$work/out.txt")
+[ -f "$run/INDEX.md" ] || fail "no INDEX.md under '$run': $(cat "$work/out.txt")"
+shards=$(sed -n 's/^shards: \([0-9]*\) read, 0 failed$/\1/p' "$work/out.txt")
+[ -n "$shards" ] && [ "$shards" -ge 2 ] || fail "no footer of at least two shards after the run files: $(tail -n 4 "$work/out.txt")"
+named=$(grep -c '^book:tiny/tiny-book@[0-9]*#[0-9]*: ' "$run/book:tiny_tiny-book.md")
+[ "$named" = $((2 * shards)) ] || fail "the run file holds $named paragraphs, not two of each of $shards shards"
+grep -q 'The Tiny Book' "$run/book:tiny_tiny-book.md" || fail "the run file lacks a paragraph that was not printed"
+
+out=$(call ask '{"question": "what", "filter": "book:tiny/"}')
+case "$out" in "False	### "*"seven gulls"*" all of it is in "*"INDEX.md lists them)"*"book:tiny_tiny-book.md book:tiny/tiny-book "*) ;; *) fail "the tool's ask of the ranking reader: $out" ;; esac
+
+# a budget that fits all of them prints them and writes no run files
+runs=$(ls "$EPISTEME_HOME/runs" | wc -l)
+sed -i 's/"budget_tokens": 1}/"budget_tokens": 60000}/' "$EPISTEME_HOME/config.json"
+"$bin" ask --filter book:tiny/ "what" > "$work/out.txt" 2> "$work/err.txt" || fail "ask of the ranking reader, whole: $(cat "$work/err.txt")"
+[ "$(grep -c '^book:tiny/tiny-book@[0-9]*#[0-9]*: ' "$work/out.txt")" = "$named" ] || fail "a whole run does not print all $named paragraphs: $(head -c 600 "$work/out.txt")"
+grep -q ' all of it is in ' "$work/out.txt" && fail "a whole run names run files: $(cat "$work/out.txt")"
+[ "$(ls "$EPISTEME_HOME/runs" | wc -l)" = "$runs" ] || fail "a whole run wrote run files"
 
 echo "serve: ok"

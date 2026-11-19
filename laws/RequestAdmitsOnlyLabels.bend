@@ -9,9 +9,10 @@
 # paragraphs of `s`, so the grammar admits only the shard's own labels.
 #
 # `src/read.bend` decides what a reader is asked, what its reply means and
-# what `ask` reports. A read is `Read{shard, inst, labels, ok, why, prompt_n,
-# prompt_ms, cache_n, ms}`: the shard's number in the run, the instance's URL,
-# the labels the reader named, whether the call answered, why it failed, and
+# what `ask` reports. A read is `Read{shard, inst, labels, ranks, ok, why,
+# prompt_n, prompt_ms, cache_n, ms}`: the shard's number in the run, the
+# instance's URL, the labels the reader named, the ranks it gave them
+# (laws/BestRankedArePrinted.bend), whether the call answered, why it failed, and
 # the server's `timings` in whole units (`ms` is `prompt_ms` plus
 # `predicted_ms`). `Read.request(slot, s, q)` is the body of `POST
 # <url>/v1/chat/completions`: the system prompt `Read.prompt()`, then the
@@ -31,8 +32,8 @@
 # failed read, `<source>` and `<n>` the failed shard's own name
 # `Read.Name{source, n}` (the run's shard `k` is named by `names[k - 1]`),
 # `unknown labels: <u>` and `wall time: <s> s`; a closed example checks it.
-# `Read.fits(chars, budget, per)` says whether the rendered excerpts are
-# printed or written to run files.
+# `Read.fits(chars, budget, per)` is the budget test of which labels are
+# printed (laws/BestRankedArePrinted.bend).
 import Base
 import ../src/shard.bend as S
 import ../src/read.bend as Rd

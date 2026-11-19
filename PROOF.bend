@@ -4,6 +4,7 @@ import Base
 import ./LAWS.bend as Laws
 import ./proofs/AuthorKeepsNamedAuthors.bend as PAuthorKeepsNamedAuthors
 import ./proofs/BareDotIsNoSource.bend as PBareDotIsNoSource
+import ./proofs/BestRankedArePrinted.bend as PBestRankedArePrinted
 import ./proofs/BlankLinesSeparateParagraphs.bend as PBlankLinesSeparateParagraphs
 import ./proofs/BookPacksIntoShards.bend as PBookPacksIntoShards
 import ./proofs/ChangedRecordKeepsItsPlace.bend as PChangedRecordKeepsItsPlace
@@ -60,6 +61,7 @@ import ./proofs/RecordsInputChanges.bend as PRecordsInputChanges
 import ./proofs/RecordsSplitOnlyWhenTooBig.bend as PRecordsSplitOnlyWhenTooBig
 import ./proofs/ReplyIsOkOrFailed.bend as PReplyIsOkOrFailed
 import ./proofs/ReplyReadsLabelsAndTimings.bend as PReplyReadsLabelsAndTimings
+import ./proofs/ReplyReadsRanks.bend as PReplyReadsRanks
 import ./proofs/RankedReadNamesShard.bend as PRankedReadNamesShard
 import ./proofs/RequestAdmitsOnlyLabels.bend as PRequestAdmitsOnlyLabels
 import ./proofs/RunNoticeNamesShards.bend as PRunNoticeNamesShards

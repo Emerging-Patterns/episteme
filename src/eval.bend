@@ -169,7 +169,7 @@ def Eval.told(row: Sc.Row) -> IO(Sc.Row):
 # a question's row from its run and its wall time, with a progress line
 def Eval.scored(id: String, gold: List<&2, E.Gold>, got: A.Got, ms: Nat) -> IO(Sc.Row):
   match got:
-    case A.Got{xs, rs, _names, unknown}:
+    case A.Got{xs, rs, _names, unknown, _all, _whole}:
       Eval.told(Sc.Score.row(id, gold, xs, rs, unknown, ms))
 
 # one question through ask's path, scored

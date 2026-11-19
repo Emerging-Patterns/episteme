@@ -7,4 +7,4 @@ law reply_example_ids:
   for u: Unit
   {Rd.Read.reply(4, "u", 200,
     "{\"choices\":[{\"message\":{\"content\":\"{\\\"ids\\\":[\\\"p1\\\",\\\"p3\\\"]}\"}}],\"timings\":{\"prompt_n\":12,\"prompt_ms\":3.5,\"cache_n\":2,\"predicted_ms\":1.9}}")
-    == Rd.Read{4, "u", ["p1", "p3"], True{}, "", 12, 3, 2, 4} : Rd.Read}
+    == Rd.Read{4, "u", ["p1", "p3"], [], True{}, "", 12, 3, 2, 4} : Rd.Read}
