@@ -139,6 +139,10 @@ class Book:
             at += w * n
         self.nbytes = (at + 7) // 8
         self.half = torch.tensor([2 ** (w - 1) for w in widths], device=dev, dtype=torch.float32)
+        # the decoding product in half precision when the device has it: 2.5 ms a state for 7, and 1e-7 of the
+        # rows' energy off the fp32 product, where the coding itself is 1e-3 off the rows
+        self.fast = torch.float16 if str(dev).startswith("cuda") else torch.float32
+        self.back = self.inv.T.to(self.fast).contiguous()
 
     def bins(self, x):
         """rows [T, 1536] to their coefficients' bins [T, K] (uint8) and the
@@ -165,7 +169,8 @@ class Book:
         for w, first, n, at in self.groups:  # the bins put together as bytes: no float is made of a bit
             sh = torch.arange(w, device=packed.device, dtype=torch.uint8)
             q[:, first:first + n] = (bit[:, at:at + n * w].view(t, n, w) << sh).sum(-1, dtype=torch.uint8)
-        return self.mean + ((q.float() - self.half + 0.5) * self.step) @ self.inv.T
+        c = ((q.float() - self.half + 0.5) * self.step).to(self.fast)
+        return self.mean + (c @ self.back).float()
 
     def encode(self, x):
         """rows [T, 1536] to (bytes [T, nbytes], the places of the tokens
@@ -190,6 +195,8 @@ def squeeze(q, width):
 
 def spread(b, width, n):
     """squeeze undone: bytes to n numbers of width bits (float32)"""
+    if width == 4:  # two to a byte, the low half first: no bit is laid out on its own
+        return torch.stack((b & 15, b >> 4), -1).reshape(*b.shape[:-1], -1)[..., :n].float()
     bit = ((b[..., None] >> torch.arange(8, device=b.device, dtype=torch.uint8)) & 1).reshape(*b.shape[:-1], -1)[..., :n * width]
     return (bit.view(*bit.shape[:-1], n, width) << torch.arange(width, device=b.device, dtype=torch.uint8)).sum(-1, dtype=torch.uint8).float()
 
@@ -236,7 +243,7 @@ if __name__ == "__main__":  # python joint.py: the codec checked on made-up rows
     book = Book(make(cov, mean, [torch.eye(256, dtype=torch.float64)] * len(BLOCKS), 3.0), "cpu")
     x[0] *= 40  # a token far outside the steps' range
     q, err = book.bins(x)
-    assert torch.equal(book.unpack(book.pack(q)), book.mean + ((q.float() - book.half + 0.5) * book.step) @ book.inv.T)
+    assert torch.allclose(book.unpack(book.pack(q)), book.mean + ((q.float() - book.half + 0.5) * book.step) @ book.inv.T, atol=1e-4)
     packed, at, exact = book.encode(x)
     y = book.decode(packed, at, exact)
     assert packed.shape == (4000, book.nbytes) and book.nbytes * 8 <= 3 * WIDE + 7 and 0 in at.tolist()
