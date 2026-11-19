@@ -250,6 +250,7 @@ def unpack(state):
     int8(top, "keys", k11, -2)
     for name in ("joint", "joint_at", "joint_exact", "joint_rms"):
         delattr(mid, name)
+    made = {id(mid): {"keys", "values", "keys_scale", "values_scale"}, id(top): {"keys", "keys_scale"}}
     for layer in c.layers:
         if isinstance(vars(layer).get("low_left"), dict):
             layer.recurrent_states = dict(layer.recurrent_states)
@@ -258,6 +259,21 @@ def unpack(state):
                                                        layer.low_scale[i], BOOK.resid).to(torch.bfloat16)
             for name in ("low_left", "low_right", "low_rest", "low_scale"):
                 delattr(layer, name)
+            made.setdefault(id(layer), set()).add("recurrent_states")
+        # what is left of the packed state (the convolution states, a few kB) is copied: a packed state may come
+        # as views of one block (f2serve's lift), and a view kept here would keep the whole block on the GPU
+        for name, v in list(vars(layer).items()):
+            if name in made.get(id(layer), ()):
+                continue
+            if torch.is_tensor(v):
+                setattr(layer, name, v.clone())
+            elif isinstance(v, dict):
+                setattr(layer, name, {i: t.clone() if torch.is_tensor(t) else t for i, t in v.items()})
+    if torch.cuda.is_available():
+        # the work above is done before this returns: the caller may now drop the packed state, and a block
+        # freed while kernels that read it are still queued on this stream is handed to the next transfer on
+        # the lift's stream, which writes over it (seen as scores of noise and out-of-range indices)
+        torch.cuda.current_stream().synchronize()
     return (state[0], c) + tuple(state[2:])
 
 

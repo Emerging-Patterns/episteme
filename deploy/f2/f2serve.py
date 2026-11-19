@@ -138,7 +138,7 @@ env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
 """
-import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time
+import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -958,6 +958,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/stats":
             self.send(200, {"gpu_states": len(STATES.gpu), "gpu_gb": STATES.gpu_b / 1e9,
                             "ram_states": len(STATES.ram), "ram_gb": STATES.ram_b / 1e9,
+                            "gpu_held_gb": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
                             "loads": dict(STATES.n), **rss()})
         else:
             self.send(404, {"error": "not found"})
@@ -982,6 +983,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(404, {"error": "not found"})
             ms = (time.time() - t) * 1000
         except Exception as e:
+            traceback.print_exc()  # the reply holds the error's first line; where it came from goes to the log
             return self.send(500, {"error": repr(e)[:300]})
         self.send(200, {"object": "chat.completion", "model": "f2",
                         "choices": [{"index": 0, "finish_reason": "stop", "message": {
