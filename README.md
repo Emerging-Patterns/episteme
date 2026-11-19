@@ -10,7 +10,7 @@ episteme ingest records <file|-> [--complete]   # records given as JSON lines
 episteme ingest                     # pack log batches the shards lack
 episteme ingest --reshard
 episteme sources
-episteme show <record id>[#<n>]
+episteme show <record id>[#<n>]     # or runs/<run>/<file>, a run file
 episteme ask --filter <sources> [--since <date>] [--author <names>] "<question>"
 episteme eval <questions.jsonl> --label <name>
 episteme serve [--host 127.0.0.1] [--port 18113]
@@ -35,7 +35,7 @@ Every question (`ask`, `serve` or `eval`) appends one JSON line to `$EPISTEME_HO
 
 A reader is any HTTP server that answers `GET /health` and an OpenAI-style `POST /v1/chat/completions` for one shard with `{"ids": ["p3", ...]}`, the labels of the paragraphs that bear on the question; `config.json`'s `pool` lists them with a number of parallel slots each. Before a question's reads, `ask` posts the run's shard names, and the authors the question names with `--author`, to `POST /v1/episteme/run`; a reader may ignore it, or rank the whole run and answer `{"ranked": true}`, and is then read by name (`POST /v1/episteme/read`) instead of being sent each shard.
 
-A reader that ranks may name more than a question prints, with each label's rank beside it: `{"ids": [...], "ranks": [...]}`, 1 the best of the run. `ask` prints the best ranked that fit `config.json`'s `budget_tokens` and, when that is not all of it, writes everything the readers named to `$EPISTEME_HOME/runs/<time>/`, one file per source in time order and `INDEX.md`, and says where, so whoever asked can sift the rest (laws/BestRankedArePrinted.bend). Nothing prunes `runs/`. A reader that gives no ranks is printed whole when it fits and only written to the files when it does not.
+A reader that ranks may name more than a question prints, with each label's rank beside it: `{"ids": [...], "ranks": [...]}`, 1 the best of the run. `ask` prints the best ranked that fit `config.json`'s `budget_tokens` and, when that is not all of it, writes everything the readers named to `$EPISTEME_HOME/runs/<time>/`, one file per source in time order, the next best after what was printed as pages of one budget each (`page-2.md` and on, laws/NextBestAreInPages.bend) and `INDEX.md`, and says where, so whoever asked can sift the rest (laws/BestRankedArePrinted.bend). `episteme show runs/<run>/<file>` prints one of those files, the `show` tool too, so they can be read where the directory cannot (laws/ShowReadsRunFiles.bend). Nothing prunes `runs/`. A reader that gives no ranks is printed whole when it fits and only written to the files when it does not.
 
 - `deploy/f2/` is the default reader: BM25 fused with attention read out of Qwen3.5-0.8B (layers 0 to 11), ranking a question's whole run and naming its best paragraphs up to one token budget (`BUDGET`, 32,000 tokens; set it at or under `budget_tokens` to name no more than is printed). It needs one CUDA GPU with about 10 GB; see its `f2serve.py` header for setup.
 - `deploy/reader.sh` runs llama-server with any instruction model as a generating reader.

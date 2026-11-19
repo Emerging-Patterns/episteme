@@ -33,9 +33,15 @@
 # is not whole (`Rank.whole`), also writes the excerpts of the reads as they
 # came, each source's to `runs/<ISO time>/<source with / as _>.md` (the
 # directory made with `mkdir` without `-p`, so a name in use is never shared:
-# `<ISO time>-1`, `-2`, ... up to 99 are tried next) and `INDEX.md` (one line
-# per source: file, source, excerpt count, first and last ts) under
-# `Store.home()`, and prints `Read.more` of the directory; then a blank line
+# `<ISO time>-1`, `-2`, ... up to 99 are tried next), each page after the
+# first that holds an excerpt (`Rank.rest` with 99 pages at most,
+# laws/NextBestAreInPages.bend; a page's reads resolved and merged as the
+# printed ones are) to `page-<k>.md` beside them, `k` from 2, and `INDEX.md`
+# (one line per such page: file, `next-best`, excerpt count, first and last
+# ts; then one line per source: file, source, excerpt count, first and last
+# ts) under `Store.home()`, and prints `Read.more` of the directory and of
+# its name under `runs/`, which says how `episteme show` prints a run file
+# (laws/ShowReadsRunFiles.bend); then a blank line
 # and `Read.footer`, its wall time from the start of the command. With
 # `--json` it prints one object `{"excerpts": [{"id", "source", "ts",
 # "author", "paras": [[n, start, end, text]]}], "reads": [Read...]}` of the
@@ -51,9 +57,11 @@
 # laws/MergeOrdersByTime.bend, laws/RecalledMeansOverlap.bend,
 # laws/RequestAdmitsOnlyLabels.bend, laws/ReplyIsOkOrFailed.bend,
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
-# laws/ExcerptsFitBudget.bend, laws/BestRankedArePrinted.bend and the store;
+# laws/ExcerptsFitBudget.bend, laws/BestRankedArePrinted.bend,
+# laws/NextBestAreInPages.bend and the store;
 # `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
-# printed and all of it in the run files, and `tests/smoke.sh` checks the
+# printed, all of it in the run files, the next best in a page and `show`
+# printing a run file, and `tests/smoke.sh` checks the
 # refusal, the refusal when the shards are behind the log, and a pool with no
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
@@ -431,30 +439,55 @@ def Ask.claim(tries: Nat, +base: String, +idx: U32) -> IO(String):
         res : Result<&1, &1, U32 & String, U32 & (String & String)> <- Process.run("mkdir", [dir], "", 65536, 60000)
         Ask.claimed(Ask.made(res), dir, _u => Ask.claim(more, base, U32.inc(idx)))
 
+# save a page's excerpts to its file under dir, nothing for a page that
+# holds none
+def Ask.page(empty: Bool, dir: String, k: Nat, xs: List<&2, E.Ex>) -> IO(Unit):
+  match empty:
+    case True{}:
+      IO.pure(Unit, Unit{})
+    case False{}:
+      St.Store.save(dir ++ "/" ++ Rd.Read.page.file(k), E.Excerpt.render(xs))
+
+# write the pages k, k + 1, ... to page-<k>.md under dir
+def Ask.pages(pages: List<&2, List<&2, E.Ex>>, +dir: String, +k: Nat) -> IO(Unit):
+  match pages:
+    case Nil{}:
+      IO.pure(Unit, Unit{})
+    case Con{+xs, rest}:
+      do IO<Unit>:
+        Ask.page(List.is_empty(&2, E.Ex, xs), dir, k, xs)
+        Ask.pages(rest, dir, 1n+k)
+
+# INDEX.md of a run's files: a line per page after the first, then a line
+# per source
+def Ask.index(+all: List<&2, E.Ex>, pages: List<&2, List<&2, E.Ex>>) -> String:
+  Rd.Read.index.pages(pages, 2n) ++ Rd.Read.index(Rd.Read.sources(all, []), all)
+
 # write the excerpts to run files under runs/<now>/: each source's excerpts
-# to <source>.md and INDEX.md; answers the directory
-def Ask.spill(+xs: List<&2, E.Ex>) -> IO(String):
+# to <source>.md, the pages after the first to page-<k>.md and INDEX.md;
+# answers Read.more of the directory
+def Ask.spill(+xs: List<&2, E.Ex>, +pages: List<&2, List<&2, E.Ex>>) -> IO(String):
   do IO<String>:
     stamp : String <- Sys.time.now_iso()
     +runs : String <- St.Store.path("runs")
     St.Store.mkdir(runs)
     +dir : String <- Ask.claim(100n, runs ++ "/" ++ stamp, 0)
-    +srcs : List<&2, String> = Rd.Read.sources(xs, [])
-    St.Store.save(dir ++ "/INDEX.md", Rd.Read.index(srcs, xs))
-    Ask.files(srcs, dir, xs)
-    return dir
+    St.Store.save(dir ++ "/INDEX.md", Ask.index(xs, pages))
+    Ask.files(Rd.Read.sources(xs, []), dir, xs)
+    Ask.pages(pages, dir, 2n)
+    return Rd.Read.more(dir, String.drop(dir, 1n+String.length(runs)))
 
 # print the excerpts; when the run is not whole, also write all the readers
 # named to run files and print where
-def Ask.deliver(whole: Bool, text: String, +all: List<&2, E.Ex>) -> IO(Unit):
+def Ask.deliver(whole: Bool, text: String, all: List<&2, E.Ex>, pages: List<&2, List<&2, E.Ex>>) -> IO(Unit):
   match whole:
     case True{}:
       IO.write(text)
     case False{}:
       do IO<Unit>:
         IO.write(text)
-        dir : String <- Ask.spill(all)
-        IO.print(Rd.Read.more(dir))
+        more : String <- Ask.spill(all, pages)
+        IO.print(more)
 
 # print the run: one JSON object, the footer on stderr; or the excerpts,
 # then the footer
@@ -465,7 +498,8 @@ def Ask.out(
   names: List<&2, Rd.Name>,
   +foot: String,
   all: List<&2, E.Ex>,
-  whole: Bool
+  whole: Bool,
+  pages: List<&2, List<&2, E.Ex>>
 ) -> IO(Unit):
   match json:
     case True{}:
@@ -474,17 +508,17 @@ def Ask.out(
         IO.print_err(foot)
     case False{}:
       do IO<Unit>:
-        Ask.deliver(whole, E.Excerpt.render(xs), all)
+        Ask.deliver(whole, E.Excerpt.render(xs), all, pages)
         IO.print("\n" ++ foot)
 
 # a question's run before delivery: the excerpts it prints, merged in time
 # order, its reads in shard order with only their printed labels, the run's
 # shards' own names, how many labels the shards do not have, the excerpts
-# of all the readers named, and whether the run is whole (it prints them
-# all)
+# of all the readers named, whether the run is whole (it prints them all),
+# and the excerpts of each page after the first
 type Got is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Got{xs: List<&2, E.Ex>, rs: List<&2, Rd.Read>, names: List<&2, Rd.Name>, unknown: U32,
-    all: List<&2, E.Ex>, whole: Bool}
+    all: List<&2, E.Ex>, whole: Bool, pages: List<&2, List<&2, E.Ex>>}
 
 # excerpts of every shard merged, those before the since dropped and, when
 # the question names authors, those by another author
@@ -495,9 +529,31 @@ def Ask.merged(
 ) -> List<&2, E.Ex>:
   F.Filter.by(who, F.Filter.after(since, E.Excerpt.merge(lists)))
 
+# one page's excerpts: those of its reads, merged
+def Ask.paged.one(
+  got: List<&2, List<&2, E.Ex>> & U32,
+  since: Maybe<&2, String>,
+  who: List<&2, String>
+) -> List<&2, E.Ex>:
+  (lists, _strays) = got
+  Ask.merged(lists, since, who)
+
+# each page's excerpts, the pages given as their reads
+def Ask.paged(
+  pages: List<&2, List<&2, Rd.Read>>,
+  +hits: List<&2, S.Shard>,
+  +since: Maybe<&2, String>,
+  +who: List<&2, String>
+) -> List<&2, List<&2, E.Ex>>:
+  match pages:
+    case Nil{}:
+      []
+    case Con{rs, rest}:
+      Ask.paged.one(Rd.Read.excerpts(hits, rs), since, who) <> Ask.paged(rest, hits, since, who)
+
 # the run of the narrowed reads' excerpts (near) and of the excerpts of the
-# reads as they came (full), each merged, beside the narrowed reads and the
-# shards' names
+# reads as they came (full), each merged, beside the narrowed reads, the
+# shards' names and the pages after the first
 def Ask.got(
   near: List<&2, List<&2, E.Ex>> & U32,
   full: List<&2, List<&2, E.Ex>> & U32,
@@ -505,11 +561,12 @@ def Ask.got(
   +since: Maybe<&2, String>,
   +who: List<&2, String>,
   rs: List<&2, Rd.Read>,
-  names: List<&2, Rd.Name>
+  names: List<&2, Rd.Name>,
+  pages: List<&2, List<&2, E.Ex>>
 ) -> Got:
   (lists, _strays) = near
   (every, unknown) = full
-  Got{Ask.merged(lists, since, who), rs, names, unknown, Ask.merged(every, since, who), whole}
+  Got{Ask.merged(lists, since, who), rs, names, unknown, Ask.merged(every, since, who), whole, pages}
 
 # the first source of a shard's sources, or ""
 def Ask.source(srcs: List<&2, String>) -> String:
@@ -532,10 +589,10 @@ def Ask.names(ss: List<&2, S.Shard>) -> List<&2, Rd.Name>:
 # the run after its reads, printed with the footer; answers the exit code
 def Ask.done(got: Got, json: Bool, +t0: Nat) -> IO(U32):
   match got:
-    case Got{xs, +rs, +names, unknown, all, whole}:
+    case Got{xs, +rs, +names, unknown, all, whole, pages}:
       do IO<U32>:
         t1 : Nat <- IO.now()
-        Ask.out(json, xs, rs, names, Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0)), all, whole)
+        Ask.out(json, xs, rs, names, Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0)), all, whole, pages)
         return Rd.Read.code(rs)
 
 # why a run did not happen, and the exit code `ask` stops with
@@ -543,20 +600,22 @@ type Refusal is Data:  # noqa: L001 IO shell type: no law can import this module
   Refusal{code: U32, why: String}
 
 # the run of the reads rs: the reads narrowed to their printed labels
-# (Rank.narrow, for the budget), their excerpts and those of rs as they came
+# (Rank.narrow, for the budget), their excerpts, those of rs as they came
+# and those of each page after the first (Rank.rest, at most 99 pages)
 def Ask.cut(
   +hits: List<&2, S.Shard>,
   +rs: List<&2, Rd.Read>,
   +items: List<&2, Rk.Item>,
   +budget: U32,
   +per: U32,
-  since: Maybe<&2, String>,
-  who: List<&2, String>,
+  +since: Maybe<&2, String>,
+  +who: List<&2, String>,
   names: List<&2, Rd.Name>
 ) -> Got:
   +near = Rk.Rank.narrow(rs, items, budget, per)
   Ask.got(Rd.Read.excerpts(hits, near), Rd.Read.excerpts(hits, rs),
-    Rk.Rank.whole(items, budget, per), since, who, near, names)
+    Rk.Rank.whole(items, budget, per), since, who, near, names,
+    Ask.paged(Rk.Rank.rest(rs, items, 99n, budget, per), hits, since, who))
 
 # the run when the reads came back, else the refusal and its exit code 2
 def Ask.came(
@@ -624,7 +683,7 @@ def Ask.code(res: Result<&2, &2, Refusal, Got>) -> U32:
   match res:
     case Fail{Refusal{code, _why}}:
       code
-    case Done{Got{_xs, rs, _names, _unknown, _all, _whole}}:
+    case Done{Got{_xs, rs, _names, _unknown, _all, _whole, _pages}}:
       Rd.Read.code(rs)
 
 # a result's refusal, or ""
@@ -640,7 +699,7 @@ def Ask.rs(res: Result<&2, &2, Refusal, Got>) -> List<&2, Rd.Read>:
   match res:
     case Fail{_r}:
       []
-    case Done{Got{_xs, rs, _names, _unknown, _all, _whole}}:
+    case Done{Got{_xs, rs, _names, _unknown, _all, _whole, _pages}}:
       rs
 
 # a result's excerpts, or none
@@ -648,7 +707,7 @@ def Ask.xs(res: Result<&2, &2, Refusal, Got>) -> List<&2, E.Ex>:
   match res:
     case Fail{_r}:
       []
-    case Done{Got{xs, _rs, _names, _unknown, _all, _whole}}:
+    case Done{Got{xs, _rs, _names, _unknown, _all, _whole, _pages}}:
       xs
 
 # a failed telemetry write on stderr
@@ -819,23 +878,27 @@ def Ask.run(
 
 # the excerpts; when the run is not whole, also where all the readers named
 # were written, and their INDEX.md
-def Ask.text(whole: Bool, text: String, +all: List<&2, E.Ex>) -> IO(String):
+def Ask.text(
+  whole: Bool,
+  text: String,
+  +all: List<&2, E.Ex>,
+  +pages: List<&2, List<&2, E.Ex>>
+) -> IO(String):
   match whole:
     case True{}:
       IO.pure(String, text)
     case False{}:
       do IO<String>:
-        dir : String <- Ask.spill(all)
-        return String.concat([text, Rd.Read.more(dir), "\n\n",
-          Rd.Read.index(Rd.Read.sources(all, []), all)])
+        more : String <- Ask.spill(all, pages)
+        return String.concat([text, more, "\n\n", Ask.index(all, pages)])
 
 # a run delivered as text: the excerpts (or where they were written), a
 # blank line and the footer
 def Ask.told(got: Got, +t0: Nat) -> IO(String):
   match got:
-    case Got{xs, +rs, +names, unknown, all, whole}:
+    case Got{xs, +rs, +names, unknown, all, whole, pages}:
       do IO<String>:
-        body : String <- Ask.text(whole, E.Excerpt.render(xs), all)
+        body : String <- Ask.text(whole, E.Excerpt.render(xs), all, pages)
         t1 : Nat <- IO.now()
         return body ++ "\n" ++ Rd.Read.footer(rs, names, unknown, Nat.sub(t1, t0))
 

@@ -38,6 +38,7 @@ import ./proofs/MedianAndMax.bend as PMedianAndMax
 import ./proofs/MedianAndMaxOfTimes.bend as PMedianAndMaxOfTimes
 import ./proofs/MergeJoinsRecordAcrossShards.bend as PMergeJoinsRecordAcrossShards
 import ./proofs/MergeOrdersByTime.bend as PMergeOrdersByTime
+import ./proofs/NextBestAreInPages.bend as PNextBestAreInPages
 import ./proofs/NoAuthorChangesNothing.bend as PNoAuthorChangesNothing
 import ./proofs/Non200Fails.bend as PNon200Fails
 import ./proofs/NonJsonReplyFails.bend as PNonJsonReplyFails
@@ -82,6 +83,7 @@ import ./proofs/ShardSourcesSorted.bend as PShardSourcesSorted
 import ./proofs/ShardsGiveBackRecords.bend as PShardsGiveBackRecords
 import ./proofs/ShowFindsRecordAndParagraphs.bend as PShowFindsRecordAndParagraphs
 import ./proofs/ShowReadsOneSource.bend as PShowReadsOneSource
+import ./proofs/ShowReadsRunFiles.bend as PShowReadsRunFiles
 import ./proofs/ShowRunsCommandOutput.bend as PShowRunsCommandOutput
 import ./proofs/ShowWantsIdAndParagraph.bend as PShowWantsIdAndParagraph
 import ./proofs/SinceDateIsMidnight.bend as PSinceDateIsMidnight

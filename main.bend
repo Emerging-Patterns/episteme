@@ -17,7 +17,12 @@
 # paragraphs or paragraph `n`; then, for a `ptr` of `file:<path>:<line>`, that
 # line of the file, and for `git:<repo>@<hash>`, what `git --no-lazy-fetch -C
 # <repo> show --stat --patch --end-of-options <hash>` prints. Commands run
-# with Base's `Process.run`, which finds the program on PATH.
+# with Base's `Process.run`, which finds the program on PATH. An argument
+# that names a run file (`Cli.run`, laws/ShowReadsRunFiles.bend) is read
+# first: `episteme show runs/<run>/<file>` prints the file at that path under
+# `Store.home()`, a file `ask` wrote there, or refuses with `no run file
+# <arg>` when it cannot be read. That no link under `runs/` leads out of it
+# is assumed: episteme makes none.
 #
 # Why it is trusted: They read the store and run `git`, which no law reaches.
 # `tests/smoke.sh` checks both on the fixture, and `sources` refusing when the
@@ -244,8 +249,36 @@ def show.want(wt: Cl.Want, +arg: String) -> IO(Result<&2, &2, String, Cl.Shown>)
 
 # a record, or one paragraph of it, and what its pointer points at; or the
 # refusal when there is none
-def show.text(+arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
+def show.record(+arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
   show.want(Cl.Cli.want(arg), arg)
+
+# a run file's text, or the refusal when it was not read
+def show.ran(res: Result<&1, &1, U32 & String, String>, arg: String) -> Result<&2, &2, String, Cl.Shown>:
+  match res:
+    case Fail{_why}:
+      Fail{"no run file " ++ arg}
+    case Done{text}:
+      Done{Cl.Shown{text, ""}}
+
+# the run file at a path under the home
+def show.run(path: String, +arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
+  do IO<Result<&2, &2, String, Cl.Shown>>:
+    full : String <- St.Store.path(path)
+    res : Result<&1, &1, U32 & String, String> <- Sys.file.read(full)
+    return show.ran(res, arg)
+
+# the run file the argument names, else the record
+def show.pick(got: Maybe<&2, String>, +arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
+  match got:
+    case Some{path}:
+      show.run(path, arg)
+    case None{}:
+      show.record(arg)
+
+# a run file; or a record, or one paragraph of it, and what its pointer
+# points at; or the refusal when there is none
+def show.text(+arg: String) -> IO(Result<&2, &2, String, Cl.Shown>):
+  show.pick(Cl.Cli.run(arg), arg)
 
 # stderr's text, when there is any
 def show.err(+err: String) -> IO(Unit):
@@ -292,7 +325,7 @@ def serve.srv() -> Server.Server:
         ["question", "filter"])),
     Mcp.tool("show",
       "Return a whole record, or one paragraph of it, and what its pointer points at (a file line or a git patch).",
-      Cl.Cli.schema([Cl.Cli.prop("id", "<record id> or <record id>#<n>, as cited in an excerpt")], ["id"])),
+      Cl.Cli.schema([Cl.Cli.prop("id", "<record id> or <record id>#<n>, as cited in an excerpt; or runs/<run>/<file>, a run file an ask named")], ["id"])),
     Mcp.tool("sources",
       "List each source with its records, paragraphs and shards.",
       Cl.Cli.schema([], []))])
