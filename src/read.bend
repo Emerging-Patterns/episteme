@@ -520,10 +520,16 @@ def Read.footer(+rs: List<&2, Read>, names: List<&2, Name>, unknown: U32, ms: Na
 # --- files and JSON ---
 
 # the line after the printed excerpts of a run that is not whole: where all
-# the readers named was written
-def Read.more(dir: String) -> String:
+# the readers named was written (dir, the run's directory, and name, its
+# name under runs/), and how a run file is shown
+def Read.more(dir: String, name: String) -> String:
   String.concat(["\nThe readers named more than is printed above: the best ranked is printed, and all of it is in ",
-    dir, "/ (one file per source, in time order; INDEX.md lists them)"])
+    dir, "/ (one file per source, in time order; INDEX.md lists them). The next best are its page-2.md",
+    " and on, best first; `episteme show runs/", name, "/<file>` prints one of its files"])
+
+# a page's run file: page-<k>.md
+def Read.page.file(k: Nat) -> String:
+  String.concat(["page-", Nat.show(k), ".md"])
 
 # a source's run file: its name with every / as _, then .md
 def Read.file(src: String) -> String:
@@ -569,7 +575,31 @@ def Read.index.line(+src: String, +xs: List<&2, E.Ex>) -> String:
   String.concat([Read.file(src), " ", src, " ",
     Nat.show(List.length(&2, E.Ex, xs)), " ", first, " ", Read.last_ts(xs, first), "\n"])
 
-# INDEX.md: one line per source
+# a page's line of INDEX.md: its file, "next-best", its excerpt count and
+# their first and last ts
+def Read.index.page(k: Nat, +xs: List<&2, E.Ex>) -> String:
+  +first = Read.last_ts(List.take(&2, E.Ex, xs, 1n), "")
+  String.concat([Read.page.file(k), " next-best ",
+    Nat.show(List.length(&2, E.Ex, xs)), " ", first, " ", Read.last_ts(xs, first), "\n"])
+
+# the line when the page holds an excerpt, else nothing
+def Read.index.page.if(empty: Bool, k: Nat, xs: List<&2, E.Ex>) -> String:
+  match empty:
+    case True{}:
+      ""
+    case False{}:
+      Read.index.page(k, xs)
+
+# INDEX.md's lines of the pages k, k + 1, ...: one per page that holds an
+# excerpt
+def Read.index.pages(pages: List<&2, List<&2, E.Ex>>, +k: Nat) -> String:
+  match pages:
+    case Nil{}:
+      ""
+    case Con{+xs, rest}:
+      Read.index.page.if(List.is_empty(&2, E.Ex, xs), k, xs) ++ Read.index.pages(rest, 1n+k)
+
+# INDEX.md's lines of the sources: one line per source
 def Read.index(srcs: List<&2, String>, +xs: List<&2, E.Ex>) -> String:
   match srcs:
     case Nil{}:

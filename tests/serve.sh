@@ -89,7 +89,8 @@ case "$out" in "False	"*) ;; *) fail "sources after a refused ask: $out" ;; esac
 
 # a reader that ranks the run names two paragraphs of each shard. A budget
 # of 80 characters prints only the best ranked, the 63 characters of the
-# gulls, and keeps the two of every shard in run files
+# gulls, and keeps the two of every shard in run files, the ones not printed
+# also in pages
 rport=${RANKER_PORT:-18132}
 python3 "$here/fixtures/ranker.py" "$rport" &
 rpid=$!
@@ -110,8 +111,31 @@ named=$(grep -c '^book:tiny/tiny-book@[0-9]*#[0-9]*: ' "$run/book:tiny_tiny-book
 [ "$named" = $((2 * shards)) ] || fail "the run file holds $named paragraphs, not two of each of $shards shards"
 grep -q 'The Tiny Book' "$run/book:tiny_tiny-book.md" || fail "the run file lacks a paragraph that was not printed"
 
+# the next best are in pages after the printed one: no page repeats what was
+# printed, and the pages and the printed paragraph are all that was named
+ls "$run"/page-*.md > /dev/null 2>&1 || fail "no page file under $run: $(ls "$run")"
+[ -e "$run/page-1.md" ] && fail "the printed page was written as a file"
+grep -q 'seven gulls' "$run"/page-*.md && fail "a page repeats the printed paragraph"
+paged=$(cat "$run"/page-*.md | grep -c '^book:tiny/tiny-book@[0-9]*#[0-9]*: ')
+[ "$paged" = $((named - 1)) ] || fail "the pages hold $paged paragraphs, not the $((named - 1)) named and not printed"
+page=$(sed -n '1s/ next-best .*$//p' "$run/INDEX.md")
+[ -n "$page" ] && [ -f "$run/$page" ] || fail "INDEX.md does not start with a page of the run: $(cat "$run/INDEX.md")"
+
+# show prints a run file, by its path under the home, for the command and
+# the tool alike; a path that climbs out of the run files names no run file
+name=$(basename "$run")
+grep -q "episteme show runs/$name/<file>" "$work/out.txt" || fail "the run's line does not say how to show a file: $(cat "$work/out.txt")"
+"$bin" show "runs/$name/$page" > "$work/page.txt" 2> "$work/err.txt" || fail "show of a page: $(cat "$work/err.txt")"
+cmp -s "$work/page.txt" "$run/$page" || fail "show of a page is not the page file"
+out=$(call show "{\"id\": \"runs/$name/INDEX.md\"}")
+case "$out" in "False	$page next-best "*) ;; *) fail "the tool's show of INDEX.md: $out" ;; esac
+out=$(call show "{\"id\": \"runs/$name/nope.md\"}")
+[ "$out" = "True	no run file runs/$name/nope.md" ] || fail "show of a missing run file: $out"
+out=$(call show '{"id": "runs/../config.json"}')
+[ "$out" = "True	no record runs/../config.json" ] || fail "show of a path out of the run files: $out"
+
 out=$(call ask '{"question": "what", "filter": "book:tiny/"}')
-case "$out" in "False	### "*"seven gulls"*" all of it is in "*"INDEX.md lists them)"*"book:tiny_tiny-book.md book:tiny/tiny-book "*) ;; *) fail "the tool's ask of the ranking reader: $out" ;; esac
+case "$out" in "False	### "*"seven gulls"*" all of it is in "*"INDEX.md lists them)"*"episteme show runs/"*" next-best "*"book:tiny_tiny-book.md book:tiny/tiny-book "*) ;; *) fail "the tool's ask of the ranking reader: $out" ;; esac
 
 # a budget that fits all of them prints them and writes no run files
 runs=$(ls "$EPISTEME_HOME/runs" | wc -l)

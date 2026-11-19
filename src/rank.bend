@@ -1,7 +1,8 @@
 # episteme/src/rank: which of the labels a run's readers named are printed.
 # A reader that ranked the run gives each label its rank, and `ask` prints
 # the best ranked that fit the budget and keeps them all in run files
-# (laws/BestRankedArePrinted.bend). Pure: no IO.
+# (laws/BestRankedArePrinted.bend), the next best laid out in pages after the
+# printed one (laws/NextBestAreInPages.bend). Pure: no IO.
 import Base
 import ./para.bend as P
 import ./shard.bend as S
@@ -189,3 +190,122 @@ def Rank.narrow(rs: List<&2, Rd.Read>, +items: List<&2, Item>, +budget: U32, +pe
       []
     case Con{rd, rest}:
       Rank.narrow.one(rd, items, budget, per) <> Rank.narrow(rest, items, budget, per)
+
+# --- pages ---
+
+# the characters of one budget of budget tokens at per / 100 characters a
+# token
+def Rank.cap(budget: U32, per: U32) -> Nat:
+  Nat.div(Nat.mul(U32.to_nat(budget), U32.to_nat(per)), 100n)
+
+# the characters of k budgets of cap characters
+def Rank.caps(k: Nat, +cap: Nat) -> Nat:
+  match k:
+    case 0n:
+      0n
+    case 1n+j:
+      Nat.add(Rank.caps(j, cap), cap)
+
+# whether a label of rank r is within the first k pages: the items ranked
+# at or ahead of it fit k budgets
+def Rank.within(items: List<&2, Item>, k: Nat, budget: U32, per: U32, r: Nat) -> Bool:
+  Nat.is_le(Rank.cost(items, r), Rank.caps(k, Rank.cap(budget, per)))
+
+# whether a label of rank r is on a page before page j + 1: within the
+# first j pages, and never before page 1
+def Rank.ahead(items: List<&2, Item>, j: Nat, budget: U32, per: U32, r: Nat) -> Bool:
+  match j:
+    case 0n:
+      False{}
+    case 1n+i:
+      Rank.within(items, 1n+i, budget, per, r)
+
+# whether a label of rank r is on page k: within the first k pages and on
+# none before it; pages count from 1
+def Rank.on(+items: List<&2, Item>, k: Nat, +budget: U32, +per: U32, +r: Nat) -> Bool:
+  match k:
+    case 0n:
+      False{}
+    case 1n++j:
+      Bool.and(Bool.not(Rank.ahead(items, j, budget, per, r)),
+        Rank.within(items, 1n+j, budget, per, r))
+
+# whether labels are past page k: all the items do not fit k budgets
+def Rank.past(items: List<&2, Item>, k: Nat, budget: U32, per: U32) -> Bool:
+  Nat.is_gt(Rank.total(items), Rank.caps(k, Rank.cap(budget, per)))
+
+# the labels of ls whose rank is on page k, in order, beside their ranks
+def Rank.page.keep(
+  ls: List<&2, String>,
+  +rks: List<&2, U32>,
+  +items: List<&2, Item>,
+  +k: Nat,
+  +budget: U32,
+  +per: U32
+) -> List<&2, String> & List<&2, U32>:
+  match ls:
+    case Nil{}:
+      ([], [])
+    case Con{l, rest}:
+      Rank.keep.if(Rank.on(items, k, budget, per, U32.to_nat(Rank.head(rks))), l,
+        Rank.head(rks), Rank.page.keep(rest, Rank.tail(rks), items, k, budget, per))
+
+# a read with only its labels on page k and their ranks
+def Rank.page.one(+rd: Rd.Read, items: List<&2, Item>, k: Nat, budget: U32, per: U32) -> Rd.Read:
+  Rank.narrow.put(rd, Rank.page.keep(Rank.named(rd), Rank.ranks(rd), items, k, budget, per))
+
+# the reads with only their labels on page k
+def Rank.page(
+  rs: List<&2, Rd.Read>,
+  +items: List<&2, Item>,
+  +k: Nat,
+  +budget: U32,
+  +per: U32
+) -> List<&2, Rd.Read>:
+  match rs:
+    case Nil{}:
+      []
+    case Con{rd, rest}:
+      Rank.page.one(rd, items, k, budget, per) <> Rank.page(rest, items, k, budget, per)
+
+# page ahead of the pages after it when labels are past the page before
+# it, else none
+def Rank.rest.if(
+  more: Bool,
+  page: Unit -> List<&2, Rd.Read>,
+  later: Unit -> List<&2, List<&2, Rd.Read>>
+) -> List<&2, List<&2, Rd.Read>>:
+  match more:
+    case False{}:
+      []
+    case True{}:
+      page(Unit{}) <> later(Unit{})
+
+# the reads of page j + 1 and of each page after it, while labels are past
+# the page before it, at most fuel pages
+def Rank.rest.go(
+  fuel: Nat,
+  +rs: List<&2, Rd.Read>,
+  +items: List<&2, Item>,
+  +j: Nat,
+  +budget: U32,
+  +per: U32
+) -> List<&2, List<&2, Rd.Read>>:
+  match fuel:
+    case 0n:
+      []
+    case 1n+f:
+      Rank.rest.if(Rank.past(items, j, budget, per),
+        _u => Rank.page(rs, items, 1n+j, budget, per),
+        _u => Rank.rest.go(f, rs, items, 1n+j, budget, per))
+
+# the pages after the first: the reads of page 2, of page 3, ... in order,
+# each page's while labels are past the page before it, at most fuel pages
+def Rank.rest(
+  rs: List<&2, Rd.Read>,
+  items: List<&2, Item>,
+  fuel: Nat,
+  budget: U32,
+  per: U32
+) -> List<&2, List<&2, Rd.Read>>:
+  Rank.rest.go(fuel, rs, items, 1n, budget, per)

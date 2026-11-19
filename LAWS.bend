@@ -77,6 +77,7 @@ import ./laws/MedianAndMax.bend as MedianAndMax
 import ./laws/MedianAndMaxOfTimes.bend as MedianAndMaxOfTimes
 import ./laws/MergeJoinsRecordAcrossShards.bend as MergeJoinsRecordAcrossShards
 import ./laws/MergeOrdersByTime.bend as MergeOrdersByTime
+import ./laws/NextBestAreInPages.bend as NextBestAreInPages
 import ./laws/NoAuthorChangesNothing.bend as NoAuthorChangesNothing
 import ./laws/Non200Fails.bend as Non200Fails
 import ./laws/NonJsonReplyFails.bend as NonJsonReplyFails
@@ -121,6 +122,7 @@ import ./laws/ShardSourcesSorted.bend as ShardSourcesSorted
 import ./laws/ShardsGiveBackRecords.bend as ShardsGiveBackRecords
 import ./laws/ShowFindsRecordAndParagraphs.bend as ShowFindsRecordAndParagraphs
 import ./laws/ShowReadsOneSource.bend as ShowReadsOneSource
+import ./laws/ShowReadsRunFiles.bend as ShowReadsRunFiles
 import ./laws/ShowRunsCommandOutput.bend as ShowRunsCommandOutput
 import ./laws/ShowWantsIdAndParagraph.bend as ShowWantsIdAndParagraph
 import ./laws/SinceDateIsMidnight.bend as SinceDateIsMidnight

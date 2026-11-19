@@ -1,7 +1,7 @@
 # episteme/src/cli: the pure parts of the command line: its spec and
 # version, the counts `episteme sources` prints, which record and paragraphs
-# `episteme show` wants, a command's output as a show, and the input schemas
-# of the tools `episteme serve` serves.
+# or which run file `episteme show` wants, a command's output as a show, and
+# the input schemas of the tools `episteme serve` serves.
 # Pure: no IO.
 import Base
 import ./para.bend as P
@@ -183,6 +183,35 @@ def Cli.cut.last(+str: String, +sep: Char) -> Maybe<&2, Cut>:
 def Cli.want(+arg: String) -> Want:
   Cli.want.cut(Cli.cut.last(arg, '#'), arg)
 
+# True when the text starts with "."
+def Cli.dot(str: String) -> Bool:
+  match str:
+    case SNil{}:
+      False{}
+    case SCon{chr, _rest}:
+      Char.is_eq(chr, '.')
+
+# True when the text holds ".."
+def Cli.dots(str: String) -> Bool:
+  match str:
+    case SNil{}:
+      False{}
+    case SCon{chr, +rest}:
+      Bool.or(Bool.and(Char.is_eq(chr, '.'), Cli.dot(rest)), Cli.dots(rest))
+
+# the argument when ok, else none
+def Cli.run.if(ok: Bool, arg: String) -> Maybe<&2, String>:
+  match ok:
+    case True{}:
+      Some{arg}
+    case False{}:
+      None{}
+
+# the run file `episteme show <arg>` names, as its path under the home: the
+# argument itself when it starts with "runs/" and holds no "..", else none
+def Cli.run(+arg: String) -> Maybe<&2, String>:
+  Cli.run.if(Bool.and(String.starts_with(arg, "runs/"), Bool.not(Cli.dots(arg))), arg)
+
 # rec when it is the one, else what comes after
 def Cli.find.if(hit: Bool, rec: R.Record, after: Maybe<&2, R.Record>) -> Maybe<&2, R.Record>:
   match hit:
@@ -280,8 +309,8 @@ def Cli.spec() -> Shake.Cli:
   Shake.app("episteme", "Primary-source Q&A over raw records.", Some{Cli.version()}, [],
     [Cli.spec.ingest(),
      Shake.sub("sources", "List each source with its records, paragraphs and shards.", [], []),
-     Shake.sub("show", "Print a record, or one paragraph of it.",
-       [Shake.pos("id", "<record id> or <record id>#<n>", True{}, None{}, [])], []),
+     Shake.sub("show", "Print a record, one paragraph of it, or a run file.",
+       [Shake.pos("id", "<record id>, <record id>#<n> or runs/<run>/<file>", True{}, None{}, [])], []),
      Shake.sub("serve", "Serve ask, show and sources as MCP tools over streamable HTTP at /mcp.",
        [Shake.opt("host", None{}, Some{"host"}, "The address to bind", False{}, Some{"127.0.0.1"}, []),
         Shake.opt("port", None{}, Some{"port"}, "The port to bind", False{}, Some{"18113"}, [])], []),
