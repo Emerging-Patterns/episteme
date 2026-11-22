@@ -1,6 +1,6 @@
 """episteme's frozen shards, read from $EPISTEME_HOME the way episteme
 writes them, and rendered exactly as src/shard.bend Shard.render does."""
-import glob, json, os
+import collections, glob, json, os
 
 HOME = os.environ.get("EPISTEME_HOME") or os.path.expanduser("~/.local/share/episteme")
 
@@ -43,11 +43,20 @@ def read(path):
     return render(d.get("shard", d), path)  # tail.json wraps the open shard
 
 
+KEPT = int(os.environ.get("SHARDS_MAX", "2048"))
+
+
 class Store:
-    """the shards of each source, found by the source each directory holds"""
+    """the shards of each source, found by the source each directory holds.
+    The KEPT shards read last are kept as read while their files stay as
+    they were (size and time of change): a source is asked about again and
+    again, and reading its files each time was a quarter of a second of a
+    question over seven hundred shards. A caller may add to a shard it is
+    given what it works out of it, and changes nothing that is there"""
 
     def __init__(self):
         self.dirs = None
+        self.kept = collections.OrderedDict()  # path -> ((size, time of change), the shard as read)
 
     def index(self):
         self.dirs = {}
@@ -67,8 +76,17 @@ class Store:
         if d is None:
             return None
         for name in ("%08d.json" % n, "tail.json"):
-            if os.path.exists(d + name):
-                return read(d + name)
+            try:
+                st = os.stat(d + name)
+            except OSError:
+                continue
+            at = (st.st_size, st.st_mtime_ns)
+            if self.kept.get(d + name, (None,))[0] != at:
+                self.kept[d + name] = (at, read(d + name))
+                while len(self.kept) > KEPT:
+                    self.kept.popitem(last=False)
+            self.kept.move_to_end(d + name)
+            return self.kept[d + name][1]
         return None
 
 

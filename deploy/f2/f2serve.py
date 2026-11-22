@@ -96,21 +96,38 @@ and an empty file counts as a miss.
 A run scores the shards whose state is on the GPU first, then those in RAM,
 then the rest; a reader thread stages the states the GPU lacks up to AHEAD
 ahead (read from disk if RAM lacks them, laid in a pinned slab and sent to
-the GPU on its own stream) while the GPU scores, BATCH shards to a tail pass (model.scores_batch); eviction takes the least
-recently used state the run does not read later. The GPU lock is held for
-one batch at a time, so a second question's batches come between a long
-run's (a first question over a large source prefills for minutes) and
-neither waits for the other to end; each run still scores every shard it
-names. A run bigger than the
+the GPU on its own stream) while the GPU scores; eviction takes the least
+recently used state no run being scored reads later. A run bigger than the
 tiers so hits what they hold, where a fixed order under plain LRU evicts
 each state just before it is needed and never hits. When a state in RAM
-is needed and the GPU holds only states this run has read, it is scored
-from a copy that is not kept: promoting it would push one of the run's own
-states back to RAM, and the next question would bring that one up again.
-RAM keeps the host copy
+is needed and the GPU holds only states the runs being scored have read, it
+is scored from a copy that is not kept: promoting it would push one of
+their own states back to RAM, and the next question would bring that one up
+again. RAM keeps the host copy
 of a state it hands to the GPU, and of one read from disk while it has
 room; it evicts those copies first, and a state leaving the GPU with a host
 copy is dropped, not copied back.
+
+The scoring is done in passes (model.tail), the GPU lock held for one pass
+at a time: up to BATCH shards, each scored for several questions at once.
+A pass is led by one run, for its next shards, and takes with it the other
+runs that wait for the same shards, so questions asked together of one
+source (a caller that sends eight at once) share each state's reading and
+unpacking and are scored in the same passes, a shard's keys and values held
+once for all of them; a run of another source leads its own passes between
+(a first question over a large source prefills for minutes, and neither
+waits for the other to end). Each run still gets a score for every shard
+it names, as if it had scored them alone. A pass holds at most PASS tokens
+of questions' tails over its shards and questions together (the memory a
+pass takes grows with them), so the more questions wait, the fewer shards a
+pass takes.
+
+What a question needs of its shards that does not depend on the question is
+kept from one question to the next: the shards as read from the store
+(SHARDS_MAX of them, each while its file stays as it was), each shard's words
+with the paragraphs that hold them (TERMS_MAX shards; BM25 visits only the
+paragraphs that hold a word of the question), and the paragraphs of the
+LOTS sets of shards asked about last.
 
 Host copies are plain pageable memory, never pinned (only the SLABS slabs
 a state passes through on its way to the GPU are): PyTorch's caching
@@ -137,7 +154,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SCORES (65536), BATCH (8), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
 """
 import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
@@ -173,6 +190,8 @@ SLABS = int(os.environ.get("SLABS", "12"))
 SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
+PASS = int(os.environ.get("PASS", "768"))
+LOTS_MAX = int(os.environ.get("LOTS", "4"))
 SCORES_MAX = int(os.environ.get("SCORES", "65536"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
@@ -184,8 +203,8 @@ STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
 SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.pt"
 WARM = int(os.environ.get("WARM", "1"))
 CHARS_PER_TOKEN = 2.55
-GPU = threading.Lock()  # the model and the state tiers: held for one batch of shards at a time
-META = threading.RLock()  # TERMS, SCORES and RUNS
+GPU = threading.Lock()  # the model, the state tiers, ASKING and STAGED: held for one pass at a time
+META = threading.RLock()  # TERMS, LOTS, SCORES, RUNS and the store
 WANT = [0]  # runs waiting for or holding the GPU lock
 BUSY = [0]  # runs being scored
 
@@ -293,6 +312,19 @@ def repeats(a, b):
 
 
 key = names.key
+
+
+def key_of(sh):
+    """a shard's key, worked out once for a shard the store keeps read"""
+    return sh.get("key") or sh.setdefault("key", key(sh["text"]))
+
+
+def roots(sh):
+    """the square roots of a shard's paragraphs' lengths in characters, at
+    least 1: what a paragraph's attention score is taken over"""
+    if "roots" not in sh:
+        sh["roots"] = torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()
+    return sh["roots"]
 
 
 def parse(text):
@@ -540,22 +572,25 @@ class States:
             return na
         rnd = random.Random(k)
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
-        wn = NULL * torch.stack(model.scores_each(state, qs)).mean(0)
+        wn = NULL * torch.stack(model.tail([state], qs)[0]).mean(0)
         write(wn, path)
         return wn
 
-    def own(self, k, size, keep, run):
-        """whether putting k on the GPU would evict a state this run has
-        read: the GPU then holds only the run's own states, and k is scored
-        from a copy that is not kept, the tiers left as they are"""
-        return (run is not None and bool(self.gpu) and self.gpu_b + size > CACHE_BYTES
-                and self.used.get(self.victim(self.gpu, keep | {k})) == run)
+    def own(self, k, size, keep, among):
+        """whether putting k on the GPU would evict a state one of the runs
+        being scored (among, their numbers) has read: the GPU then holds
+        only those runs' own states, and k is scored from a copy that is not
+        kept, the tiers left as they are"""
+        return (bool(among) and bool(self.gpu) and self.gpu_b + size > CACHE_BYTES
+                and self.used.get(self.victim(self.gpu, keep | {k})) in among)
 
-    def get(self, k, shard, keep=frozenset(), loading=None, run=None, pool=None):
+    def get(self, k, shard, keep=frozenset(), loading=None, run=None, pool=None, among=None):
         """k's state and null; eviction spares the keys in keep (those the
-        run reads later) while any other state is resident. loading is a
-        prefetch of k from disk, if one was started; run numbers the run
-        that asks"""
+        runs being scored read later) while any other state is resident.
+        loading is a prefetch of k from disk, if one was started; run numbers
+        the run that asks, among the runs being scored with it (itself when
+        not said)"""
+        among = among if among is not None else frozenset() if run is None else frozenset((run,))
         if k in self.gpu:
             self.gpu.move_to_end(k)
             self.used[k] = run
@@ -570,7 +605,7 @@ class States:
             st = (model.unpack(staged[2][0] if staged is not None else copy_to(state, model.DEV)), null)
             size = nbytes(st[0][1])
             self.n["ram"] += 1
-            if self.own(k, size, keep, run):
+            if self.own(k, size, keep, among):
                 return st
         elif staged is not None or self.kept(k):
             state, null = staged[:2] if staged is not None else self.load(k)
@@ -588,7 +623,7 @@ class States:
             null = self.wordnull(k, there, null, pool)
             st, size, held = (there, null), nbytes(there[1]), nbytes(state[1])
             self.n["ram" if staged is not None and staged[3] else "disk"] += 1
-            if self.own(k, size, keep, run):
+            if self.own(k, size, keep, among):
                 if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
                     self.put_ram(k, (state, null), held, keep)
                 return st
@@ -609,22 +644,29 @@ class States:
         return st
 
 
-TERMS = collections.OrderedDict()  # shard key -> each paragraph's term counts
+TERMS = collections.OrderedDict()  # shard key -> its words' paragraphs and its paragraphs' lengths
 
 
 def terms(k, sh):
-    """the term counts of a shard's paragraphs, kept for the TERMS_MAX
-    shards used last: a question re-reads the shards the last one did"""
+    """a shard's words: for each word (stemmed) the paragraphs that hold it,
+    as (paragraph, from 0; how many times) pairs in paragraph order, and each
+    paragraph's length in words. Kept for the TERMS_MAX shards used last: a
+    question re-reads the shards the last one did"""
     with META:
         if k in TERMS:
             TERMS.move_to_end(k)
             return TERMS[k]
-    counts = [collections.Counter(words(sh["text"][x:y])) for x, y, _ in sh["spans"]]
+    held, lengths = {}, []
+    for i, (x, y, _) in enumerate(sh["spans"]):
+        counts = collections.Counter(words(sh["text"][x:y]))
+        lengths.append(sum(counts.values()))
+        for w, c in counts.items():
+            held.setdefault(w, []).append((i, c))
     with META:
-        TERMS[k] = counts
+        TERMS[k] = (held, lengths)
         while len(TERMS) > TERMS_MAX:
             TERMS.popitem(last=False)
-    return counts
+    return held, lengths
 
 
 SCORES = collections.OrderedDict()  # (shard key, question, whether the run had other shards) -> its paragraphs' attention scores
@@ -749,26 +791,57 @@ def stop(*_):
 
 
 SERIAL = itertools.count()  # a number for each run
+ASKING = {}  # run number -> a run whose shards are being scored
+STAGED = {}  # shard key -> its state on the way to the GPU (States.prefetch), for the pass that reads it first
+LOTS = collections.OrderedDict()  # shard keys -> the Lot of those shards, for the LOTS_MAX sets asked about last
+MAKING = threading.Lock()  # one Lot made at a time
+
+
+class Lot:
+    """what some shards give every question asked of them: their paragraphs
+    in order and what BM25 counts over them. A source is asked about again
+    and again, by several questions at once, and none of this depends on the
+    question"""
+
+    def __init__(self, shards, keys):
+        self.paras = []  # (shard index, label number, characters, start and end in the shard's text)
+        self.authors = []  # each paragraph's author, None for a shard known by its text alone
+        self.first, self.held, self.dl = [], [], []  # each shard's first paragraph, its words (terms); each paragraph's length in words
+        for si, (k, sh) in enumerate(zip(keys, shards)):
+            self.first.append(len(self.paras))
+            for li, (x, y, n) in enumerate(sh["spans"]):
+                self.paras.append((si, li + 1, n, x, y))
+            self.authors += sh.get("authors") or [None] * len(sh["spans"])
+            held, lengths = terms(k, sh)
+            self.held.append(held)
+            self.dl += lengths
+        self.avg = sum(self.dl) / max(len(self.dl), 1)
+        self.shard = torch.tensor([p[0] for p in self.paras], dtype=torch.long)
+        self.words = None
 
 
 class Run:
-    """the paragraphs of some shards, with BM25 statistics over them"""
+    """a question's shards: their paragraphs (a Lot), and where the scoring
+    of them stands"""
 
     def __init__(self, shards):
         self.shards = shards
-        self.serial, self.words = next(SERIAL), None
+        self.serial = next(SERIAL)
         self.came = collections.Counter()  # where attention found each shard's state: gpu, ram, disk, prefill; kept, when its scores were kept and no state was needed
-        self.keys = [key(s["text"]) for s in shards]
-        self.paras = []  # (shard index, label number, characters, text)
-        self.authors = []  # each paragraph's author, None for a shard known by its text alone
-        for si, sh in enumerate(shards):
-            for li, (x, y, n) in enumerate(sh["spans"]):
-                self.paras.append((si, li + 1, n, sh["text"][x:y]))
-            self.authors += sh.get("authors") or [None] * len(sh["spans"])
-        self.tfs = [tf for k, sh in zip(self.keys, shards) for tf in terms(k, sh)]
-        self.dl = [sum(tf.values()) for tf in self.tfs]
-        self.avg = sum(self.dl) / max(len(self.dl), 1)
-        self.df = collections.Counter(w for tf in self.tfs for w in tf)
+        self.keys = [key_of(s) for s in shards]
+        if len(shards) < 2:  # a shard read alone: made as it is asked, and no set of shards gives up its place for it
+            self.lot = Lot(shards, self.keys)
+            return
+        with MAKING:  # questions asked at once of one source make its Lot once
+            with META:
+                self.lot = LOTS.get(tuple(self.keys))
+            if self.lot is None:
+                self.lot = Lot(shards, self.keys)
+            with META:
+                LOTS[tuple(self.keys)] = self.lot
+                LOTS.move_to_end(tuple(self.keys))
+                while len(LOTS) > LOTS_MAX:
+                    LOTS.popitem(last=False)
 
     def pool(self):
         """words (letters only, 4 or more, lowercase) of up to eight of the
@@ -777,81 +850,134 @@ class Run:
         shard alone"""
         if len(self.shards) < 2:
             return []
-        if self.words is None:
+        if self.lot.words is None:
             step = max(1, len(self.shards) // 8)
-            self.words = [w.lower() for sh in self.shards[::step][:8] for w in re.findall(r"[A-Za-z]{4,}", sh["text"])]
-        return self.words
+            self.lot.words = [w.lower() for sh in self.shards[::step][:8] for w in re.findall(r"[A-Za-z]{4,}", sh["text"])]
+        return self.lot.words
 
     def bm25(self, q):
-        N, ws, out = len(self.paras), words(q), []
-        for tf, dl in zip(self.tfs, self.dl):
-            out.append(sum(math.log(1 + (N - self.df[w] + 0.5) / (self.df[w] + 0.5))
-                           * tf[w] * 2.2 / (tf[w] + 1.2 * (0.25 + 0.75 * dl / self.avg))
-                           for w in ws if w in tf))
+        """per paragraph. Only the paragraphs that hold a word of the
+        question are visited, through each shard's words"""
+        lot = self.lot
+        N, out, seen = len(lot.paras), [0.0] * len(lot.paras), {}
+        for w in words(q):  # in the question's order, a word it says twice counted twice
+            if w not in seen:
+                hits = [(first, held[w]) for first, held in zip(lot.first, lot.held) if w in held]
+                seen[w] = (sum(len(h) for _, h in hits), hits)
+            df, hits = seen[w]
+            if df:
+                idf = math.log(1 + (N - df + 0.5) / (df + 0.5))
+                for first, h in hits:
+                    for i, tf in h:
+                        out[first + i] += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * lot.dl[first + i] / lot.avg))
         return out
 
     def attention(self, q):
         """per paragraph, in shard order. A shard whose scores for q are
-        kept is not scored again. Of the rest, the shards whose state is on
-        the GPU are scored first, then those in RAM, then the others: a run
-        bigger than the tiers then hits what they hold, where a fixed order
-        under LRU evicts each state just before it is needed and never hits."""
+        kept is not scored again. The rest are scored in passes of a few
+        shards (turn), each led by one run and shared with the other runs
+        that wait for the same shards, so several questions asked at once of
+        one source cost its states' reading once and are scored together.
+        This run's shards whose state is on the GPU are taken first, then
+        those in RAM, then the others: a run bigger than the tiers then hits
+        what they hold, where a fixed order under LRU evicts each state just
+        before it is needed and never hits."""
         tier = lambda k: 0 if k in STATES.gpu else 1 if k in STATES.ram else 2
-        many, got = len(self.shards) > 1, {}
+        self.q, self.many, self.got = q, len(self.shards) > 1, {}
         with META:
             for i, k in enumerate(self.keys):
-                if (k, q, many) in SCORES:
-                    SCORES.move_to_end((k, q, many))
-                    got[i] = SCORES[(k, q, many)].tolist()
+                if (k, q, self.many) in SCORES:
+                    SCORES.move_to_end((k, q, self.many))
+                    self.got[i] = SCORES[(k, q, self.many)]
                     self.came["kept"] += 1
-        with Turn():
-            order = sorted((i for i in range(len(self.shards)) if i not in got), key=lambda i: tier(self.keys[i]))
-            cold = [k for k in dict.fromkeys(self.keys[i] for i in order)
-                    if tier(k) == 1 or tier(k) == 2 and STATES.kept(k)]
-        loading = {}  # the next AHEAD states the GPU lacks, staged for it while it works
-        left = collections.Counter(self.keys[i] for i in order)
-        for at in range(0, len(order), BATCH):
-            with Turn():  # one batch: another run's batch may come between two of this one's
-                batch = []
-                for i in order[at:at + BATCH]:
-                    while cold and len(loading) < AHEAD:
-                        k = cold.pop(0)
-                        loading[k] = STATES.prefetch(k)
-                    left[self.keys[i]] -= 1
-                    keep = frozenset([k for k, c in left.items() if c > 0] + [b[1] for b in batch])
-                    self.came[self.keys[i] in STATES.gpu and "gpu" or self.keys[i] in STATES.ram and "ram"
-                              or STATES.kept(self.keys[i]) and "disk" or "prefill"] += 1
-                    state, null = STATES.get(self.keys[i], self.shards[i], keep, loading.pop(self.keys[i], None), self.serial, self.pool)
-                    batch.append((i, self.keys[i], state, null))
-                for (i, _k, _state, null), v in zip(batch, model.scores_batch([b[2] for b in batch], q)):
-                    score = ((v - null) / torch.tensor([x[2] for x in self.shards[i]["spans"]], dtype=torch.float).clamp(min=1).sqrt()).float().cpu()
-                    got[i] = score.tolist()
+        self.need = {}  # shard key -> the places in the run of the shards with that text, not scored yet
+        for i, k in enumerate(self.keys):
+            if i not in self.got:
+                self.need.setdefault(k, []).append(i)
+        try:
+            with Turn():
+                self.tokens = model.tokens(q)
+                self.order = sorted(self.need, key=tier)
+                self.ahead = 0  # how far into order states have been staged
+                ASKING[self.serial] = self
+            while True:
+                with Turn():  # one pass: another run's pass may come between two of this one's
+                    if not self.need:
+                        break
+                    self.turn()
+        finally:
+            with Turn():
+                ASKING.pop(self.serial, None)
+                if not ASKING:
+                    STAGED.clear()
+        return torch.cat([self.got[i] for i in range(len(self.shards))]) if self.shards else torch.zeros(0)
+
+    def stage(self):
+        """up to AHEAD of this run's next states the GPU lacks, staged for
+        it by the reader thread while it works"""
+        while len(STAGED) < AHEAD and self.ahead < len(self.order):
+            k = self.order[self.ahead]
+            self.ahead += 1
+            if k in self.need and k not in STAGED and k not in STATES.gpu and (k in STATES.ram or STATES.kept(k)):
+                STAGED[k] = STATES.prefetch(k)
+
+    def turn(self):
+        """one pass under the GPU lock: this run's next shards, scored for
+        its question and for those of the other runs that wait for the same
+        shards (their questions about as long as this one's: a pass pads its
+        questions to the longest). The pass holds up to PASS tokens of
+        questions' tails over all its shards and questions, and at most
+        BATCH shards; each run it serves is given its scores as if it had
+        scored the shard itself"""
+        mine = (k for k in self.order if k in self.need)
+        first = next(mine)
+        runs, qs, T = [self], [self.q], self.tokens
+        for r in ASKING.values():
+            if (r is not self and first in r.need and r.tokens <= 1.5 * self.tokens + 8 and self.tokens <= 1.5 * r.tokens + 8
+                    and len(set(qs + [r.q])) * max(T, r.tokens) <= PASS):
+                runs.append(r)
+                T = max(T, r.tokens)
+                if r.q not in qs:
+                    qs.append(r.q)
+        room = max(1, min(BATCH, PASS // (len(qs) * T)))
+        keys = [first] + list(itertools.islice((k for k in mine if all(k in r.need for r in runs)), room - 1))
+        among = frozenset(ASKING)
+        later = frozenset().union(*(r.need.keys() for r in ASKING.values()))  # what a run being scored still reads, this pass's shards among them
+        batch = []
+        for k in keys:
+            self.stage()
+            where = k in STATES.gpu and "gpu" or k in STATES.ram and "ram" or STATES.kept(k) and "disk" or "prefill"
+            state, null = STATES.get(k, self.shards[self.need[k][0]], later, STAGED.pop(k, None), self.serial, self.pool, among)
+            batch.append((k, state, null, where))
+        self.stage()
+        for (k, _state, null, where), row in zip(batch, model.tail([b[1] for b in batch], qs)):
+            for r in runs:
+                for i in r.need.pop(k):
+                    score = ((row[qs.index(r.q)] - null) / roots(r.shards[i])).float()
+                    r.got[i] = score
+                    r.came[where] += 1
                     with META:
-                        SCORES[(self.keys[i], q, many)] = score
+                        SCORES[(k, r.q, r.many)] = score
                         CHANGED[0] = True
                         while len(SCORES) > SCORES_MAX:
                             SCORES.popitem(last=False)
-        return [x for i in range(len(self.shards)) for x in got[i]]
 
     def spread(self, fused):
         """each paragraph's fused score plus NEIGHBOUR times the better of
         its two neighbours' in the same shard: a paragraph next to a strong
         one is likelier to bear on the question than one that stands alone"""
-        out = list(fused)
-        for i, p in enumerate(self.paras):
-            near = [fused[j] for j in (i - 1, i + 1) if 0 <= j < len(fused) and self.paras[j][0] == p[0]]
-            if near:
-                out[i] += NEIGHBOUR * max(near)
-        return out
+        same = self.lot.shard[1:] == self.lot.shard[:-1]
+        near = torch.full_like(fused, -math.inf)
+        near[1:] = torch.where(same, fused[:-1], near[1:])
+        near[:-1] = torch.maximum(near[:-1], torch.where(same, fused[1:], near[:-1]))
+        return torch.where(near > -math.inf, fused + NEIGHBOUR * near, fused)
 
     def lift(self, fused):
         """each paragraph's score plus SHARD times the best in its shard: a
         shard that holds a strong paragraph is likelier to hold others that
         bear on the question"""
-        best = {}
-        for p, x in zip(self.paras, fused):
-            best[p[0]] = max(best.get(p[0], x), x)
-        return [x + SHARD * best[p[0]] for p, x in zip(self.paras, fused)]
+        best = torch.full((len(self.shards),), -math.inf, dtype=fused.dtype).scatter_reduce(0, self.lot.shard, fused, "amax")
+        return fused + SHARD * best[self.lot.shard]
 
     def pick(self, q, budget, who=()):
         """shard key -> (label number, rank) pairs in label order, the
@@ -862,31 +988,35 @@ class Run:
         reaches FLOOR"""
         def z(s):
             n = len(s)
-            mean = sum(s) / max(n, 1)
-            sd = math.sqrt(sum((x - mean) ** 2 for x in s) / (n - 1)) if n > 1 else 0.0
-            return [(x - mean) / (sd + 1e-9) for x in s]
+            mean = s.sum() / max(n, 1)
+            sd = math.sqrt(((s - mean) ** 2).sum() / (n - 1)) if n > 1 else 0.0
+            return (s - mean) / (sd + 1e-9)
         with META:
             BUSY[0] += 1
         try:
-            att = self.attention(q)
+            att = self.attention(q).double()
         finally:
             with META:
                 BUSY[0] -= 1
-        fused = [x + WEIGHT * y for x, y in zip(z(self.bm25(q)), z(att))]
+        lot, out = self.lot, {k: [] for k in self.keys}
+        if not lot.paras:
+            return out
+        fused = z(torch.tensor(self.bm25(q), dtype=torch.float64)) + WEIGHT * z(att)
         fused = self.lift(self.spread(fused))
-        out, used, taken = {k: [] for k in self.keys}, 0.0, []
-        for i in sorted(range(len(self.paras)), key=lambda i: -fused[i]):
-            if who and (self.authors[i] not in who or att[i] < FLOOR):
+        reach = (att >= FLOOR).tolist() if who else None
+        used, taken = 0.0, []
+        for i in torch.sort(-fused, stable=True).indices.tolist():
+            if who and (lot.authors[i] not in who or not reach[i]):
                 continue
-            _, label, chars, line = self.paras[i]
-            text = said(line[len(line) - chars:])  # the line less its label
+            si, label, chars, x, y = lot.paras[i]
+            text = said(self.shards[si]["text"][y - chars:y])  # the line less its label
             if any(repeats(text, t) for t in taken):
                 continue
             cost = chars / CHARS_PER_TOKEN
             if used + cost > budget and used > 0:
                 break
             taken.append(text)
-            out[self.keys[self.paras[i][0]]].append((label, len(taken)))
+            out[self.keys[si]].append((label, len(taken)))
             used += cost
         return {k: sorted(v) for k, v in out.items()}
 
@@ -907,7 +1037,7 @@ def notice(question, names, who=()):
     run = Run(shards)
     picks = run.pick(question, BUDGET, who) if shards else {}
     with META:
-        RUNS[question] = (picks, {nm: key(s["text"]) for nm, s in found})
+        RUNS[question] = (picks, {nm: key_of(s) for nm, s in found})
         while len(RUNS) > 64:
             RUNS.popitem(last=False)
     return len(shards), dict(run.came)
@@ -934,7 +1064,7 @@ def answer_named(source, n, question):
         if k in picks:
             return picks[k]
         sh = STORE.shard(source, n)
-    return None if sh is None else Run([sh]).pick(question, SHARD_BUDGET)[key(sh["text"])]
+    return None if sh is None else Run([sh]).pick(question, SHARD_BUDGET)[key_of(sh)]
 
 
 class Handler(BaseHTTPRequestHandler):
