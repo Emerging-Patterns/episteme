@@ -322,7 +322,8 @@ def serve.srv() -> Server.Server:
       Cl.Cli.schema([Cl.Cli.prop("question", "The question, in plain words, with the names and terms the record would use"),
           Cl.Cli.prop("filter", "Sources to read, comma-separated: exact sources and prefixes ending in /, e.g. <kind>:<name> or <kind>:<prefix>/. Required; a filter the store refuses as too wide is refused with what to name instead"),
           Cl.Cli.prop("since", "Read only records at or after this UTC date or time: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.mmmZ"),
-          Cl.Cli.prop("author", "Return only excerpts by these authors, comma-separated, each a record's author as an excerpt header shows it. Set it whenever the question is about what one speaker said: the user's name for the user's own typed lines")],
+          Cl.Cli.prop("author", "Return only excerpts by these authors, comma-separated, each a record's author as an excerpt header shows it. Set it whenever the question is about what one speaker said: the user's name for the user's own typed lines"),
+          Cl.Cli.prop("depth", "Sift the run no deeper than this many tokens of paragraphs, returned and in run files: give the print budget when only what is returned will be used. Leave it out when the next page may be wanted")],
         ["question", "filter"])),
     Mcp.tool("show",
       "Return a whole record, or one paragraph of it, and what its pointer points at (a file line or a git patch).",
@@ -344,9 +345,9 @@ def serve.ask(query: Result<&2, &2, String, T.Query>) -> IO(Rpc.Out):
   match query:
     case Fail{why}:
       IO.pure(Rpc.Out, Mcp.ok(Mcp.result.error(why)))
-    case Done{T.Query{filter, since, who, question}}:
+    case Done{T.Query{filter, since, who, question, depth}}:
       do IO<Rpc.Out>:
-        res : Result<&2, &2, String, String> <- A.Ask.answer(filter, since, who, question)
+        res : Result<&2, &2, String, String> <- A.Ask.answer(filter, since, who, question, depth)
         return serve.result(res)
 
 # a show as one text: its output, then what went to stderr
