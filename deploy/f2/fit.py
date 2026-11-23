@@ -10,7 +10,7 @@ and takes the second moment of its tokens' rows; asks each a dozen questions
 and takes the second moment of the queries that read its keys, each turned
 back by the position of a key it may read; takes the metric of the values
 from the model's own output projection; and writes the book for an average
-of bits (3) a channel to F2_BOOK ($EPISTEME_HOME/f2/book.pt), beside it
+of bits (3) a channel to F2_BOOK ($EPISTEME_HOME/f2/book.f2), beside it
 what it was made from (<book>.json). The questions are the store's own
 (the distinct questions of five words or more in telemetry.jsonl) when it
 has QUESTIONS (32) of them, else made of the shard's words in the shape of
@@ -24,10 +24,14 @@ changed, and every state is then coded again from a fresh prefill, so do
 not run it without need. F2_FIT_SKIP names source prefixes to leave out
 (comma-separated), for fitting a book apart from the sources it is tested
 on.
-"""
-import collections, glob, json, os, random, re, sys
 
-OUT = os.environ.get("F2_BOOK") or (os.environ.get("EPISTEME_HOME") or os.path.expanduser("~/.local/share/episteme")) + "/f2/book.pt"
+The reader runs without PyTorch; this, run once a store, does its sums
+with it (and joint.py): `uv sync --no-editable --group fit` adds it to the
+environment.
+"""
+import collections, ctypes, glob, json, os, random, re, struct, sys
+
+OUT = os.environ.get("F2_BOOK") or (os.environ.get("EPISTEME_HOME") or os.path.expanduser("~/.local/share/episteme")) + "/f2/book.f2"
 os.environ["F2_BOOK"] = os.devnull  # the model is loaded with no book: the rows are the model's own
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
@@ -80,11 +84,37 @@ def asked():
     return sorted(qs)
 
 
-SEEN = {}  # "q7", "q11" -> the queries of the last tail pass, as attention used them (model.tail)
+def weight(name):
+    """a tensor of the model's weights file by its name there, on the host
+    (bf16 or fp32, as it is kept): the safetensors layout, a header of JSON
+    that says each tensor's type, shape and place"""
+    with open(model.WEIGHTS, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        at = json.loads(f.read(n))[name]
+        f.seek(8 + n + at["data_offsets"][0])
+        raw = bytearray(f.read(at["data_offsets"][1] - at["data_offsets"][0]))
+    return torch.frombuffer(raw, dtype={"BF16": torch.bfloat16, "F32": torch.float32}[at["dtype"]]).view(at["shape"])
+
+
+def angles(n):
+    """the cosines and sines of the rotary angles at positions 0..n-1,
+    [n, 64] floats: 32 frequencies, 10^7 to the power -j/32, said twice"""
+    inv = 1.0 / (10000000.0 ** (torch.arange(0, 64, 2, dtype=torch.float) / 64))
+    at = torch.arange(n, device=dev)[:, None].float() * inv.to(dev)
+    return torch.cat((at.cos(), at.cos()), -1), torch.cat((at.sin(), at.sin()), -1)
+
+
+def kept(t):
+    """a host tensor's numbers as bytes"""
+    t = t.contiguous()
+    return ctypes.string_at(t.data_ptr(), t.numel() * t.element_size())
+
+
+SEEN = {}  # "q7", "q11" -> the queries of the last tail pass, as attention used them (model.tail), bf16 bytes
 READ = {"q7": {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)},  # query heads by the key-value head they read
         "q11": {h // 4: (i,) for i, h in enumerate(model.HEADS)}}  # of layer 11 a pass hands back the two heads read
 
-dev = model.DEV
+dev = "cuda"
 S = torch.zeros(joint.WIDE, joint.WIDE, dtype=torch.float64, device=dev)
 mean = torch.zeros(joint.WIDE, dtype=torch.float64, device=dev)
 Q = {(t, h): torch.zeros(256, 256, dtype=torch.float64, device=dev) for t in ("k7", "k11") for h in (0, 1)}
@@ -97,19 +127,21 @@ print("%d shards of %d corpora; %s" % (len(picked), len({c for c, _ in picked}),
 with torch.no_grad():
     for i, (corpus, path) in enumerate(picked):
         shard = store.read(path)
-        ids, cache, spans, tail = model.prefill(shard, raw=True)
-        mid, hi = cache.layers[model.MID], cache.layers[model.SCALED]
-        cos, sin = model.angles(len(ids))
-        x = joint.rows(model.floats(mid, "keys"), model.floats(mid, "values"), model.floats(hi, "keys"), cos, sin)[0].double()
+        blob = model.prefill(shard)  # packed with no book, as the model's run leaves it but for a byte a channel
+        ids = list(model.told(blob)[1])
+        k7, v7, k11 = (torch.frombuffer(b, dtype=torch.bfloat16).view(len(ids), 2, 256).transpose(0, 1).float().to(dev) for b in model.LIB.raw(ids))
+        cos, sin = angles(len(ids))
+        x = joint.rows(k7, v7, k11, cos, sin)[0].double()
         S += x.T @ x
         mean += x.sum(0)
         n += x.shape[0]
         words = re.findall(r"[A-Za-z]{4,}", shard["text"])
         qs = rnd.sample(real, 12) if real else ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(12)]
-        model.tail([(ids, model.pack(cache), spans, tail)], qs, SEEN)
+        model.tail([model.unpack(blob)], qs, SEEN)
         for name, tensor in (("q7", "k7"), ("q11", "k11")):
+            seen = torch.frombuffer(SEEN[name], dtype=torch.bfloat16).view(SEEN["tokens"], -1, 256).float().to(dev)  # [tokens, heads, 256]
             for h, heads in READ[name].items():
-                v = SEEN[name][:, list(heads)].reshape(-1, 256)
+                v = seen[:, list(heads)].reshape(-1, 256)
                 for _ in range(4):
                     at = torch.randint(0, len(ids), (v.shape[0],), device=dev)
                     back = joint.turn(v, cos[at], sin[at], -1.0).double()
@@ -118,7 +150,7 @@ with torch.no_grad():
             print(i, corpus, len(ids), flush=True)
 mean /= n
 cov = (S / n - torch.outer(mean, mean)).cpu()
-o = model.weight("model.language_model.layers.%d.self_attn.o_proj.weight" % model.MID).float().to(dev)  # [hidden, 8 heads x 256]
+o = weight("model.language_model.layers.%d.self_attn.o_proj.weight" % model.MID).float().to(dev)  # [hidden, 8 heads x 256]
 metrics = []
 for tensor, h in joint.BLOCKS:
     if tensor == "v7":
@@ -128,7 +160,10 @@ for tensor, h in joint.BLOCKS:
         metrics.append(Q[(tensor, h)].cpu())
 book = joint.make(cov, mean.cpu(), metrics, BITS, rank=int(os.environ.get("RANK", "8")), resid=int(os.environ.get("RESID", "4")))
 os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
-torch.save(book, OUT + ".tmp")
+k = len(book["widths"])  # names.book says the layout
+with open(OUT + ".tmp", "wb") as f:
+    f.write(b"F2BOOK1\n" + struct.pack("<3i2f", k, book["rank"], book["resid"], book["exact"], book["bits"]) + bytes(4))
+    f.write(kept(book["mean"]) + kept(book["fwd"]) + kept(book["inv"]) + kept(book["widths"]) + bytes(-k % 8) + kept(book["step"]))
 os.replace(OUT + ".tmp", OUT)
 json.dump({"bits": BITS, "tokens": n, "shards": [[c, os.path.basename(os.path.dirname(p)) + "/" + os.path.basename(p)] for c, p in picked],
            "questions": "asked" if real else "made", "skip": list(SKIP), "model": model.DIR}, open(OUT + ".json", "w"), indent=1)

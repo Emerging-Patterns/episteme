@@ -81,39 +81,40 @@ question asked meanwhile has the disk; a state whose word null is not kept
 yet is left for the run that makes it.
 
 A shard's state (model.prefill: the keys and values of the layers a
-question reads the shard in, and its linear-attention states, bf16)
-is kept on the GPU (CACHE_GB), then in host RAM (RAM_GB), then on disk
-under F2_STATES; a miss everywhere is a prefill.
+question reads the shard in, and its linear-attention states) is kept on
+the GPU unpacked (CACHE_GB), then in host RAM packed (RAM_GB), then on disk
+as those packed bytes under F2_STATES; a miss everywhere is a prefill.
+Packed, a state is one run of bytes (model.py), the same in its file, in
+RAM and on its way to the GPU; the unpacked states are f2pass's, on the
+device, and this process holds each by a handle.
 
 A first question over a large source is the reading of its states, so its
 time is their bytes. With a book (F2_BOOK, made once by fit.py from shards
 of the store) a state's keys and values are coded together at a few bits a
-channel (joint.py) and the state on disk and in RAM is that packed one,
-about a third of the bytes; it is unpacked as it reaches the GPU, where a
-state is held as int8 either way, so a question over states the GPU holds
-costs what it did. A state leaving the GPU is then dropped and not copied
-back to RAM (RAM keeps the packed copy it was unpacked from while it has
-room, and the disk has it). A state kept before the book was made is read
-once more, coded, scored as coded and written packed, so the states of a
-store move over as they are asked about; its nulls are made again. With no
-book nothing here differs from a reader that never had one.
+channel (joint.py), about a third of the bytes; it is unpacked as it
+reaches the GPU, where a kept state is held as int8 either way, so a
+question over states the GPU holds costs what it did. A state leaving the
+GPU is dropped (RAM keeps the packed one it was unpacked from while it has
+room, and the disk has it). A state's name on disk is its shard text's,
+the model's, the book's and this layout's (names.py): states kept under
+another book or by a reader that laid them out otherwise are not read, and
+their shards are read anew.
 A state is written beside its file, flushed to the disk and then renamed,
-and an empty file counts as a miss.
+and a file that is empty or not a state counts as a miss.
 A run scores the shards whose state is on the GPU first, then those in RAM,
 then the rest; a reader thread stages the states the GPU lacks up to AHEAD
-ahead (read from disk if RAM lacks them, laid in a pinned slab and sent to
-the GPU on its own stream) while the GPU scores; eviction takes the least
+ahead (read from disk if RAM lacks them, and sent to the GPU by f2pass
+through a pinned slab on a stream of its own) while the GPU scores; eviction takes the least
 recently used state no run being scored reads later. A run bigger than the
 tiers so hits what they hold, where a fixed order under plain LRU evicts
 each state just before it is needed and never hits. When a state in RAM
 is needed and the GPU holds only states the runs being scored have read, it
 is scored from a copy that is not kept: promoting it would push one of
-their own states back to RAM, and the next question would bring that one up
+their own states out, and the next question would bring that one up
 again. Such a copy is unpacked no further than the pass needs (with a book:
-to half precision, not on to the tier's int8). RAM keeps the host copy
+to half precision, not on to the tier's int8). RAM keeps the packed copy
 of a state it hands to the GPU, and of one read from disk while it has
-room; it evicts those copies first, and a state leaving the GPU with a host
-copy is dropped, not copied back.
+room; it evicts those copies first.
 
 The scoring is done in passes (model.tail), the GPU lock held for one pass
 at a time: up to BATCH shards, each scored for several questions at once.
@@ -137,24 +138,25 @@ paragraphs that hold a word of the question), and the paragraphs of the
 LOTS sets of shards asked about last.
 
 Host copies are plain pageable memory, never pinned (only the SLABS slabs
-a state passes through on its way to the GPU are): PyTorch's caching
-host allocator keeps every freed pinned block, so a pinned RAM tier grows
-far past RAM_GB. At most SAVES new states wait for the disk writer; a prefill
-past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
+of SLAB_MB a state passes through on its way to the GPU are, in f2pass).
+At most SAVES new states wait for the disk writer; a prefill past that
+waits for a slot, so the queue cannot hold states RAM_GB evicted.
 
 Setup: this directory is a uv project (pyproject.toml, uv.lock). With the
 CUDA 12 toolkit's bin first on PATH,
   UV_PROJECT_ENVIRONMENT=<venv> uv sync --no-editable
-makes the venv (PyTorch, which holds and packs the states, and the tokenizer)
-and builds into it f2pass, which runs the model: the reading of a new shard,
-the tail pass and the unpacking of states, in C++ and CUDA (native/,
-meson.build); run it again after a change under native/. The weights:
+makes the venv (the tokenizer's library and little else) and builds into it
+f2pass, which runs the model and holds, packs and unpacks the states, in
+C++ and CUDA (native/, meson.build); run it again after a change under
+native/. There is no PyTorch in it: fit.py alone uses it (--group fit). The
+weights:
   uvx --from huggingface_hub hf download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
 (of which the reader reads the safetensors file and tokenizer.json).
 Run: EPISTEME_HOME=... <venv>/bin/python f2serve.py, then point config.json's
 pool at http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 Once the store has shards, EPISTEME_HOME=... python fit.py (reader stopped,
-a few minutes) makes the book; start the reader again after it.
+a few minutes, in an environment made with --group fit) makes the book;
+start the reader again after it.
 No state is removed here: EPISTEME_HOME=... python prune.py removes those
 no shard of the store names any more (names.py says the names).
 MALLOC_MMAP_THRESHOLD_=1048576 returns freed host states to the OS, and
@@ -169,9 +171,9 @@ the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2).
 """
-import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, pickle, random, re, signal, sys, threading, time, traceback, types, warnings
+import array, collections, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, struct, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -181,9 +183,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # stock allocator keeps each size it has handed out and the card fills with
 # blocks nothing uses.
 # Expandable segments hand a freed block's pages to the next size.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-warnings.filterwarnings("ignore", message="Failed to initialize NumPy")  # PyTorch is used here without it
-import torch
+import f2pass
 import store
 import names
 import model
@@ -201,8 +201,6 @@ SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
 NULL = float(os.environ.get("NULL", "1.6"))
-SLABS = int(os.environ.get("SLABS", "12"))
-SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
 PASS = min(int(os.environ.get("PASS", "768")), model.TOKENS)
@@ -215,7 +213,7 @@ SHARD = float(os.environ.get("SHARD", "0.2"))
 REPEAT = float(os.environ.get("REPEAT", "0.98"))
 REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
 STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
-SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.pt"
+SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.f2"
 WARM = int(os.environ.get("WARM", "1"))
 CHARS_PER_TOKEN = 2.55
 GPU = threading.Lock()  # the model, the state tiers, ASKING and STAGED: held for one pass at a time
@@ -338,7 +336,7 @@ def roots(sh):
     """the square roots of a shard's paragraphs' lengths in characters, at
     least 1: what a paragraph's attention score is taken over"""
     if "roots" not in sh:
-        sh["roots"] = torch.tensor([x[2] for x in sh["spans"]], dtype=torch.float).clamp(min=1).sqrt()
+        sh["roots"] = array.array("f", [math.sqrt(max(x[2], 1)) for x in sh["spans"]])
     return sh["roots"]
 
 
@@ -358,65 +356,18 @@ def parse(text):
     return {"path": None, "text": text, "spans": spans}
 
 
-def tensors(cache):
-    """every tensor of a cache, with a setter that replaces it: attention
-    layers hold theirs as attributes, linear-attention layers in dicts"""
-    for layer in cache.layers:
-        for name, v in list(vars(layer).items()):
-            if torch.is_tensor(v):
-                yield v, lambda t, layer=layer, name=name: setattr(layer, name, t)
-            elif isinstance(v, dict):
-                for i, t in list(v.items()):
-                    if torch.is_tensor(t):
-                        yield t, lambda t2, d=v, i=i: d.__setitem__(i, t2)
-
-
-def move(state, dev):
-    """a state's cache tensors moved to dev, in place; to the host it is a
-    blocking copy into pageable memory (a non-blocking one would be pinned)"""
-    for v, put in tensors(state[1]):
-        put(v.to(dev, non_blocking=dev != "cpu"))
-    return state
-
-
-def copy_to(state, dev):
-    """a copy of a state with its cache tensors on dev, the state itself
-    untouched: the cache and its layers are shallow copies holding the new
-    tensors (no tail pass writes into a kept state's cache)"""
-    c = copy.copy(state[1])
-    c.layers = [copy.copy(layer) for layer in state[1].layers]
-    for layer in c.layers:
-        for name, v in list(vars(layer).items()):
-            if torch.is_tensor(v):
-                setattr(layer, name, v.to(dev))
-            elif isinstance(v, dict):
-                setattr(layer, name, {i: t.to(dev) if torch.is_tensor(t) else t for i, t in v.items()})
-    return (state[0], c) + tuple(state[2:])
-
-
-def host_copy(state):
-    """a copy of a state on the host, the state itself untouched: the cache
-    deep-copied with each tensor swapped for a pageable host copy"""
-    memo = {id(v): v.to("cpu") for v, _ in tensors(state[1])}
-    return (state[0], copy.deepcopy(state[1], memo)) + tuple(state[2:])
-
-
 def rss():
     """this process's resident and shared (pinned shows as shared) GB"""
     f = dict(l.split(":", 1) for l in open("/proc/self/status") if ":" in l)
     return {k: int(f[k].split()[0]) / 1e6 for k in ("VmRSS", "RssShmem")}
 
 
-def nbytes(cache):
-    return sum(v.numel() * v.element_size() for v, _ in tensors(cache))
-
-
-def write(obj, path):
-    """obj saved at path whole or not at all: written beside it, flushed to
-    the disk, then renamed. Renamed without the flush, a file whose blocks
-    had not reached the disk when the host went down comes back empty"""
+def write(data, path):
+    """bytes saved at path whole or not at all: written beside it, flushed
+    to the disk, then renamed. Renamed without the flush, a file whose
+    blocks had not reached the disk when the host went down comes back empty"""
     with open(path + ".tmp", "wb") as f:
-        torch.save(obj, f)
+        f.write(data)
         f.flush()
         os.fsync(f.fileno())
     os.replace(path + ".tmp", path)
@@ -430,28 +381,27 @@ def kept(path):
         return False
 
 
-class Unpickler(pickle.Unpickler):
-    """a state file's objects: a cache and its layers kept by a reader that
-    ran the model through the transformers library are of that library's
-    classes, and are read as Bags, which is all this reader makes of them"""
-
-    def find_class(self, module, name):
-        return store.Bag if module.split(".")[0] == "transformers" else super().find_class(module, name)
+NULLS = b"F2NULL1\n"  # a null vector's file opens with it: then its floats
 
 
-PICKLE = types.ModuleType("f2pickle")  # pickle, but for the class its loader reads with
-vars(PICKLE).update(vars(pickle), Unpickler=Unpickler)
+def floats(path):
+    """the null vector kept at path"""
+    raw = open(path, "rb").read()
+    if raw[:8] != NULLS:
+        raise ValueError("%s is not a null vector's file" % path)
+    return array.array("f", raw[8:])
 
 
 class States:
-    """shard states and their "N/A" scores: GPU, then host RAM, then disk"""
+    """shard states and the scores taken from theirs (their nulls): on the
+    GPU unpacked (model.State), then in host RAM packed (bytes), then on
+    disk as those bytes"""
 
     def __init__(self):
         self.gpu, self.ram = collections.OrderedDict(), collections.OrderedDict()
         self.gpu_b = self.ram_b = 0
         self.n = collections.Counter()
         self.used = {}  # GPU key -> the run that read it last
-        self.slabs = self.stream = None  # the pinned slabs and the stream of lift, made at its first use
         os.makedirs(STATES_DIR, exist_ok=True)
         self.writer = ThreadPool(1)
         self.reader = ThreadPool(1)
@@ -461,28 +411,19 @@ class States:
         return names.state(k)
 
     @staticmethod
-    def plain_path(k):
-        """where k's state was kept before there was a book, or None when
-        there is none now"""
-        return names.plain(k)
-
-    @staticmethod
     def victim(tier, keep):
         """the least recently used key not in keep, else the least recently used"""
         return next((k for k in tier if k not in keep), next(iter(tier)))
 
     def put_gpu(self, k, st, size, keep=()):
-        """an evicted state with a host copy in RAM is dropped, with none it
-        is copied to RAM"""
+        """an evicted state is dropped: RAM has the packed one it was
+        unpacked from while it has room, and the disk has it"""
         self.gpu[k] = (st, size)
         self.gpu_b += size
         while self.gpu_b > CACHE_BYTES and len(self.gpu) > 1:
             k2 = self.victim(self.gpu, keep | {k})
-            (state, null), s2 = self.gpu.pop(k2)
+            self.gpu_b -= self.gpu.pop(k2)[1]
             self.used.pop(k2, None)
-            self.gpu_b -= s2
-            if RAM_BYTES > 0 and k2 not in self.ram and model.BOOK is None:  # with a book the GPU's copy is the unpacked one
-                self.put_ram(k2, (move(state, "cpu"), null), s2, keep)
 
     def put_ram(self, k, st, size, keep=()):
         """eviction takes host copies of states on the GPU first, then by
@@ -497,8 +438,10 @@ class States:
     def spare(self, k, st, size):
         """a host copy of a state read from disk kept in RAM, if RAM has the
         room once it gives up host copies of states the GPU holds: one kept
-        of a state going to the GPU makes its later eviction copy nothing,
+        of a state going to the GPU makes its later eviction cost nothing,
         and one of a state scored in passing saves its next read from disk"""
+        if k in self.ram:
+            return
         while self.ram_b + size > RAM_BYTES or tight():
             dup = next((x for x in self.ram if x in self.gpu), None)
             if dup is None:
@@ -508,9 +451,9 @@ class States:
             self.ram[k] = (st, size)
             self.ram_b += size
 
-    def save(self, k, cpu):
+    def save(self, k, blob):
         try:
-            write(cpu, self.path(k))
+            write(blob, self.path(k))
         finally:
             self.slots.release()
 
@@ -519,65 +462,22 @@ class States:
         return names.null(k)
 
     def kept(self, k):
-        """whether disk holds k's state, as kept now or as kept before
-        there was a book: an empty file is not one"""
-        return kept(self.path(k)) or kept(self.plain_path(k) or "")
+        """whether disk holds k's state: an empty file is not one"""
+        return kept(self.path(k))
 
     def load(self, k):
-        """k's state and its "N/A" score from disk; the one kept before
-        there was a book when there is no other"""
-        path = self.path(k)
-        return torch.load(path if kept(path) else self.plain_path(k), weights_only=False, map_location="cpu", pickle_module=PICKLE)
-
-    def lift(self, state):
-        """a copy of a state on the GPU and the event that says it has
-        arrived, made on the reader thread: its tensors are laid end to end
-        in a pinned slab and sent as one transfer on the thread's own
-        stream, so the transfer runs while the GPU scores other shards. The
-        slabs are a fixed pool (SLABS of SLAB_MB), taken in turn, each only
-        once its last transfer is done; a state too large for a slab is
-        copied the plain way"""
-        ts = [v for v, _ in tensors(state[1])]
-        sizes = [v.numel() * v.element_size() for v in ts]
-        offs, at = [], 0
-        for b in sizes:
-            offs.append(at)
-            at += (b + 7) // 8 * 8
-        if at > SLAB_BYTES or not torch.cuda.is_available():
-            return copy_to(state, model.DEV), None
-        if self.slabs is None:
-            self.slabs = collections.deque([torch.empty(SLAB_BYTES, dtype=torch.uint8).pin_memory(), None]
-                                           for _ in range(SLABS))
-            self.stream = torch.cuda.Stream()
-        slab = self.slabs[0]
-        self.slabs.rotate(-1)
-        if slab[1] is not None:
-            slab[1].synchronize()
-        for v, off, b in zip(ts, offs, sizes):
-            if b:
-                slab[0][off:off + b].copy_(v.contiguous().view(-1).view(torch.uint8))
-        with torch.cuda.stream(self.stream):
-            there = slab[0][:at].to(model.DEV, non_blocking=True)
-            slab[1] = torch.cuda.Event()
-            slab[1].record(self.stream)
-        views = iter(there[off:off + b].view(v.dtype).view(v.shape) for v, off, b in zip(ts, offs, sizes))
-        c = copy.copy(state[1])
-        c.layers = [copy.copy(layer) for layer in state[1].layers]
-        for layer in c.layers:
-            for name, v in list(vars(layer).items()):
-                if torch.is_tensor(v):
-                    setattr(layer, name, next(views))
-                elif isinstance(v, dict):
-                    setattr(layer, name, {i: next(views) if torch.is_tensor(t) else t for i, t in v.items()})
-        return (state[0], c) + tuple(state[2:]), slab[1]
+        """k's packed state and the "N/A" score kept in it, from disk"""
+        blob = open(self.path(k), "rb").read()
+        return blob, model.null(blob)
 
     def stage(self, k):
-        """k's state as the host holds it (from RAM, else read from disk),
-        its null, its copy on the GPU with the event of its arrival, and
-        whether RAM had it"""
+        """k's packed state as the host holds it (from RAM, else read from
+        disk), its null, its ticket on the way to the GPU (f2pass lays it in
+        a pinned slab and sends it on a stream of its own, so the transfer
+        runs while the GPU scores other shards), and whether RAM had it"""
         got = self.ram.get(k)
-        state, null = got[0] if got is not None else self.load(k)
-        return state, null, self.lift(state), got is not None
+        blob, null = got[0] if got is not None else self.load(k)
+        return blob, null, model.stage(blob), got is not None
 
     def prefetch(self, k):
         """k's state staged on the reader thread: read from disk if RAM
@@ -593,15 +493,19 @@ class States:
         if WORDNULLS <= 0:
             return na
         path = self.null_path(k)
-        if kept(path):
-            return torch.load(path, weights_only=True)
+        try:
+            if kept(path):
+                return floats(path)
+        except (OSError, ValueError):  # not a null vector's file: made again
+            pass
         words = pool() if pool is not None else []
         if len(words) < 64:
             return na
         rnd = random.Random(k)
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
-        wn = NULL * torch.stack(model.tail([state], qs)[0]).mean(0)
-        write(wn, path)
+        rows = model.tail([state], qs)[0]
+        wn = array.array("f", [NULL * sum(x) / len(rows) for x in zip(*rows)])
+        write(NULLS + wn.tobytes(), path)
         return wn
 
     def own(self, k, size, keep, among):
@@ -613,63 +517,53 @@ class States:
                 and self.used.get(self.victim(self.gpu, keep | {k})) in among)
 
     def get(self, k, shard, keep=frozenset(), loading=None, run=None, pool=None, among=None):
-        """k's state and null; eviction spares the keys in keep (those the
-        runs being scored read later) while any other state is resident.
-        loading is a prefetch of k from disk, if one was started; run numbers
-        the run that asks, among the runs being scored with it (itself when
-        not said)"""
+        """k's state on the GPU and its null; eviction spares the keys in
+        keep (those the runs being scored read later) while any other state
+        is resident. loading is a prefetch of k, if one was started; run
+        numbers the run that asks, among the runs being scored with it
+        (itself when not said)"""
         among = among if among is not None else frozenset() if run is None else frozenset((run,))
         if k in self.gpu:
             self.gpu.move_to_end(k)
             self.used[k] = run
             self.n["gpu"] += 1
             return self.gpu[k][0]
-        staged = loading.get() if loading is not None else None
-        if staged is not None and staged[2][1] is not None:
-            torch.cuda.current_stream().wait_event(staged[2][1])  # nothing here runs before the copy has arrived
-        if k in self.ram:
-            (state, null), _held = self.ram[k]
-            self.ram.move_to_end(k)
-            there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
-            size = model.unpacked(there[1])
-            self.n["ram"] += 1
-            if self.own(k, size, keep, among):
-                return model.unpack(there, kept=False), null
-            st = (model.unpack(there), null)
-        elif staged is not None or self.kept(k):
-            state, null = staged[:2] if staged is not None else self.load(k)
-            there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
-            if model.BOOK is not None and not model.joined(state[1]):
-                # kept before there was a book: coded now, scored as coded, and written packed
-                there = (there[0], model.pack(there[1])) + tuple(there[2:])
-                state = host_copy(there)
-                there = model.unpack(there)
-                null = model.scores(there, "N/A")
-                self.slots.acquire()
-                self.writer.apply_async(self.save, (k, (state, null)))
-                passing = False
+        try:  # a file that is not a state (cut short, another layout's) is a miss like an empty one: the shard is read anew
+            if loading is not None:
+                have = loading.get()
+            elif k in self.ram:
+                have = self.ram[k][0] + (None, True)
             else:
-                passing = self.own(k, model.unpacked(there[1]), keep, among)
-                there = model.unpack(there, kept=not passing)
-            null = self.wordnull(k, there, null, pool)
-            st, size, held = (there, null), nbytes(there[1]), nbytes(state[1])
-            self.n["ram" if staged is not None and staged[3] else "disk"] += 1
-            if passing or self.own(k, size, keep, among):
-                if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
-                    self.put_ram(k, (state, null), held, keep)
+                have = self.load(k) + (None, False) if self.kept(k) else None
+        except (OSError, ValueError):
+            have = None
+        if have is not None:
+            blob, null, ticket, had = have
+            if k in self.ram:
+                self.ram.move_to_end(k)
+            size = model.unpacked(blob)
+            passing = self.own(k, size, keep, among)
+            there = model.take(ticket, blob, kept=not passing) if ticket is not None else model.unpack(blob, kept=not passing)
+            if not had:  # from disk: the null the file holds is its "N/A" score
+                null = self.wordnull(k, there, null, pool)
+            self.n["ram" if had else "disk"] += 1
+            st = (there, null)
+            if passing:
+                if RAM_BYTES > 0 and k not in self.ram:  # into RAM as a state leaving the GPU would go: over what the run does not read later
+                    self.put_ram(k, (blob, null), len(blob), keep)
                 return st
-            self.spare(k, (state, null), held)
+            self.spare(k, (blob, null), len(blob))
         else:
-            state = model.prefill(shard)
-            there = model.unpack(state)
+            fresh = model.prefill(shard)
+            there = model.unpack(fresh)
             na = model.scores(there, "N/A")
-            st, size = (there, self.wordnull(k, there, na, pool)), nbytes(there[1])
+            model.null(fresh, na)
+            blob = bytes(fresh)
+            st, size = (there, self.wordnull(k, there, na, pool)), there.size
             self.n["prefill"] += 1
             self.slots.acquire()
-            host = host_copy(state)
-            self.writer.apply_async(self.save, (k, (host, na)))
-            if model.BOOK is not None:  # the GPU's copy will not come back to RAM, so RAM takes the packed one now
-                self.spare(k, (host, st[1]), nbytes(host[1]))
+            self.writer.apply_async(self.save, (k, blob))
+            self.spare(k, (blob, st[1]), len(blob))
         self.put_gpu(k, st, size, keep)
         self.used[k] = run
         return st
@@ -717,16 +611,29 @@ def made_by():
     return [model.VERSION, WORDNULLS, NULL, CODE, model.by()]
 
 
+KEPT = b"F2SCORE1"  # the kept scores' file opens with it
+
+
 def keep(path):
-    """the kept scores written at path, least recently used first: their
-    keys, their lengths and one tensor of them end to end"""
+    """the kept scores written at path, least recently used first: after
+    KEPT and a length, JSON of what made them, their keys and their
+    lengths, then the scores end to end as floats"""
     with KEEPING:
         with META:
             items, CHANGED[0] = list(SCORES.items()), False
         if items:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            write({"by": made_by(), "keys": [k for k, _ in items], "lens": [len(v) for _, v in items],
-                   "flat": torch.cat([v for _, v in items])}, path)
+            said = json.dumps({"by": made_by(), "keys": [k for k, _ in items], "lens": [len(v) for _, v in items]}).encode()
+            write(KEPT + struct.pack("<Q", len(said)) + said + b"".join(v.tobytes() for _, v in items), path)
+
+
+def kept_scores(path):
+    """what keep wrote at path: what it said, and the scores end to end"""
+    raw = open(path, "rb").read()
+    if raw[:8] != KEPT:
+        raise ValueError("not a file of kept scores")
+    n = struct.unpack_from("<Q", raw, 8)[0]
+    return json.loads(raw[16:16 + n]), array.array("f", raw[16 + n:])
 
 
 def recall(path):
@@ -736,12 +643,12 @@ def recall(path):
     if not kept(path):
         return 0
     try:
-        d = torch.load(path, weights_only=True)
+        d, flat = kept_scores(path)
         if d["by"] != made_by():
             return 0
         at, got = 0, []
         for k, n in zip(d["keys"], d["lens"]):
-            got.append((tuple(k), d["flat"][at:at + n].clone()))
+            got.append((tuple(k), flat[at:at + n]))
             at += n
     except Exception:
         return 0
@@ -759,7 +666,7 @@ def lately(path):
     if not kept(path):
         return []
     try:
-        keys = torch.load(path, weights_only=True)["keys"]
+        keys = kept_scores(path)[0]["keys"]
     except Exception:
         return []
     return list(dict.fromkeys(k[0] for k in reversed(keys)))
@@ -777,18 +684,18 @@ def rewarm(keys):
             time.sleep(0.05)
         wn = STATES.null_path(k)
         if k in STATES.ram or k in STATES.gpu or not kept(STATES.path(k)) or (WORDNULLS > 0 and not kept(wn)):
-            continue  # also a state kept before there was a book: the run that asks about it codes it
+            continue
         try:
-            state, na = STATES.load(k)
-            null = torch.load(wn, weights_only=True) if WORDNULLS > 0 else na
+            blob, na = STATES.load(k)
+            null = floats(wn) if WORDNULLS > 0 else na
         except Exception:
             continue
-        size = nbytes(state[1])
+        size = len(blob)
         with Turn():
             if STATES.ram_b + size > RAM_BYTES or tight():
                 break
             if k not in STATES.ram and k not in STATES.gpu:
-                STATES.ram[k] = ((state, null), size)
+                STATES.ram[k] = ((blob, null), size)
                 STATES.ram_b += size
                 n, size_all = n + 1, size_all + size
     return n, size_all
@@ -847,7 +754,7 @@ class Lot:
             self.held.append(held)
             self.dl += lengths
         self.avg = sum(self.dl) / max(len(self.dl), 1)
-        self.shard = torch.tensor([p[0] for p in self.paras], dtype=torch.long)
+        self.shard = f2pass.ints([p[0] for p in self.paras])
         self.words = None
 
 
@@ -940,7 +847,10 @@ class Run:
                 ASKING.pop(self.serial, None)
                 if not ASKING:
                     STAGED.clear()
-        return torch.cat([self.got[i] for i in range(len(self.shards))]) if self.shards else torch.zeros(0)
+        out = array.array("f")
+        for i in range(len(self.shards)):
+            out.extend(self.got[i])
+        return out
 
     def stage(self):
         """up to AHEAD of this run's next states the GPU lacks, staged for
@@ -980,7 +890,8 @@ class Run:
         for (k, _state, null, where), row in zip(batch, model.tail([b[1] for b in batch], qs)):
             for r in runs:
                 for i in r.need.pop(k):
-                    score = ((row[qs.index(r.q)] - null) / roots(r.shards[i])).float()
+                    less = array.array("f", [x - y for x, y in zip(row[qs.index(r.q)], null)])  # in single precision, step by step
+                    score = array.array("f", [x / y for x, y in zip(less, roots(r.shards[i]))])
                     r.got[i] = score
                     r.came[where] += 1
                     with META:
@@ -989,23 +900,6 @@ class Run:
                         while len(SCORES) > SCORES_MAX:
                             SCORES.popitem(last=False)
 
-    def spread(self, fused):
-        """each paragraph's fused score plus NEIGHBOUR times the better of
-        its two neighbours' in the same shard: a paragraph next to a strong
-        one is likelier to bear on the question than one that stands alone"""
-        same = self.lot.shard[1:] == self.lot.shard[:-1]
-        near = torch.full_like(fused, -math.inf)
-        near[1:] = torch.where(same, fused[:-1], near[1:])
-        near[:-1] = torch.maximum(near[:-1], torch.where(same, fused[1:], near[:-1]))
-        return torch.where(near > -math.inf, fused + NEIGHBOUR * near, fused)
-
-    def lift(self, fused):
-        """each paragraph's score plus SHARD times the best in its shard: a
-        shard that holds a strong paragraph is likelier to hold others that
-        bear on the question"""
-        best = torch.full((len(self.shards),), -math.inf, dtype=fused.dtype).scatter_reduce(0, self.lot.shard, fused, "amax")
-        return fused + SHARD * best[self.lot.shard]
-
     def pick(self, q, budget, who=()):
         """shard key -> (label number, rank) pairs in label order, the
         paragraphs taken best first until the budget, but for a paragraph
@@ -1013,26 +907,24 @@ class Run:
         taken, from 1; with authors named in who, only paragraphs by one of
         them are taken, and of those only the ones whose attention score
         reaches FLOOR"""
-        def z(s):
-            n = len(s)
-            mean = s.sum() / max(n, 1)
-            sd = math.sqrt(((s - mean) ** 2).sum() / (n - 1)) if n > 1 else 0.0
-            return (s - mean) / (sd + 1e-9)
         with META:
             BUSY[0] += 1
         try:
-            att = self.attention(q).double()
+            att = self.attention(q)
         finally:
             with META:
                 BUSY[0] -= 1
         lot, out = self.lot, {k: [] for k in self.keys}
         if not lot.paras:
             return out
-        fused = z(torch.tensor(self.bm25(q), dtype=torch.float64)) + WEIGHT * z(att)
-        fused = self.lift(self.spread(fused))
-        reach = (att >= FLOOR).tolist() if who else None
+        # the paragraphs best first: each one's word score and WEIGHT times its attention score, each over the run's
+        # mean and deviation; plus NEIGHBOUR times the better of its two neighbours' in its shard (a paragraph next to
+        # a strong one is likelier to bear on the question than one that stands alone); plus SHARD times the best in
+        # its shard (a shard that holds a strong paragraph is likelier to hold others that bear on it)
+        order = f2pass.fuse(self.bm25(q), att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
+        reach = [x >= FLOOR for x in att] if who else None
         used, taken = 0.0, []
-        for i in torch.sort(-fused, stable=True).indices.tolist():
+        for i in order:
             if who and (lot.authors[i] not in who or not reach[i]):
                 continue
             si, label, chars, x, y = lot.paras[i]
@@ -1120,7 +1012,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/stats":
             self.send(200, {"gpu_states": len(STATES.gpu), "gpu_gb": STATES.gpu_b / 1e9,
                             "ram_states": len(STATES.ram), "ram_gb": STATES.ram_b / 1e9,
-                            "gpu_held_gb": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
+                            "gpu_held_gb": model.LIB.held() / 1e9,
                             "loads": dict(STATES.n), "passes": model.by(), **rss()})
         else:
             self.send(404, {"error": "not found"})

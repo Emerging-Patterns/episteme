@@ -5,9 +5,10 @@ no values and computes no output or MLP.
 
 The model is run by f2pass, a library of its own kernels in C++ and CUDA
 (native/f2pass.cu, built into the environment by this directory's
-meson.build), which reads the weights from the model's safetensors file:
-there is no other copy of the model here. PyTorch holds the memory a state
-lies in and packs a new state (pack, joint.py).
+meson.build), which reads the weights from the model's safetensors file,
+holds the states on the device and packs and unpacks them. This module is
+what stands between it and the reader: the tokenizer, the prompt, and a
+state's bytes.
 
 A shard's state is the model's cache after the prompt up to the question,
 less the keys and values of layer 3: of the three full-attention layers (3,
@@ -23,29 +24,29 @@ several questions, laid end to end, go through the layers once a shard in
 one pass over several shards, each token reading its shard's state in
 place, so a shard's keys and values are held once for all the questions
 asked of it, nothing of a state is copied for a question or written back,
-and no question is padded to another's length. f2pass reads the states
-where these tensors lie on the device (tail).
+and no question is padded to another's length (tail).
 
-A state is kept packed (pack) and read unpacked (unpack). With no book
-(F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
-values and layer 11's keys as int8, a byte a channel. With a book the three
-are coded together, a few bits a channel (joint.py), and unpacked on the GPU
-into that same int8 layout when the state is to be kept there, so a tail
-pass reads a kept state the same way either way; a state scored in passing
-is read as its decoding made it, in half precision. The scores are always
-those of the unpacked state, also for the question that prefills it.
-
-The unpacking is f2pass's too, and gives the bits joint.py's own decoding
-gives (its arithmetic in the same precision and order)."""
-import bisect, copy, ctypes, functools, hashlib, json, os, struct, sys, torch
+A state is kept packed and read unpacked. Packed it is one run of bytes
+(f2pass.h says its layout), the same in a file, in the host's memory and on
+its way to the device: its tokens, its paragraphs' spans, the question
+template, a score a paragraph for the reader to take from every question's,
+and what the state is made of. With no book (F2_BOOK, made by fit.py) that
+is layer 7's keys and values and layer 11's keys as int8, a byte a channel;
+with a book the three are coded together, a few bits a channel (joint.py).
+Unpacked it lies on the device, in the int8 layout when the state is to be
+kept there, and for a state of a book that is scored in passing as its
+decoding leaves it, in half precision. The scores are always those of the
+unpacked state, also for the question that prefills it.
+"""
+import array, bisect, ctypes, functools, hashlib, os
 from tokenizers import Tokenizer
-import joint
+import names
 import store
 from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
 import f2pass
 
-if f2pass.ABI != 3:  # the package in the environment was built from another version of native/
+if f2pass.ABI != 4:  # the package in the environment was built from another version of native/
     raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = 12  # layers 0..11
@@ -53,35 +54,17 @@ SCALED = 11  # the layer whose query scale is doubled
 ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
 MID = 7  # the full-attention layer whose keys and values a state holds
 HEADS = (3, 4)  # heads of layer 11 that are read
-DEV = "cuda"  # the passes are CUDA kernels: there is no reader on a host alone
-# a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
-BOOK = None if BOOK_ID is None else torch.load(BOOK_PATH, weights_only=True)
+LINEAR = [li for li in range(LAYERS) if li % 4 != 3]  # the linear-attention layers
+TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
 
 tok = Tokenizer.from_file(os.path.join(DIR, "tokenizer.json"))
 WEIGHTS = next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors"))
-
-
-LIB = f2pass.Pass(WEIGHTS)  # the weights on the device, as f2pass lays them
-TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
-if BOOK is not None:
-    BOOK = joint.Book(BOOK, DEV)
-    # f2pass reads the book's tensors where they lie for as long as the process runs (BOOK holds them)
-    if not (BOOK.rank and BOOK.fast == torch.float16 and BOOK.lo.dtype == torch.int64 and BOOK.back.is_contiguous() and LIB.book(
-            len(BOOK.step), BOOK.nbytes, *(x.data_ptr() for x in (BOOK.lo, BOOK.shift, BOOK.mask2, BOOK.odd, BOOK.halfstep, BOOK.back, BOOK.mid)),
-            BOOK.rank, BOOK.resid)):
-        raise RuntimeError("the book at %s is not one f2pass unpacks states of (recurrent states as a rank and four bits)" % BOOK_PATH)
-
-
-def weight(name):
-    """a tensor of the model's weights file by its name there, on the host
-    (bf16 or fp32, as it is kept): the safetensors layout, a header of JSON
-    that says each tensor's type, shape and place"""
-    with open(WEIGHTS, "rb") as f:
-        n = struct.unpack("<Q", f.read(8))[0]
-        at = json.loads(f.read(n))[name]
-        f.seek(8 + n + at["data_offsets"][0])
-        raw = bytearray(f.read(at["data_offsets"][1] - at["data_offsets"][0]))
-    return torch.frombuffer(raw, dtype={"BF16": torch.bfloat16, "F32": torch.float32}[at["dtype"]]).view(at["shape"])
+LIB = f2pass.Pass(WEIGHTS)  # the weights on the device
+# a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
+BOOK = None if BOOK_ID is None else names.book(BOOK_PATH)
+if BOOK is not None and not LIB.book(BOOK["coefficients"], *(BOOK[k] for k in ("mean", "fwd", "inv", "widths", "step")), BOOK["exact"],
+                                     BOOK["rank"], BOOK["resid"]):
+    raise RuntimeError("the book at %s is not one f2pass codes states by (recurrent states as a rank and four bits)" % BOOK_PATH)
 
 
 def template(text):
@@ -92,253 +75,69 @@ def template(text):
     return "".join(said[:-1]), said[-1] + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
-ANGLES = [None]  # the cosines and sines made so far, for the longest shard seen
+def pad8(n):
+    return (n + 7) & ~7
 
 
-def angles(n):
-    """the cosines and sines of the rotary angles at positions 0..n-1,
-    [n, 64] floats: 32 frequencies, 10^7 to the power -j/32, said twice (a
-    key's first 32 channels turn against its next 32)"""
-    if ANGLES[0] is None or ANGLES[0][0].shape[0] < n:
-        inv = 1.0 / (10000000.0 ** (torch.arange(0, 64, 2, dtype=torch.float) / 64))
-        at = torch.arange(max(n, 32768), device=DEV)[:, None].float() * inv.to(DEV)
-        ANGLES[0] = (torch.cat((at.cos(), at.cos()), -1), torch.cat((at.sin(), at.sin()), -1))
-    return ANGLES[0][0][:n], ANGLES[0][1][:n]
+def told(blob):
+    """what a packed state says of itself beside its numbers: its header,
+    its prompt's tokens, its paragraphs' token spans, the question template,
+    and where the scores the reader keeps in it lie (the first byte): those
+    parts come first, each from a multiple of 8 bytes on (f2pass.h)"""
+    h = f2pass.head(blob)
+    if h.magic != f2pass.MAGIC or len(blob) != f2pass.packed_bytes(h):
+        raise ValueError("not a packed state")
+    at = ctypes.sizeof(h)
+    ids = array.array("i", bytes(blob[at:at + h.tokens * 4]))
+    at = pad8(at + h.tokens * 4)
+    flat = array.array("i", bytes(blob[at:at + h.spans * 8]))
+    at = pad8(at + h.spans * 8)
+    tail = bytes(blob[at:at + h.tail]).decode()
+    return h, ids, list(zip(flat[::2], flat[1::2])), tail, pad8(at + h.tail)
 
 
-def floats(layer, name):
-    """a layer's keys or values as floats, whether held as bf16 or as int8
-    with a scale: [2 key-value heads, tokens, 256]"""
-    x, sc = getattr(layer, name), vars(layer).get(name + "_scale")
-    return (x.float() * sc)[0] if sc is not None else x.float()[0]
+def null(blob, scores=None):
+    """the score a paragraph a packed state holds for the reader to take
+    from every question's (floats); given scores, they are written in"""
+    h, at = told(blob)[::4]
+    if scores is not None:
+        blob[at:at + h.null * 4] = array.array("f", scores).tobytes()
+    return array.array("f", bytes(blob[at:at + h.null * 4]))
 
 
-def int8(layer, name, x, dim):
-    """x [2, tokens, 256] put on the layer as int8 with one scale per
-    channel over the tokens (dim -2, keys) or per token (dim -1, values:
-    KIVI, 2402.02750)"""
-    lo, hi = torch.aminmax(x, dim=dim, keepdim=True)
-    sc = torch.maximum(-lo, hi).clamp(min=max(1e-8, torch.finfo(x.dtype).tiny)) / 127
-    setattr(layer, name, (x / sc).round().to(torch.int8)[None])
-    setattr(layer, name + "_scale", sc.float()[None])
+class State:
+    """a state unpacked on the device, for as long as this is held: its
+    handle there, how many tokens its prompt has, its paragraphs' token
+    spans, the question template, and the device bytes it takes"""
+
+    def __init__(self, handle, blob, kept):
+        self.handle = handle
+        h, self.ids, self.spans, self.tail, _ = told(blob)
+        self.size = f2pass.unpacked_bytes(h, kept)
+
+    def __del__(self):
+        if LIB is not None:  # gone when the interpreter is on its way out
+            LIB.drop(self.handle)
 
 
-def joined(cache):
-    """whether a cache holds its keys and values coded together"""
-    return torch.is_tensor(vars(cache.layers[MID]).get("joint"))
+class Sent:
+    """a packed state on its way to the device, for as long as this is
+    held or until it is taken: its ticket there"""
+
+    def __init__(self, ticket):
+        self.ticket = ticket
+
+    def __del__(self):
+        if self.ticket is not None and LIB is not None:
+            LIB.unstage(self.ticket)
 
 
-def pack(cache):
-    """the cache as a state keeps it, in place. Layer 3's keys and values
-    are dropped: no tail reads them (alone). The linear-attention recurrent
-    states (fp32) are kept in bf16. Layer 7's keys and values and layer 11's
-    keys are coded together when there is a book (joint.py): layer 7 then
-    holds the tokens' packed rows (joint), the values' root mean squares
-    (joint_rms) and the tokens kept exact (joint_at, joint_exact), and no
-    keys or values, and each linear-attention layer its recurrent states'
-    parts (low_left, low_right, low_rest, low_scale) in place of the
-    states; with no book they are int8 and bf16. A cache whose keys and
-    values are int8 already (a state kept before the book was made) is
-    coded from those"""
-    for li, layer in enumerate(cache.layers):
-        if li == ALONE:
-            layer.keys, layer.values = layer.keys[..., :0, :].clone(), layer.values[..., :0, :].clone()
-        states = getattr(layer, "recurrent_states", None)
-        if isinstance(states, dict):
-            layer.recurrent_states = {i: t.to(torch.bfloat16) if torch.is_tensor(t) and t.dtype == torch.float32 else t
-                                      for i, t in states.items()}
-            if BOOK is not None and BOOK.rank:
-                # each matrix as its first singular triples and the rest in a few bits (joint.low)
-                parts = {i: joint.low(t, BOOK.rank, BOOK.resid) for i, t in layer.recurrent_states.items() if torch.is_tensor(t)}
-                for at, name in enumerate(("low_left", "low_right", "low_rest", "low_scale")):
-                    setattr(layer, name, {i: p[at] for i, p in parts.items()})
-                layer.recurrent_states = {i: t[..., :0, :0] if torch.is_tensor(t) else t for i, t in layer.recurrent_states.items()}
-    mid, top = cache.layers[MID], cache.layers[SCALED]
-    if BOOK is None:
-        for layer, name, dim in ((mid, "keys", -2), (mid, "values", -1), (top, "keys", -2)):
-            if getattr(layer, name).dtype != torch.int8:
-                int8(layer, name, floats(layer, name), dim)
-        return cache
-    cos, sin = angles(mid.keys.shape[-2])
-    x, rms = joint.rows(floats(mid, "keys"), floats(mid, "values"), floats(top, "keys"), cos, sin)
-    mid.joint, mid.joint_at, mid.joint_exact = BOOK.encode(x)
-    mid.joint_rms = rms.to(torch.float16)
-    for layer, name in ((mid, "keys"), (mid, "values"), (top, "keys")):
-        setattr(layer, name, getattr(layer, name)[..., :0, :].to(torch.bfloat16))
-        vars(layer).pop(name + "_scale", None)
-    return cache
-
-
-def unpacked(cache):
-    """the bytes a state's cache takes unpacked to keep (unpack), said from
-    the packed cache without unpacking it: what a tier asks before it
-    decides whether the state is kept"""
-    if not joined(cache):
-        return sum(v.numel() * v.element_size() for layer in cache.layers for x in vars(layer).values()
-                   for v in (x.values() if isinstance(x, dict) else (x,)) if torch.is_tensor(v))
-    size = cache.layers[MID].joint.shape[0] * (joint.WIDE + 8) + 4096  # three int8 tensors, a scale a token, two a channel
-    for layer in cache.layers:
-        for name, x in vars(layer).items():
-            for i, v in (x.items() if isinstance(x, dict) else ((None, x),)):
-                if not torch.is_tensor(v) or name.startswith("joint") or name in ("low_right", "low_rest", "low_scale"):
-                    continue
-                if name == "low_left":  # the matrices it and low_right lift to, in bf16
-                    size += v.numel() // v.shape[-1] * layer.low_right[i].shape[-1] * 2
-                else:
-                    size += v.numel() * v.element_size()
-    return size
-
-
-def again(f):
-    """f(), and once more if it fails: f2pass's buffers are its own, not
-    PyTorch's, so before the second try what PyTorch holds unused is handed
-    back to the device. A second failure is the caller's"""
-    try:
-        return f()
-    except RuntimeError as e:
-        print("f2: %s; once more" % e, file=sys.stderr, flush=True)
-        torch.cuda.empty_cache()
-        return f()
-
-
-def unpack(state, kept=True):
-    """a state as a tail pass reads it, on the GPU: a state whose keys and
-    values are coded together gets them back (a copy; the packed state is
-    left as it is), any other is returned as it is. A state to be kept gets
-    them as int8, the layout the GPU's tier holds; one scored in passing
-    (not kept) gets them as the decoding made them, in half precision, since
-    the pass that follows would only turn the int8 back into floats.
-    PyTorch gives the memory the unpacked state lies in and f2pass fills it"""
-    if not joined(state[1]):
-        return state
-    return again(lambda: unpacking(state, kept))
-
-
-def spare(layer, made):
-    """what is left of a packed state's layer once made's names are set, as
-    unpack leaves it: each tensor copied. A packed state may come as views
-    of one block (f2serve's lift), and a view kept in the unpacked state
-    would keep the whole block on the GPU"""
-    for name, v in list(vars(layer).items()):
-        if name in made:
-            continue
-        if torch.is_tensor(v):
-            setattr(layer, name, v.clone())
-        elif isinstance(v, dict):
-            setattr(layer, name, {i: t.clone() if torch.is_tensor(t) else t for i, t in v.items()})
-
-
-def unpacking(state, kept):
-    """unpack's work. ValueError for a packed state whose tensors are not
-    what pack leaves"""
-    held = []  # what is read only until the library returns
-
-    def whole(x, dtype):
-        if x.dtype != dtype:
-            raise ValueError("a packed state's %s where pack leaves %s" % (x.dtype, dtype))
-        if not x.is_contiguous():  # a part kept as a slice (a state not come through f2serve's lift)
-            x = x.contiguous()
-            held.append(x)
-        return x.data_ptr()
-
-    c = copy.copy(state[1])
-    c.layers = [copy.copy(layer) for layer in state[1].layers]
-    mid, top = c.layers[MID], c.layers[SCALED]
-    T = mid.joint.shape[0]
-    cos, sin = angles(T)
-    p = f2pass.Packed()
-    p.tokens, p.kept, p.exact = T, int(kept), mid.joint_at.shape[0]
-    p.joint, p.at, p.rows = whole(mid.joint, torch.uint8), whole(mid.joint_at, torch.int32), whole(mid.joint_exact, torch.float16)
-    p.rms, p.cos, p.sin = whole(mid.joint_rms, torch.float16), whole(cos, torch.float32), whole(sin, torch.float32)
-    # the linear-attention layers' states: the recurrent ones made, the convolution ones copied, each kind in one block
-    lin = [(li, layer) for li, layer in enumerate(c.layers) if isinstance(vars(layer).get("low_left"), dict)]
-    if not lin or any(hasattr(layer, "recurrent_states") and not isinstance(vars(layer).get("low_left"), dict) for layer in c.layers):
-        raise ValueError("a packed state whose recurrent states are kept whole")
-    convs = []
-    for li, layer in lin:
-        parts = [(i, t) for i, t in layer.low_left.items() if torch.is_tensor(t)]
-        cv = [(i, t) for i, t in layer.conv_states.items() if torch.is_tensor(t)]
-        if len(parts) != 1 or parts[0][1].shape[-1] != BOOK.rank or len(cv) != 1 or cv[0][1].shape != lin[0][1].conv_states[cv[0][0]].shape:
-            raise ValueError("a packed state whose layer %d holds other than one state of the book's rank" % li)
-        i, left = parts[0]
-        p.left[li], p.right[li] = whole(left, torch.float16), whole(layer.low_right[i], torch.float16)
-        p.rest[li], p.scale[li] = whole(layer.low_rest[i], torch.uint8), whole(layer.low_scale[i], torch.float16)
-        p.conv[li] = whole(cv[0][1], torch.bfloat16)
-        convs.append((i, cv[0][0], cv[0][1].shape))
-    rec = torch.empty((len(lin), 1, 16, 128, 128), dtype=torch.bfloat16, device=DEV)
-    conv = torch.empty((len(lin),) + tuple(convs[0][2]), dtype=torch.bfloat16, device=DEV)
-    p.conv_bytes = conv[0].numel() * 2
-    for at, (li, _) in enumerate(lin):
-        p.rec[li], p.conv_out[li] = rec[at].data_ptr(), conv[at].data_ptr()
-    if kept:
-        # int8, a token's two heads side by side as they are in its row
-        k7, v7, k11 = (torch.empty((T, 2, 256), dtype=torch.int8, device=DEV) for _ in range(3))
-        k7s, k11s = (torch.empty((1, 2, 1, 256), dtype=torch.float32, device=DEV) for _ in range(2))
-        v7s = torch.empty((1, 2, T, 1), dtype=torch.float32, device=DEV)
-        p.k7, p.v7, p.k11 = k7.data_ptr(), v7.data_ptr(), k11.data_ptr()
-        p.k7_scale, p.v7_scale, p.k11_scale = k7s.data_ptr(), v7s.data_ptr(), k11s.data_ptr()
-    else:
-        y = torch.empty((T, joint.WIDE), dtype=torch.float16, device=DEV)
-        p.y = y.data_ptr()
-    if torch.cuda.current_stream() != torch.cuda.default_stream():
-        torch.cuda.current_stream().synchronize()
-    LIB.unpack(p)  # done when it returns: the caller may drop the packed state
-    del held
-    if kept:
-        mid.keys, mid.values, top.keys = (x.transpose(0, 1)[None] for x in (k7, v7, k11))
-        mid.keys_scale, mid.values_scale, top.keys_scale = k7s, v7s, k11s
-    else:
-        mid.keys, mid.values, top.keys = (y[:, at:at + 512].view(-1, 2, 256).transpose(0, 1)[None] for at in (0, 512, 1024))
-    for name in ("joint", "joint_at", "joint_exact", "joint_rms"):
-        delattr(mid, name)
-    made = {id(mid): {"keys", "values", "keys_scale", "values_scale"}, id(top): {"keys", "keys_scale"}}
-    for at, (li, layer) in enumerate(lin):
-        i, ci, _ = convs[at]
-        layer.recurrent_states = {**layer.recurrent_states, i: rec[at]}
-        layer.conv_states = {**layer.conv_states, ci: conv[at]}
-        for name in ("low_left", "low_right", "low_rest", "low_scale"):
-            delattr(layer, name)
-        made[id(layer)] = {"recurrent_states", "conv_states"}
-    for layer in c.layers:
-        spare(layer, made.get(id(layer), ()))
-    return (state[0], c) + tuple(state[2:])
-
-
-def prefill(shard, raw=False):
-    """a shard's state, packed: (prompt ids, cache, paragraph token spans,
-    question template); raw leaves the cache as the model made it. The
-    prompt up to the question runs through the layers in f2pass, which
-    writes what a state is made of into tensors made here: layer 7's keys
-    and values and layer 11's keys (bf16, of every token), and each
-    linear-attention layer's convolution states (its last four inputs) and
-    recurrent states (fp32) after the last token. The cache is a Bag whose
-    layers are Bags: an attention layer's holds keys and values ([1, 2
-    heads, tokens, 256]; none of layer 3, which no tail reads, and no
-    values of layer 11), a linear-attention layer's conv_states and
-    recurrent_states, each a dict of one tensor"""
+def prefill(shard):
+    """a shard's state, packed (bytes that may be written in): its prompt
+    up to the question run through the layers and packed by f2pass, with
+    its tokens, its paragraphs' token spans and the question template"""
     head, tail = template(shard["text"])
     enc = tok.encode(head, add_special_tokens=False)
-    ids, T = enc.ids, len(enc.ids)
-    lin = [li for li in range(LAYERS) if li % 4 != 3]
-    k7, v7, k11 = (torch.empty((T, 2, 256), dtype=torch.bfloat16, device=DEV) for _ in range(3))
-    conv = torch.empty((len(lin), 1, 6144, 4), dtype=torch.bfloat16, device=DEV)
-    rec = torch.empty((len(lin), 1, 16, 128, 128), dtype=torch.float32, device=DEV)
-    f = f2pass.Fill()
-    f.tokens, f.ids = T, (ctypes.c_int * T)(*ids)
-    f.k7, f.v7, f.k11 = k7.data_ptr(), v7.data_ptr(), k11.data_ptr()
-    for at, li in enumerate(lin):
-        f.conv[li], f.rec[li] = conv[at].data_ptr(), rec[at].data_ptr()
-    if torch.cuda.current_stream() != torch.cuda.default_stream():
-        torch.cuda.current_stream().synchronize()
-    again(lambda: LIB.prefill(f))
-    cache = store.Bag()
-    cache.layers = [store.Bag() for _ in range(LAYERS)]
-    none = torch.empty((1, 2, 0, 256), dtype=torch.bfloat16, device=DEV)
-    for at, li in enumerate(lin):
-        cache.layers[li].conv_states, cache.layers[li].recurrent_states = {0: conv[at]}, {0: rec[at]}
-    cache.layers[ALONE].keys, cache.layers[ALONE].values = none, none.clone()
-    cache.layers[MID].keys, cache.layers[MID].values = k7.transpose(0, 1)[None], v7.transpose(0, 1)[None]
-    cache.layers[SCALED].keys, cache.layers[SCALED].values = k11.transpose(0, 1)[None], torch.empty((1, 2, T, 0), dtype=torch.bfloat16, device=DEV)
     starts = [o[0] for o in enc.offsets]
     base = head.index(shard["text"].strip())
     spans = []
@@ -346,13 +145,39 @@ def prefill(shard, raw=False):
         ta = bisect.bisect_left(starts, base + a)
         tb = bisect.bisect_left(starts, base + b)
         spans.append((ta, max(tb, ta + 1)))
-    return ids, cache if raw else pack(cache), spans, tail
+    return LIB.read(enc.ids, spans, tail.encode())
+
+
+def unpacked(blob, kept=True):
+    """the device bytes a packed state takes unpacked, said without
+    unpacking it: what a tier asks before it decides whether the state is
+    kept"""
+    return f2pass.unpacked_bytes(f2pass.head(blob), kept)
+
+
+def stage(blob):
+    """a packed state sent to the device while it works on (Sent): what take needs"""
+    return Sent(LIB.stage(blob))
+
+
+def take(sent, blob, kept=True):
+    """a staged state unpacked on the device (State). A state to be kept
+    gets the int8 layout the device's tier holds; one scored in passing
+    (not kept) is left as its decoding made it, in half precision, since
+    the pass that follows would only turn the int8 back into floats"""
+    ticket, sent.ticket = sent.ticket, None
+    return State(LIB.take(ticket, kept), blob, kept)
+
+
+def unpack(blob, kept=True):
+    """a packed state unpacked on the device (State): stage and take in one"""
+    return take(stage(blob), blob, kept)
 
 
 @functools.lru_cache(maxsize=4096)
 def opening(question):
-    """the tokens of a question's tail a pass runs (question_tail): the
-    template's up to the question, then the question's"""
+    """the tokens of a question's tail a pass runs: the template's up to
+    the question, then the question's"""
     return tuple(tok.encode("<|im_start|>user\nQuestion: " + question, add_special_tokens=False).ids)
 
 
@@ -378,47 +203,9 @@ def together(questions):
 
 
 def by():
-    """what runs the tail passes and the unpacking: f2pass, with the first
-    twelve hex digits of its library's SHA-1"""
+    """what runs the model: f2pass, with the first twelve hex digits of its
+    library's SHA-1"""
     return "f2pass " + hashlib.sha1(open(f2pass.LIB._name, "rb").read()).hexdigest()[:12]
-
-
-def heads(x):
-    """a tensor [1, 2, tokens, 256] as f2pass reads it: a pointer a
-    key-value head and the bytes from a token's row to the next"""
-    size, base = x.element_size(), x.data_ptr()
-    return (ctypes.c_void_p * 2)(base, base + x.stride(1) * size), x.stride(2) * size
-
-
-def lying(state):
-    """a state as f2pass reads it where it lies (f2pass.State, and what must
-    be held while it is read). ValueError for a state that is not as unpack
-    leaves one: its keys and values a kept state's int8 with their scales,
-    or the halves of a state scored in passing"""
-    ids, cache, spans = state[0], state[1], state[2]
-    mid, top = cache.layers[MID], cache.layers[SCALED]
-    kind = {torch.int8: f2pass.INT8, torch.float16: f2pass.HALF}.get(mid.keys.dtype)
-    held = (mid.keys, mid.values, top.keys)
-    if kind is None or any(x.dtype != mid.keys.dtype or x.dim() != 4 or x.shape[-2] != len(ids) or x.stride(3) != 1 for x in held):
-        raise ValueError("a state whose keys and values are not as unpack leaves them (%s)" % mid.keys.dtype)
-    s = f2pass.State()
-    s.len, s.kind = len(ids), kind
-    (s.k7, s.k7_step), (s.v7, s.v7_step), (s.k11, s.k11_step) = map(heads, held)
-    if kind == f2pass.INT8:
-        for name, sc, wide in (("k7_scale", mid.keys_scale, 256), ("v7_scale", mid.values_scale, s.len), ("k11_scale", top.keys_scale, 256)):
-            if sc.dtype != torch.float32 or not sc.is_contiguous() or sc.numel() != 2 * wide:
-                raise ValueError("a kept state whose %s is not a float a channel or a token" % name)
-            setattr(s, name, (ctypes.c_void_p * 2)(sc.data_ptr(), sc.data_ptr() + wide * 4))
-    for li, layer in enumerate(cache.layers):
-        if hasattr(layer, "conv_states"):
-            conv = next(v for v in layer.conv_states.values() if torch.is_tensor(v))
-            rec = next(v for v in layer.recurrent_states.values() if torch.is_tensor(v))
-            if conv.dtype != torch.bfloat16 or rec.dtype != torch.bfloat16 or not conv.is_contiguous() or not rec.is_contiguous():
-                raise ValueError("a state whose layer %d does not hold its states in bf16" % li)
-            s.conv[li], s.rec[li], s.conv_len = conv.data_ptr(), rec.data_ptr(), conv.shape[-1]
-    flat = (ctypes.c_int * (2 * len(spans)))(*[x for sp in spans for x in sp])
-    s.spans, s.span = len(spans), flat
-    return s, flat
 
 
 def row(questions):
@@ -436,35 +223,38 @@ def row(questions):
 
 def tail(states, questions, seen=None):
     """scores(state, question) for every one of several shards and several
-    questions in one pass, [shard][question]. The questions' tails are laid
-    end to end, and that row of tokens runs through the layers once a shard,
-    each token reading its shard's state where the stock forward would read
-    a cache, and of the tokens only those of its own question up to itself.
-    A shard's keys and values are held once for all its questions and its
-    recurrent states are read, never written, so nothing of a state is
-    copied for a question, and a short question beside a long one costs its
-    own tokens, not the long one's. The tokens all the questions open with
-    (the template's, and the words they share after it) are in the row once:
-    a token sees only what comes before it, so what they come to is the
-    same for every question. A token's score for a paragraph is the
-    attention it pays the paragraph's tokens in the two heads read, summed;
-    a question's is the mean over its tokens but the first two. seen, a
-    dict, is given the queries of layers 7 and 11 as attention used them
-    ("q7": [shards, 8, tokens, 256]; "q11": [shards, 2, tokens, 256], the
-    two heads read, in HEADS' order), which fit.py weighs a book by"""
+    questions in one pass, [shard][question], each an array of floats, one
+    a paragraph. The questions' tails are laid end to end, and that row of
+    tokens runs through the layers once a shard, each token reading its
+    shard's state where the stock forward would read a cache, and of the
+    tokens only those of its own question up to itself. A shard's keys and
+    values are held once for all its questions and its recurrent states are
+    read, never written, so nothing of a state is copied for a question,
+    and a short question beside a long one costs its own tokens, not the
+    long one's. The tokens all the questions open with (the template's, and
+    the words they share after it) are in the row once: a token sees only
+    what comes before it, so what they come to is the same for every
+    question. A token's score for a paragraph is the attention it pays the
+    paragraph's tokens in the two heads read, summed; a question's is the
+    mean over its tokens but the first two. seen, a dict, is given the
+    queries of layers 7 and 11 as attention used them ("q7": bf16 bytes of
+    [shards][tokens][8][256]; "q11": of [shards][tokens][2][256], the two
+    heads read, in HEADS' order), which fit.py weighs a book by"""
     ids, who, at, same, lens = row(questions)
-    there = [lying(s) for s in states]
-    most = max(len(s[2]) for s in states)
-    # the library's kernels go on the device's default stream, where PyTorch's own are queued unless a thread
-    # chose another: what such a thread has queued for these states is waited for first
-    if torch.cuda.current_stream() != torch.cuda.default_stream():
-        torch.cuda.current_stream().synchronize()
-    out = again(lambda: LIB.tail([s for s, _ in there], ids, who, at, same, lens, most))
+    most = max(len(s.spans) for s in states)
+    out = LIB.tail([s.handle for s in states], ids, who, at, same, lens, most)
     if seen is not None:
-        for name, wide, q in zip(("q7", "q11"), (8, len(HEADS)), LIB.queries(len(states) * len(ids))):
-            seen[name] = torch.frombuffer(q, dtype=torch.bfloat16).view(len(states), len(ids), wide, 256).transpose(1, 2).float().to(DEV)
-    res = torch.frombuffer(out, dtype=torch.float32).view(len(states), len(questions), most)
-    return [[res[b, k, :len(s[2])].clone() for k in range(len(questions))] for b, s in enumerate(states)]
+        seen["q7"], seen["q11"] = LIB.queries(len(states) * len(ids))
+        seen["tokens"] = len(ids)
+    flat, K = memoryview(out).cast("B"), len(questions)
+    res = []
+    for b, s in enumerate(states):
+        res.append([])
+        for k in range(K):
+            a = array.array("f")
+            a.frombytes(flat[(b * K + k) * most * 4:((b * K + k) * most + len(s.spans)) * 4])
+            res[b].append(a)
+    return res
 
 
 def scores(state, question):

@@ -37,9 +37,14 @@ attends to, lies far outside the range the steps were made for, and coded
 it alone carried a third of all the error and moved the scores.
 
 Decoding is the unpacking, one matrix product and the turning forward of the
-keys' rotary part; it runs on the GPU as a state arrives there. The reader's
-is f2pass's (native/f2pass.cu), which gives these functions' bits; they are
-the codec's own decoding, checked against its coding below.
+keys' rotary part; it runs on the GPU as a state arrives there.
+
+The reader codes and decodes in f2pass (native/f2pass.cu): its decoding
+gives these functions' bits, its coding the same bins but for the order of
+a sum, and the recurrent states' parts from other directions than low's.
+This file is the codec stated in PyTorch: fit.py makes a book with it, and
+`python joint.py` checks its coding against its decoding (both in an
+environment made with --group fit).
 
 Not coded further: the bins' order-0 entropy is 6 to 10% under their fixed
 length, which no decoder faster than the disk would win back, and a token's
