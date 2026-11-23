@@ -79,10 +79,17 @@ def rows(k7, v7, k11, cos, sin):
 
 
 def tensors(y, rms, cos, sin):
-    """rows back to the three tensors [2, T, 256]"""
-    k7 = turn(torch.stack([y[:, 0:256], y[:, 256:512]]), cos, sin, 1.0)
-    v7 = torch.stack([y[:, 512:768], y[:, 768:1024]]) * rms
-    k11 = turn(torch.stack([y[:, 1024:1280], y[:, 1280:1536]]), cos, sin, 1.0)
+    """rows back to the three tensors [2, T, 256], made in the rows' own
+    memory (y is spent): the keys' rotary channels turned forward where they
+    lie and the values put back over their root mean squares, with no copy
+    of a row made on the way"""
+    r = cos.shape[-1]
+    for at in (0, 256, 1024, 1280):
+        rot = y[:, at:at + r]
+        y[:, at:at + r] = rot * cos + torch.cat((-rot[:, r // 2:], rot[:, :r // 2]), -1) * sin
+    y[:, 512:768] *= rms[0]
+    y[:, 768:1024] *= rms[1]
+    k7, v7, k11 = (y[:, at:at + 512].view(-1, 2, 256).transpose(0, 1) for at in (0, 512, 1024))
     return k7, v7, k11
 
 
@@ -138,11 +145,19 @@ class Book:
             self.groups.append((w, first, n, at))
             at += w * n
         self.nbytes = (at + 7) // 8
+        # where each coefficient's bin lies in a token's bytes: a bin is at most eight bits, so it is in the two
+        # bytes from its first bit's on, read as one number low byte first, shifted down and masked
+        first = torch.tensor([at + j * w for w, _first, n, at in self.groups for j in range(n)], device=dev)
+        self.lo, self.shift = first // 8, (first % 8).to(torch.int16)
+        self.mask = torch.tensor([2 ** w - 1 for w in widths], device=dev, dtype=torch.int16)
         self.half = torch.tensor([2 ** (w - 1) for w in widths], device=dev, dtype=torch.float32)
-        # the decoding product in half precision when the device has it: 2.5 ms a state for 7, and 1e-7 of the
-        # rows' energy off the fp32 product, where the coding itself is 1e-3 off the rows
+        self.odd = (2 * self.half - 1).to(torch.int16)  # a bin's middle is (twice its number less this) half steps
+        # the decoding in half precision when the device has it, the product (2.5 ms a state for 7) and what
+        # comes before and after it (as much again in fp32, all of it passes over the tokens' rows): half
+        # precision is 1e-7 of the rows' energy off, where the coding itself is 1e-3 off the rows
         self.fast = torch.float16 if str(dev).startswith("cuda") else torch.float32
         self.back = self.inv.T.to(self.fast).contiguous()
+        self.halfstep, self.mid = (self.step / 2).to(self.fast), self.mean.to(self.fast)
 
     def bins(self, x):
         """rows [T, 1536] to their coefficients' bins [T, K] (uint8) and the
@@ -162,15 +177,11 @@ class Book:
         return (bit.view(t, self.nbytes, 8) << torch.arange(8, device=q.device, dtype=torch.uint8)).sum(-1, dtype=torch.uint8)
 
     def unpack(self, packed):
-        """bytes [T, nbytes] to rows [T, 1536]"""
-        t = packed.shape[0]
-        bit = ((packed[..., None] >> torch.arange(8, device=packed.device, dtype=torch.uint8)) & 1).view(t, -1)
-        q = torch.empty(t, len(self.step), dtype=torch.uint8, device=packed.device)
-        for w, first, n, at in self.groups:  # the bins put together as bytes: no float is made of a bit
-            sh = torch.arange(w, device=packed.device, dtype=torch.uint8)
-            q[:, first:first + n] = (bit[:, at:at + n * w].view(t, n, w) << sh).sum(-1, dtype=torch.uint8)
-        c = ((q.float() - self.half + 0.5) * self.step).to(self.fast)
-        return self.mean + (c @ self.back).float()
+        """bytes [T, nbytes] to rows [T, 1536], in the book's precision"""
+        p = torch.nn.functional.pad(packed, (0, 1))  # a byte after the last, for the bin that ends a token
+        q = (((p[:, self.lo].to(torch.int16) | (p[:, self.lo + 1].to(torch.int16) << 8)) >> self.shift) & self.mask)
+        c = q.mul_(2).sub_(self.odd).to(self.fast).mul_(self.halfstep)  # each bin's middle
+        return (c @ self.back).add_(self.mid)
 
     def encode(self, x):
         """rows [T, 1536] to (bytes [T, nbytes], the places of the tokens
@@ -181,7 +192,7 @@ class Book:
 
     def decode(self, packed, at, exact):
         y = self.unpack(packed)
-        y[at.long()] = exact.float()
+        y[at.long()] = exact.to(y.dtype)
         return y
 
 
@@ -244,6 +255,11 @@ if __name__ == "__main__":  # python joint.py: the codec checked on made-up rows
     x[0] *= 40  # a token far outside the steps' range
     q, err = book.bins(x)
     assert torch.allclose(book.unpack(book.pack(q)), book.mean + ((q.float() - book.half + 0.5) * book.step) @ book.inv.T, atol=1e-4)
+    cos, sin = torch.cos(torch.arange(50.0)[:, None] * torch.rand(1, 64, generator=g)), torch.sin(torch.arange(50.0)[:, None] * torch.rand(1, 64, generator=g))
+    k7, v7, k11 = (torch.randn(2, 50, 256, generator=g) for _ in range(3))
+    y, rms = rows(k7, v7, k11, cos, sin)
+    for was, now in zip((turn(turn(k7, cos, sin, -1.0), cos, sin, 1.0), v7 / rms * rms, turn(turn(k11, cos, sin, -1.0), cos, sin, 1.0)), tensors(y.clone(), rms, cos, sin)):
+        assert torch.equal(was, now)
     packed, at, exact = book.encode(x)
     y = book.decode(packed, at, exact)
     assert packed.shape == (4000, book.nbytes) and book.nbytes * 8 <= 3 * WIDE + 7 and 0 in at.tolist()
