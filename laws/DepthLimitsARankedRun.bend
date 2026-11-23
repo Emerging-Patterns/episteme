@@ -9,8 +9,9 @@
 # the files. A caller that will read only what is printed (a hook, a tool
 # that fans one lookup out into several questions) can say so.
 #
-# `episteme ask --depth <tokens>` says how many tokens of paragraphs the run
-# may hold in all, printed and in its files; `config.json`'s optional
+# `episteme ask --depth <tokens>` (the `ask` tool's `depth`, read as the flag
+# is: laws/ToolQueryIsCliQuery.bend) says how many tokens of paragraphs the
+# run may hold in all, printed and in its files; `config.json`'s optional
 # `depth_tokens` says it for every question that does not.
 # `Read.depth.arg(arg)` reads the flag's value: no depth when there is no
 # flag; the number when the value is a whole number; else a refusal naming

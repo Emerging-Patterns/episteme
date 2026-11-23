@@ -8,7 +8,7 @@
 # kept in run files, by `ask` and by the tool, a paragraph that holds the
 # question passed over, a reader that tells the run's reads in its answer
 # to the notice asked for none and printed as one asked for each, and a run's
-# depth said by the flag or the settings. EPISTEME names the binary
+# depth said by the flag, the tool's argument or the settings. EPISTEME names the binary
 # (default bin/episteme); python3 is the MCP client and the ranking reader.
 set -euo pipefail
 
@@ -199,5 +199,14 @@ sed -i 's/"budget_tokens": 60000}/"budget_tokens": 60000, "depth_tokens": 1}/' "
 [ "$(said)" = 2 ] && [ "$(grep -c '^#[0-9]*: ' "$work/deep.txt")" = 2 ] || fail "the flag's depth did not win over the settings': $(said)"
 if "$bin" ask --depth deep --filter book:tiny/ "what" > "$work/deep.txt" 2> "$work/err.txt"; then fail "a depth that is no number was taken"; fi
 grep -q -- '--depth takes a whole number of tokens, not deep' "$work/err.txt" || fail "the refusal of a bad depth: $(cat "$work/err.txt")"
+
+# the tool's depth is the flag's: given as a string or as a number it is read
+# alike, and one that is no whole number is refused as the flag's is
+out=$(call ask '{"question": "what", "filter": "book:tiny/", "depth": "2"}')
+[ "$(said)" = 2 ] && [ "$(printf '%s\n' "$out" | grep -c '^#[0-9]*: ')" = 2 ] || fail "the tool's depth \"2\" was not the run's: $(said): $out"
+out=$(call ask '{"question": "what", "filter": "book:tiny/", "depth": 1}')
+[ "$(said)" = 1 ] && [ "$(printf '%s\n' "$out" | grep -c '^#[0-9]*: ')" = 1 ] || fail "the tool's depth 1 was not the run's: $(said): $out"
+out=$(call ask '{"question": "what", "filter": "book:tiny/", "depth": "deep"}')
+[ "$out" = "True	--depth takes a whole number of tokens, not deep" ] || fail "the tool's refusal of a bad depth: $out"
 
 echo "serve: ok"

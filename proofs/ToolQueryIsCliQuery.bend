@@ -11,20 +11,21 @@ law checked_eq:
   for since: Maybe<&2, String>
   for who: List<&2, String>
   for question: String
-  {T.Tool.checked(res, sels, since, who, question)
-    == Laws.verdict(res, sels, since, who, question)
+  for depth: Maybe<&2, String>
+  {T.Tool.checked(res, sels, since, who, question, depth)
+    == Laws.verdict(res, sels, since, who, question, depth)
     : Result<&2, &2, String, T.Query>}
 
-def checked_eq(res, _sels, _since, _who, _question):
+def checked_eq(res, _sels, _since, _who, _question, _depth):
   match res:
     case Fail{_why}:
       {==}
     case Done{_u}:
       {==}
 
-def Laws.query_is_cli(refs, vals, since, author, question):
+def Laws.query_is_cli(refs, vals, since, author, question, depth):
   checked_eq(F.Filter.check(refs, F.Filter.parse(vals)), F.Filter.parse(vals), since,
-    F.Filter.who(author), question)
+    F.Filter.who(author), question, depth)
 
-def Laws.query_needs_question(_refs, _vals, _since, _author):
+def Laws.query_needs_question(_refs, _vals, _since, _author, _depth):
   {==}

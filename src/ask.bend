@@ -1027,31 +1027,50 @@ def Ask.reply(res: Result<&2, &2, Refusal, Got>, +t0: Nat) -> IO(Result<&2, &2, 
         text : String <- Ask.told(got, t0)
         return Done{text}
 
-# a question whose since value read, from the since on
-def Ask.answer.dated(
-  res: Result<&2, &2, String, Maybe<&2, String>>,
+# a question whose since and depth values read, from the since on and to
+# the depth
+def Ask.answer.sized(
+  res: Result<&2, &2, String, Maybe<&2, U32>>,
   +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String
 ) -> IO(Result<&2, &2, String, String>):
   match res:
     case Fail{why}:
       IO.pure(Result<&2, &2, String, String>, Fail{why})
-    case Done{since}:
+    case Done{depth}:
       do IO<Result<&2, &2, String, String>>:
         +t0 : Nat <- IO.now()
         cfg : St.Config <- St.Store.config()
-        got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", cfg, filter, since, who, question)
+        got : Result<&2, &2, Refusal, Got> <- Ask.collect("serve", Ask.deep(cfg, depth), filter, since, who,
+          question)
         Ask.reply(got, t0)
+
+# a question whose since value read, once its depth value is read
+def Ask.answer.dated(
+  res: Result<&2, &2, String, Maybe<&2, String>>,
+  +filter: List<&2, F.Sel>,
+  +who: List<&2, String>,
+  +question: String,
+  depth: Maybe<&2, String>
+) -> IO(Result<&2, &2, String, String>):
+  match res:
+    case Fail{why}:
+      IO.pure(Result<&2, &2, String, String>, Fail{why})
+    case Done{+since}:
+      Ask.answer.sized(Rd.Read.depth.arg(depth), filter, since, who, question)
 
 # a question over a filter that passed its check, answered as text rather
 # than printed: the excerpts and footer `ask` prints, or a refusal (a
-# malformed since, shards behind the log, no healthy reader) that `ask`
-# would stop with
+# malformed since or depth, shards behind the log, no healthy reader) that
+# `ask` would stop with; the readers are told the run's depth as `ask`
+# tells them (laws/DepthLimitsARankedRun.bend)
 def Ask.answer(
   +filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
   +who: List<&2, String>,
-  +question: String
+  +question: String,
+  depth: Maybe<&2, String>
 ) -> IO(Result<&2, &2, String, String>):
-  Ask.answer.dated(F.Filter.since.arg(since), filter, who, question)
+  Ask.answer.dated(F.Filter.since.arg(since), filter, who, question, depth)
