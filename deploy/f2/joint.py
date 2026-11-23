@@ -149,7 +149,7 @@ class Book:
         # bytes from its first bit's on, read as one number low byte first, shifted down and masked
         first = torch.tensor([at + j * w for w, _first, n, at in self.groups for j in range(n)], device=dev)
         self.lo, self.shift = first // 8, (first % 8).to(torch.int16)
-        self.mask = torch.tensor([2 ** w - 1 for w in widths], device=dev, dtype=torch.int16)
+        self.mask2 = torch.tensor([2 * (2 ** w - 1) for w in widths], device=dev, dtype=torch.int16)  # a doubled bin's bits
         self.half = torch.tensor([2 ** (w - 1) for w in widths], device=dev, dtype=torch.float32)
         self.odd = (2 * self.half - 1).to(torch.int16)  # a bin's middle is (twice its number less this) half steps
         # the decoding in half precision when the device has it, the product (2.5 ms a state for 7) and what
@@ -178,10 +178,13 @@ class Book:
 
     def unpack(self, packed):
         """bytes [T, nbytes] to rows [T, 1536], in the book's precision"""
-        p = torch.nn.functional.pad(packed, (0, 1))  # a byte after the last, for the bin that ends a token
-        q = (((p[:, self.lo].to(torch.int16) | (p[:, self.lo + 1].to(torch.int16) << 8)) >> self.shift) & self.mask)
-        c = q.mul_(2).sub_(self.odd).to(self.fast).mul_(self.halfstep)  # each bin's middle
-        return (c @ self.back).add_(self.mid)
+        # every byte with the one after it as one number, low byte first, doubled (no bin reaches the bit that
+        # doubling drops): made over the bytes, which are fewer than the bins, so that the bins take one gather
+        wide = packed.to(torch.int16)
+        two = torch.nn.functional.pad(wide[:, 1:], (0, 1)).mul_(256).add_(wide).mul_(2)
+        # a bin's middle in half steps, twice its number less odd: its bits shifted down and masked, already doubled
+        m = two[:, self.lo].bitwise_right_shift_(self.shift).bitwise_and_(self.mask2).sub_(self.odd)
+        return (torch.mul(m, self.halfstep) @ self.back).add_(self.mid)
 
     def encode(self, x):
         """rows [T, 1536] to (bytes [T, nbytes], the places of the tokens
