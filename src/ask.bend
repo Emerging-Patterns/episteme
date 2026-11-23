@@ -20,7 +20,11 @@
 # `"n"`. With none it asks no reader; else it first sends every instance of
 # the configured pool the run notice `Read.notice(names, question, who)` (the
 # run's shards' own names in run order; `Reader.notice`,
-# laws/RunNoticeNamesShards.bend), then `Pool.try` reads them with the
+# laws/RunNoticeNamesShards.bend). When an instance's answer told the run's
+# reads (`Read.first` of each answer's `Read.told`,
+# laws/NoticeAnswerTellsReads.bend) those are the run's reads, no read is
+# asked of any reader, and only the shards whose read named labels are read
+# from their files; else `Pool.try` reads them with the
 # configured pool, by name on the instances whose answer was ranked
 # (laws/RankedReadNamesShard.bend). Each shard's read (`Read.ordered`, shard order,
 # laws/EveryShardIsRead.bend) is narrowed to its printed labels
@@ -60,10 +64,11 @@
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
 # laws/ExcerptsFitBudget.bend, laws/AskingsArePassedOver.bend,
 # laws/BestRankedArePrinted.bend, laws/NextBestAreInPages.bend,
-# laws/ExcerptsRenderAsText.bend and the store;
+# laws/NoticeAnswerTellsReads.bend, laws/ExcerptsRenderAsText.bend and the store;
 # `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
 # printed, all of it in the run files, the next best in a page, `show`
-# printing a run file and a paragraph that holds the question passed over, and `tests/smoke.sh` checks the
+# printing a run file, a paragraph that holds the question passed over and a reader that tells its
+# reads asked for none, and `tests/smoke.sh` checks the
 # refusal, the refusal when the shards are behind the log, and a pool with no
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
@@ -183,19 +188,30 @@ def Ask.ranked(ranked: Bool, url: String, urls: List<&2, String>) -> List<&2, St
     case False{}:
       urls
 
+# what a run's notices said: the instances that ranked the run, and what
+# each instance told of the run's reads, in pool order
+type Said is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
+  Said{ranked: List<&2, String>, told: List<&2, Maybe<&2, List<&2, Rd.Read>>>}
+
+# one instance's answer ahead of the others'
+def Ask.said(heard: Rr.Heard, url: String, more: Said) -> Said:
+  match heard more:
+    case Rr.Heard{ranked, told} Said{urls, tolds}:
+      Said{Ask.ranked(ranked, url, urls), told <> tolds}
+
 # the run notice sent to every instance of the pool, in order; answers the
-# instances that ranked the run
-def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json) -> IO(List<&2, String>):
+# instances that ranked the run and the reads each told
+def Ask.notice(insts: List<&2, St.Slot>, +body: Value.Json, +names: List<&2, Rd.Name>) -> IO(Said):
   match insts:
     case Nil{}:
-      IO.pure(List<&2, String>, [])
+      IO.pure(Said, Said{[], []})
     case Con{inst, rest}:
       match inst:
         case St.Slot{+url, _n}:
-          do IO<List<&2, String>>:
-            ranked : Bool <- Rr.Reader.notice(url, body)
-            more : List<&2, String> <- Ask.notice(rest, body)
-            return Ask.ranked(ranked, url, more)
+          do IO<Said>:
+            heard : Rr.Heard <- Rr.Reader.notice(url, body, names)
+            more : Said <- Ask.notice(rest, body, names)
+            return Ask.said(heard, url, more)
 
 # a shard numbered num
 def Ask.renum(sh: S.Shard, num: U32) -> S.Shard:
@@ -306,6 +322,39 @@ def Ask.read.by(
         got : Maybe<&2, List<&2, Rd.Read>> <- Pl.Pool.try(pool, ranked, names, hits, question)
         return Reads{got, hits}
 
+# a run's reads once its notices are answered: those an instance told there
+# (Read.first), with no read asked of any reader and only the shards whose
+# read named labels read from their files; else the pool's
+def Ask.read.told(
+  told: Maybe<&2, List<&2, Rd.Read>>,
+  +ss: List<&2, S.Shard>,
+  paths: List<&2, String>,
+  +pool: List<&2, St.Slot>,
+  +ranked: List<&2, String>,
+  +names: List<&2, Rd.Name>,
+  +question: String
+) -> IO(Reads):
+  match told:
+    case Some{+rs}:
+      do IO<Reads>:
+        hits : List<&2, S.Shard> <- Ask.load(ss, paths, False{}, rs)
+        return Reads{Some{rs}, hits}
+    case None{}:
+      Ask.read.by(Ask.every(pool, ranked), ss, paths, pool, ranked, names, question)
+
+# a run's reads by what its notices said
+def Ask.read.said(
+  said: Said,
+  +ss: List<&2, S.Shard>,
+  paths: List<&2, String>,
+  +pool: List<&2, St.Slot>,
+  +names: List<&2, Rd.Name>,
+  +question: String
+) -> IO(Reads):
+  match said:
+    case Said{+ranked, told}:
+      Ask.read.told(Rd.Read.first(told), ss, paths, pool, ranked, names, question)
+
 # the reads of the shards, beside the files of the unread ones; no reads,
 # and no reader asked, when there are none; None when no reader instance is
 # healthy
@@ -322,8 +371,8 @@ def Ask.read(
       IO.pure(Reads, Reads{Some{[]}, []})
     case Con{_s, _rest}:
       do IO<Reads>:
-        +ranked : List<&2, String> <- Ask.notice(pool, Rd.Read.notice(names, question, who))
-        Ask.read.by(Ask.every(pool, ranked), ss, paths, pool, ranked, names, question)
+        said : Said <- Ask.notice(pool, Rd.Read.notice(names, question, who), names)
+        Ask.read.said(said, ss, paths, pool, names, question)
 
 # the shards of lights, in order
 def Ask.shards(ls: List<&2, St.Light>) -> List<&2, S.Shard>:

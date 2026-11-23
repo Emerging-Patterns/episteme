@@ -456,6 +456,99 @@ def Read.ranked.if(ok: Bool, text: String) -> Bool:
 def Read.ranked(+status: U32, text: String) -> Bool:
   Read.ranked.if(U32.is_eq(status, 200), text)
 
+# --- the reads a notice's answer tells (laws/NoticeAnswerTellsReads.bend) ---
+
+# the read a reader told of the run's shard numbered shard, by its content:
+# the read of a 200 reply whose first choice's content it is, with no
+# timings
+def Read.said(shard: U32, inst: String, +content: String) -> Read:
+  Read.rated(Read.got(Read.answer(Some{content}), shard, inst, Json.null(), content),
+    Read.ranks(Some{content}))
+
+# a read ahead of the reads told after it, or None when those are not told
+def Read.tell.cons(rd: Read, more: Maybe<&2, List<&2, Read>>) -> Maybe<&2, List<&2, Read>>:
+  match more:
+    case None{}:
+      None{}
+    case Some{rs}:
+      Some{rd <> rs}
+
+# the reads told for names by contents, numbered from num: one a name, in
+# order, and None when there are more or fewer contents than names
+def Read.tell(
+  names: List<&2, Name>,
+  contents: List<&2, String>,
+  +inst: String,
+  +num: U32
+) -> Maybe<&2, List<&2, Read>>:
+  match names contents:
+    case Nil{} Nil{}:
+      Some{[]}
+    case Con{_nm, rest} Con{content, more}:
+      Read.tell.cons(Read.said(num, inst, content), Read.tell(rest, more, inst, U32.inc(num)))
+    case Nil{} Con{_content, _more}:
+      None{}
+    case Con{_nm, _rest} Nil{}:
+      None{}
+
+# the strings a parsed notice answer holds as reads, or None
+def Read.told.of(got: Maybe<&2, Value.Json>) -> Maybe<&2, List<&2, String>>:
+  match got:
+    case None{}:
+      None{}
+    case Some{js}:
+      Read.arr(Json.get(js, "reads"))
+
+# the reads those strings tell for names, or None
+def Read.told.by(
+  contents: Maybe<&2, List<&2, String>>,
+  names: List<&2, Name>,
+  +inst: String
+) -> Maybe<&2, List<&2, Read>>:
+  match contents:
+    case None{}:
+      None{}
+    case Some{cs}:
+      Read.tell(names, cs, inst, 1)
+
+# Read.told once the answer is known to say ranked or not
+def Read.told.if(
+  ranked: Bool,
+  text: String,
+  names: List<&2, Name>,
+  +inst: String
+) -> Maybe<&2, List<&2, Read>>:
+  match ranked:
+    case False{}:
+      None{}
+    case True{}:
+      Read.told.by(Read.told.of(Json.parse(text)), names, inst)
+
+# the run's reads the answer to a run notice tells, by its status and body,
+# for the shards named names on the instance inst: one a name, when the
+# answer says the run was ranked and holds `reads`, a string for each name;
+# else None, and the shards are read one by one
+def Read.told(
+  +status: U32,
+  +text: String,
+  names: List<&2, Name>,
+  +inst: String
+) -> Maybe<&2, List<&2, Read>>:
+  Read.told.if(Read.ranked(status, text), text, names, inst)
+
+# what a run takes of its instances' answers: the reads of the first that
+# told them, None when none did
+def Read.first(told: List<&2, Maybe<&2, List<&2, Read>>>) -> Maybe<&2, List<&2, Read>>:
+  match told:
+    case Nil{}:
+      None{}
+    case Con{got, rest}:
+      match got:
+        case Some{rs}:
+          Some{rs}
+        case None{}:
+          Read.first(rest)
+
 # the body of POST <url>/v1/episteme/read: the question and a shard's own
 # name, for a reader that ranked the run
 def Read.named(nm: Name, question: String) -> Value.Json:

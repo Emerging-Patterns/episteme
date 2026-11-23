@@ -9,11 +9,12 @@
 # `Reader.health(url)` GETs `<url>/health` with a 10000 ms timeout; any answer
 # but a 200 is a reason.
 #
-# Trusted, not proved: `Reader.notice(url, body)` POSTs body (a
-# `Read.notice`) to `<url>/v1/episteme/run` with a 3600000 ms timeout and
-# answers `Read.ranked` of the status and body, and False on a transport
-# error: a reader that ranks a run may first read its cold shards, and one
-# without the endpoint answers 404.
+# Trusted, not proved: `Reader.notice(url, body, names)` POSTs body (a
+# `Read.notice` of names) to `<url>/v1/episteme/run` with a 3600000 ms
+# timeout and answers `Heard` of `Read.ranked` and `Read.told` of the status
+# and body (laws/NoticeAnswerTellsReads.bend), and neither ranked nor told on
+# a transport error: a reader that ranks a run may first read its cold
+# shards, and one without the endpoint answers 404.
 #
 # Why it is trusted: It is HTTP through ezhttp's client, which no law reaches;
 # ezhttp's own gate trusts its wire effect (on its src/client.bend and
@@ -71,20 +72,27 @@ def Reader.health(url: String) -> IO(Maybe<&2, String>):
 def Reader.notice_timeout() -> U32:
   3600000
 
-# whether a notice's response says the instance ranked the run
-# (Read.ranked); a transport error says it did not
-def Reader.ranked(res: Client.Response) -> Bool:
+# what a run notice's answer said: whether the instance ranked the run and
+# the run's reads it told there, if it told them
+type Heard is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
+  Heard{ranked: Bool, told: Maybe<&2, List<&2, Rd.Read>>}
+
+# what a notice's response says (Read.ranked, Read.told); a transport error
+# says the run was not ranked and tells nothing
+def Reader.heard(res: Client.Response, names: List<&2, Rd.Name>, +url: String) -> Heard:
   match res:
     case Client.Err{_why}:
-      False{}
-    case Client.Response{status, _headers, _reason, bytes}:
-      Rd.Read.ranked(status, Ez.body_text(bytes))
+      Heard{False{}, None{}}
+    case Client.Response{+status, _headers, _reason, bytes}:
+      +text = Ez.body_text(bytes)
+      Heard{Rd.Read.ranked(status, text), Rd.Read.told(status, text, names, url)}
 
-# tell the instance at url which shards a run reads; answers whether it
-# ranked the run, so its reads can name their shards
-def Reader.notice(+url: String, +body: Value.Json) -> IO(Bool):
-  do IO<Bool>:
+# tell the instance at url which shards a run reads, named names; answers
+# whether it ranked the run, so its reads can name their shards, and the
+# reads it told
+def Reader.notice(+url: String, +body: Value.Json, names: List<&2, Rd.Name>) -> IO(Heard):
+  do IO<Heard>:
     res : Client.Response <- Ez.http.post_opts(url ++ "/v1/episteme/run",
       [Http.H{"Content-Type", "application/json"}],
       Ez.text_body(Json.print(body)), Reader.notice_timeout())
-    return Reader.ranked(res)
+    return Reader.heard(res, names, url)

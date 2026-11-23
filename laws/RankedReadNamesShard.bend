@@ -1,5 +1,7 @@
 # A reader that ranked the whole run from its notice is asked for each of
-# the run's shards by the shard's own name, and is never sent its text.
+# the run's shards by the shard's own name, and is never sent its text; one
+# whose answer already told the run's reads is asked for none
+# (laws/NoticeAnswerTellsReads.bend).
 #
 # `Read.ranked(status, text)` reads the answer to the run notice
 # (laws/RunNoticeNamesShards.bend): True exactly when the status is 200 and
