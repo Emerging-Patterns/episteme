@@ -5,7 +5,10 @@ for one shard (the messages of src/read.bend Read.request), answered with
 {"ids": [...]}. Before a question's reads, episteme posts the run notice
 POST /v1/episteme/run {"question", "shards": [{"source", "n"}, ...]}: F2 then
 ranks every paragraph of the run's shards together and takes them best
-first until BUDGET tokens (characters / 2.55), and answers "ranked": true
+first until BUDGET tokens (characters / 2.55), or until the notice's "depth"
+when the question says one that is less (laws/DepthLimitsARankedRun.bend: a
+caller that reads only what is printed has the run sifted no deeper, and
+episteme then reads fewer shards from their files), and answers "ranked": true
 when its store held every named shard, with "states", how many of the
 run's shard states it found on the GPU, in RAM, on disk, or had to prefill,
 and how many it did not need ("kept"), and with "reads", every shard's
@@ -1029,8 +1032,9 @@ STORE = store.Store()
 RUNS = collections.OrderedDict()  # question -> ({shard key: (label number, rank) pairs}, {(source, n): shard key})
 
 
-def notice(question, names, who=()):
-    """rank the run's shards, for the authors in who when any are named;
+def notice(question, names, who=(), depth=None):
+    """rank the run's shards, for the authors in who when any are named, and
+    no deeper than depth tokens when the question says one (else BUDGET);
     answers how many of the names the store holds, where the run found
     their states, and each held shard's read (told), in the names' order"""
     with META:
@@ -1038,7 +1042,7 @@ def notice(question, names, who=()):
     found = [(nm, s) for nm, s in found if s]
     shards = [s for _, s in found]
     run = Run(shards)
-    picks = run.pick(question, BUDGET, who) if shards else {}
+    picks = run.pick(question, min(BUDGET, depth) if depth else BUDGET, who) if shards else {}
     with META:
         RUNS[question] = (picks, {nm: key_of(s) for nm, s in found})
         while len(RUNS) > 64:
@@ -1104,7 +1108,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/v1/episteme/run":
                 req, t = self.body(), time.time()
-                n, came, reads = notice(req["question"], req["shards"], frozenset(req.get("authors") or ()))
+                n, came, reads = notice(req["question"], req["shards"], frozenset(req.get("authors") or ()),
+                                        float(req["depth"]) if req.get("depth") else None)
                 ranked = n > 0 and n == len(req["shards"])
                 return self.send(200, {"shards": n, "ms": round((time.time() - t) * 1000), "states": came,
                                        "ranked": ranked, **({"reads": reads} if ranked else {})})

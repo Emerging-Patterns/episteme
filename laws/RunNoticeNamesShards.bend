@@ -3,7 +3,8 @@
 # name of `names` in order, each shard's own name `Read.Name{source, n}`. Of
 # a question that names authors (laws/AuthorKeepsNamedAuthors.bend) it is
 # that body with one more field after them, `"authors": [a1, ...]`, the
-# authors in order.
+# authors in order. A question that says how deep its run is sifted has that
+# after all of these (`Read.announce`, laws/DepthLimitsARankedRun.bend).
 #
 # Before a run's reads, `ask` POSTs this body to `<url>/v1/episteme/run` on
 # every instance of the pool, so a reader that ranks across shards (deploy/f2)

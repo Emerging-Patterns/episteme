@@ -429,6 +429,58 @@ def Read.notice.fields(
 def Read.notice(names: List<&2, Name>, question: String, who: List<&2, String>) -> Value.Json:
   Json.obj(Read.notice.fields(question, Read.notice.names(names), who))
 
+# --- how deep a run is sifted (laws/DepthLimitsARankedRun.bend) ---
+
+# the depth a --depth value says once it is read as a number, or the refusal
+def Read.depth.said(got: Maybe<&2, U32>, text: String) -> Result<&2, &2, String, Maybe<&2, U32>>:
+  match got:
+    case None{}:
+      Fail{"--depth takes a whole number of tokens, not " ++ text}
+    case Some{n}:
+      Done{Some{n}}
+
+# the --depth value read: no depth when none was given
+def Read.depth.arg(arg: Maybe<&2, String>) -> Result<&2, &2, String, Maybe<&2, U32>>:
+  match arg:
+    case None{}:
+      Done{None{}}
+    case Some{+text}:
+      Read.depth.said(U32.read(text), text)
+
+# a run's depth: the flag's when it gave one, else the config's
+def Read.deeper(flag: Maybe<&2, U32>, config: Maybe<&2, U32>) -> Maybe<&2, U32>:
+  match flag:
+    case None{}:
+      config
+    case Some{n}:
+      Some{n}
+
+# the fields, then the depth
+def Read.announce.after(fields: List<&1, String & Value.Json>, +n: U32) -> List<&1, String & Value.Json>:
+  match fields:
+    case Nil{}:
+      [("depth", Json.num(U32.show(n)))]
+    case Con{field, rest}:
+      field <> Read.announce.after(rest, n)
+
+# the notice's fields, "depth" after them when the run's depth is said
+def Read.announce.fields(fields: List<&1, String & Value.Json>, depth: Maybe<&2, U32>) -> List<&1, String & Value.Json>:
+  match depth:
+    case None{}:
+      fields
+    case Some{+n}:
+      Read.announce.after(fields, n)
+
+# the run notice of a question that may say how deep its run is sifted:
+# Read.notice, and one more field, "depth", when it does
+def Read.announce(
+  names: List<&2, Name>,
+  question: String,
+  who: List<&2, String>,
+  depth: Maybe<&2, U32>
+) -> Value.Json:
+  Json.obj(Read.announce.fields(Read.notice.fields(question, Read.notice.names(names), who), depth))
+
 # --- the named read ---
 
 # a call to a reader: the path posted to and its body

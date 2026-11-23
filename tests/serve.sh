@@ -6,8 +6,9 @@
 # tool error while the server keeps serving; then, with a reader that ranks
 # the run (tests/fixtures/ranker.py), the best ranked printed and all of it
 # kept in run files, by `ask` and by the tool, a paragraph that holds the
-# question passed over, and a reader that tells the run's reads in its answer
-# to the notice asked for none and printed as one asked for each. EPISTEME names the binary
+# question passed over, a reader that tells the run's reads in its answer
+# to the notice asked for none and printed as one asked for each, and a run's
+# depth said by the flag or the settings. EPISTEME names the binary
 # (default bin/episteme); python3 is the MCP client and the ranking reader.
 set -euo pipefail
 
@@ -179,5 +180,24 @@ grep -q "^shards: $shards read, 0 failed$" "$work/told.txt" || fail "the told ru
 grep -v '^wall time: ' "$work/asked.txt" > "$work/asked.cut"
 grep -v '^wall time: ' "$work/told.txt" > "$work/told.cut"
 cmp -s "$work/asked.cut" "$work/told.cut" || fail "told reads print otherwise than asked ones: $(diff "$work/asked.cut" "$work/told.cut" | head -n 6)"
+
+# a question may say how deep its run is sifted: the reader is told, takes no
+# more, and a run that prints all it was given writes no file; the settings'
+# depth_tokens says it for a question that does not, and the flag wins
+said() { python3 -c "import json, urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:$tport/asked', timeout=5))['depth'])"; }
+[ "$(said)" = None ] || fail "a question that says no depth was announced with one: $(said)"
+runs=$(ls "$EPISTEME_HOME/runs" | wc -l)
+"$bin" ask --depth 1 --filter book:tiny/ "what" > "$work/deep.txt" 2> "$work/err.txt" || fail "ask --depth 1: $(cat "$work/err.txt")"
+[ "$(said)" = 1 ] || fail "the reader was not told the depth 1: $(said)"
+[ "$(grep -c '^#[0-9]*: ' "$work/deep.txt")" = 1 ] || fail "a run of depth 1 does not print one paragraph: $(head -c 600 "$work/deep.txt")"
+grep -q 'seven gulls' "$work/deep.txt" || fail "a run of depth 1 does not print the best ranked: $(cat "$work/deep.txt")"
+[ "$(ls "$EPISTEME_HOME/runs" | wc -l)" = "$runs" ] || fail "a run of depth 1 wrote run files"
+sed -i 's/"budget_tokens": 60000}/"budget_tokens": 60000, "depth_tokens": 1}/' "$EPISTEME_HOME/config.json"
+"$bin" ask --filter book:tiny/ "what" > "$work/deep.txt" 2> "$work/err.txt" || fail "ask with depth_tokens set: $(cat "$work/err.txt")"
+[ "$(said)" = 1 ] && [ "$(grep -c '^#[0-9]*: ' "$work/deep.txt")" = 1 ] || fail "the settings' depth_tokens was not the run's depth: $(said)"
+"$bin" ask --depth 2 --filter book:tiny/ "what" > "$work/deep.txt" 2> "$work/err.txt" || fail "ask --depth 2: $(cat "$work/err.txt")"
+[ "$(said)" = 2 ] && [ "$(grep -c '^#[0-9]*: ' "$work/deep.txt")" = 2 ] || fail "the flag's depth did not win over the settings': $(said)"
+if "$bin" ask --depth deep --filter book:tiny/ "what" > "$work/deep.txt" 2> "$work/err.txt"; then fail "a depth that is no number was taken"; fi
+grep -q -- '--depth takes a whole number of tokens, not deep' "$work/err.txt" || fail "the refusal of a bad depth: $(cat "$work/err.txt")"
 
 echo "serve: ok"

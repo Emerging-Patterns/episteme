@@ -103,11 +103,12 @@ type Slot is Data:  # noqa: L001 IO shell type: no law can import this module (f
   Slot{url: String, slots: U32}
 
 # the settings: the shard size in reader tokens, characters per token
-# times 100 (255 is 2.55), the reader pool and the budget of the excerpts
-# a question prints, in tokens
+# times 100 (255 is 2.55), the reader pool, the budget of the excerpts
+# a question prints, in tokens, and how deep a run is sifted, in tokens,
+# when config.json says (`depth_tokens`, laws/DepthLimitsARankedRun.bend)
 type Config is Data:  # noqa: L001 IO shell type: no law can import this module (foreign effects)
   Config{shard_tokens: U32, chars_per_token: U32, pool: List<&2, Slot>,
-    budget_tokens: U32}
+    budget_tokens: U32, depth_tokens: Maybe<&2, U32>}
 
 # the data directory: $EPISTEME_HOME, or $HOME/.local/share/episteme
 def Store.home() -> IO(String):
@@ -382,7 +383,7 @@ def Store.config.of(+js: Value.Json) -> IO(Config):
     per : U32 <- Store.need(U32, Json.as_u32(Json.get(js, "chars_per_token")), "chars_per_token")
     pool : List<&2, Slot> <- Store.need(List<&2, Slot>, Store.pool(Json.get(js, "pool")), "pool")
     budget : U32 <- Store.need(U32, Json.as_u32(Json.get(js, "budget_tokens")), "budget_tokens")
-    return Config{tokens, per, pool, budget}
+    return Config{tokens, per, pool, budget, Json.as_u32(Json.get(js, "depth_tokens"))}
 
 # the settings from config.json's text, or stop
 def Store.config.parsed(got: Maybe<&2, Value.Json>) -> IO(Config):
@@ -448,7 +449,7 @@ def Store.cap.fits(+tokens: U32, +per: U32) -> Bool:
 # stop when that overflows or is under 2 * PARA_MAX
 def Store.cap(cfg: Config) -> IO(U32):
   match cfg:
-    case Config{+tokens, +per, _pool, _budget}:
+    case Config{+tokens, +per, _pool, _budget, _depth}:
       +cap = U32.div(U32.mul(tokens, per), 100)
       Store.cap.if(Store.cap.fits(tokens, per),
         U32.is_ge(cap, U32.mul(2, P.Para.max())), cap)

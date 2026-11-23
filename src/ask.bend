@@ -18,9 +18,10 @@
 # names a failed read `failed <source> shard <n> at <url>: <why>`, and each
 # `--json` read holds `"shard"`, its place in the run, then `"source"` and
 # `"n"`. With none it asks no reader; else it first sends every instance of
-# the configured pool the run notice `Read.notice(names, question, who)` (the
-# run's shards' own names in run order; `Reader.notice`,
-# laws/RunNoticeNamesShards.bend). When an instance's answer told the run's
+# the configured pool the run notice `Read.announce(names, question, who,
+# depth)` (the run's shards' own names in run order, and the run's depth when
+# `--depth` or the settings' `depth_tokens` says one; `Reader.notice`,
+# laws/RunNoticeNamesShards.bend, laws/DepthLimitsARankedRun.bend). When an instance's answer told the run's
 # reads (`Read.first` of each answer's `Read.told`,
 # laws/NoticeAnswerTellsReads.bend) those are the run's reads, no read is
 # asked of any reader, and only the shards whose read named labels are read
@@ -64,11 +65,12 @@
 # laws/EveryShardIsRead.bend, laws/FailedReadsListed.bend,
 # laws/ExcerptsFitBudget.bend, laws/AskingsArePassedOver.bend,
 # laws/BestRankedArePrinted.bend, laws/NextBestAreInPages.bend,
-# laws/NoticeAnswerTellsReads.bend, laws/ExcerptsRenderAsText.bend and the store;
+# laws/NoticeAnswerTellsReads.bend, laws/DepthLimitsARankedRun.bend,
+# laws/ExcerptsRenderAsText.bend and the store;
 # `tests/serve.sh` checks, with a reader that ranks the run, the best ranked
 # printed, all of it in the run files, the next best in a page, `show`
-# printing a run file, a paragraph that holds the question passed over and a reader that tells its
-# reads asked for none, and `tests/smoke.sh` checks the
+# printing a run file, a paragraph that holds the question passed over, a reader that tells its
+# reads asked for none and a run's depth said by the flag or the settings, and `tests/smoke.sh` checks the
 # refusal, the refusal when the shards are behind the log, and a pool with no
 # healthy instance, and `tests/live.sh` checks a run's excerpts, footer, run
 # files and exit codes.
@@ -177,8 +179,21 @@ def Ask.number(ss: List<&2, S.Shard>, +num: U32) -> List<&2, S.Shard>:
 # the reader pool of the settings
 def Ask.pool(cfg: St.Config) -> List<&2, St.Slot>:
   match cfg:
-    case St.Config{_tokens, _per, pool, _budget}:
+    case St.Config{_tokens, _per, pool, _budget, _depth}:
       pool
+
+# how deep the settings say a run is sifted, if they say
+def Ask.depth(cfg: St.Config) -> Maybe<&2, U32>:
+  match cfg:
+    case St.Config{_tokens, _per, _pool, _budget, depth}:
+      depth
+
+# the settings with the run's depth: the --depth flag's when it gave one,
+# else their own (Read.deeper)
+def Ask.deep(cfg: St.Config, flag: Maybe<&2, U32>) -> St.Config:
+  match cfg:
+    case St.Config{tokens, per, pool, budget, depth}:
+      St.Config{tokens, per, pool, budget, Rd.Read.deeper(flag, depth)}
 
 # url ahead of urls when it ranked the run
 def Ask.ranked(ranked: Bool, url: String, urls: List<&2, String>) -> List<&2, String>:
@@ -364,14 +379,15 @@ def Ask.read(
   +pool: List<&2, St.Slot>,
   +names: List<&2, Rd.Name>,
   +question: String,
-  who: List<&2, String>
+  who: List<&2, String>,
+  depth: Maybe<&2, U32>
 ) -> IO(Reads):
   match ss:
     case Nil{}:
       IO.pure(Reads, Reads{Some{[]}, []})
     case Con{_s, _rest}:
       do IO<Reads>:
-        said : Said <- Ask.notice(pool, Rd.Read.notice(names, question, who), names)
+        said : Said <- Ask.notice(pool, Rd.Read.announce(names, question, who, depth), names)
         Ask.read.said(said, ss, paths, pool, names, question)
 
 # the shards of lights, in order
@@ -683,7 +699,7 @@ def Ask.came(
   match got cfg:
     case None{} _:
       Fail{Refusal{2, Pl.Pool.none()}}
-    case Some{got} St.Config{_tokens, per, _pool, budget}:
+    case Some{got} St.Config{_tokens, per, _pool, budget, _depth}:
       +rs = Rd.Read.ordered(hits, got)
       Done{Ask.cut(hits, rs, Rk.Rank.items(hits, rs), budget, per, since, who, names)}
 
@@ -751,7 +767,8 @@ def Ask.reads(
         +kept : List<&2, St.Light> = Ask.recent(since, ls)
         +ss : List<&2, S.Shard> = Ask.shards(kept)
         +names : List<&2, Rd.Name> = Ask.names(ss)
-        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question, who)
+        reads : Reads <- Ask.read(Ask.number(ss, 1), Ask.paths(kept), Ask.pool(cfg), names, question, who,
+          Ask.depth(cfg))
         return Ask.ran(Ask.passed(reads, question), Ask.shards(ls), Ask.counts(ls), Ask.counts(kept), cfg,
           since, who, names)
 
@@ -894,12 +911,13 @@ def Ask.go(
   +since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String,
-  +json: Bool
+  +json: Bool,
+  depth: Maybe<&2, U32>
 ) -> IO(U32):
   do IO<U32>:
     +t0 : Nat <- IO.now()
-    +cfg : St.Config <- St.Store.config()
-    got : Got <- Ask.gather("ask", cfg, filter, since, who, question)
+    cfg : St.Config <- St.Store.config()
+    got : Got <- Ask.gather("ask", Ask.deep(cfg, depth), filter, since, who, question)
     Ask.done(got, json, t0)
 
 # the refusal on stderr and exit 2
@@ -908,10 +926,11 @@ def Ask.refuse(why: String) -> IO(U32):
     IO.print_err("episteme: " ++ why)
     return 2
 
-# the question asked when the --since value read, else its refusal
-def Ask.dated(
-  res: Result<&2, &2, String, Maybe<&2, String>>,
+# the question asked when the --depth value read, else its refusal
+def Ask.sized(
+  res: Result<&2, &2, String, Maybe<&2, U32>>,
   +filter: List<&2, F.Sel>,
+  +since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String,
   +json: Bool
@@ -919,8 +938,23 @@ def Ask.dated(
   match res:
     case Fail{why}:
       Ask.refuse(why)
-    case Done{since}:
-      Ask.go(filter, since, who, question, json)
+    case Done{depth}:
+      Ask.go(filter, since, who, question, json, depth)
+
+# the question asked when the --since value read, else its refusal
+def Ask.dated(
+  res: Result<&2, &2, String, Maybe<&2, String>>,
+  +filter: List<&2, F.Sel>,
+  +who: List<&2, String>,
+  +question: String,
+  +json: Bool,
+  depth: Maybe<&2, String>
+) -> IO(U32):
+  match res:
+    case Fail{why}:
+      Ask.refuse(why)
+    case Done{+since}:
+      Ask.sized(Rd.Read.depth.arg(depth), filter, since, who, question, json)
 
 # the --since value read when the check passed, else the refusal and exit 2
 def Ask.checked(
@@ -929,27 +963,31 @@ def Ask.checked(
   since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String,
-  +json: Bool
+  +json: Bool,
+  depth: Maybe<&2, String>
 ) -> IO(U32):
   match res:
     case Fail{why}:
       Ask.refuse(why)
     case Done{_u}:
-      Ask.dated(F.Filter.since.arg(since), filter, who, question, json)
+      Ask.dated(F.Filter.since.arg(since), filter, who, question, json, depth)
 
-# ask a question: refused with exit 2 when the filter or the --since value
-# is, else read every shard the filter hits that holds a record at or after
-# the since, and deliver the excerpts by the authors named (by any author
-# when none is); answers the exit code, 1 when a read failed
+# ask a question: refused with exit 2 when the filter, the --since value or
+# the --depth value is, else read every shard the filter hits that holds a
+# record at or after the since, and deliver the excerpts by the authors named
+# (by any author when none is); the readers are told the run's depth when the
+# flag or the settings say one (laws/DepthLimitsARankedRun.bend); answers the
+# exit code, 1 when a read failed
 def Ask.run(
   +refs: List<&2, F.Refusal>,
   +filter: List<&2, F.Sel>,
   since: Maybe<&2, String>,
   +who: List<&2, String>,
   +question: String,
-  +json: Bool
+  +json: Bool,
+  depth: Maybe<&2, String>
 ) -> IO(U32):
-  Ask.checked(F.Filter.check(refs, filter), filter, since, who, question, json)
+  Ask.checked(F.Filter.check(refs, filter), filter, since, who, question, json, depth)
 
 # --- for the server ---
 

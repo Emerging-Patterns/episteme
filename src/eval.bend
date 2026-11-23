@@ -197,7 +197,7 @@ def Eval.each(+cfg: St.Config, qs: List<&2, Q>) -> IO(List<&2, Sc.Row>):
 # the configured characters a token, in hundredths
 def Eval.per(cfg: St.Config) -> Nat:
   match cfg:
-    case St.Config{_tokens, per, _pool, _budget}:
+    case St.Config{_tokens, per, _pool, _budget, _depth}:
       U32.to_nat(per)
 
 # score every question, write runs/eval-<label>-<time>/report.json, print
