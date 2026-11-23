@@ -82,7 +82,7 @@ def asked():
 
 SEEN = {}  # "q7", "q11" -> the queries of the last tail pass, as attention used them (model.tail)
 READ = {"q7": {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)},  # query heads by the key-value head they read
-        "q11": {h // 4: (h,) for h in model.HEADS}}
+        "q11": {h // 4: (i,) for i, h in enumerate(model.HEADS)}}  # of layer 11 a pass hands back the two heads read
 
 dev = model.DEV
 S = torch.zeros(joint.WIDE, joint.WIDE, dtype=torch.float64, device=dev)

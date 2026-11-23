@@ -12,12 +12,16 @@ between. A question's score for each paragraph is the attention its tokens
 pay to the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens.
 
-A question's tail is not run through the stock forward (tail): the tails of
+A question's tail is not run through the stock forward: the tails of
 several questions, laid end to end, go through the layers once a shard in
 one pass over several shards, each token reading its shard's state in
 place, so a shard's keys and values are held once for all the questions
 asked of it, nothing of a state is copied for a question or written back,
-and no question is padded to another's length.
+and no question is padded to another's length. The pass is f2pass's (tail):
+a library of its own kernels in C++ and CUDA (native/f2pass.cu, built into
+the environment by this directory's meson.build), which reads the states
+where these tensors lie on the device. PyTorch here prefills a shard
+(the model's own forward) and holds the memory.
 
 A state is kept packed (pack) and read unpacked (unpack). With no book
 (F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
@@ -28,12 +32,8 @@ pass reads a kept state the same way either way; a state scored in passing
 is read as its decoding made it, in half precision. The scores are always
 those of the unpacked state, also for the question that prefills it.
 
-The pass itself is run by f2pass when that package is installed (the same
-pass written in C++ and CUDA, native/f2pass.cu: built by this directory's
-meson.build), and by the PyTorch calls below (torch_tail) when it is not,
-when F2_NATIVE is 0, or when a pass is one f2pass does not take. The two
-differ as the PyTorch pass differs from itself between two shapes of pass
-(bf16 sums in another order)."""
+The unpacking is f2pass's too, and gives the bits joint.py's own decoding
+gives (its arithmetic in the same precision and order)."""
 import bisect, copy, ctypes, functools, hashlib, os, sys, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
@@ -41,10 +41,10 @@ import joint
 import store
 from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
-try:
-    import f2pass
-except (ImportError, OSError, AssertionError):  # not installed, or its library does not load
-    f2pass = None
+import f2pass
+
+if f2pass.ABI != 2:  # the package in the environment was built from another version of native/
+    raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
@@ -52,8 +52,7 @@ ALONE = 3  # the full-attention layer in which a question's tokens see the quest
 MID = 7  # the full-attention layer whose keys and values a state holds
 HEADS = (3, 4)  # heads of layer 11 that are read
 CHUNK = 2048  # prefill chunk, in tokens
-ANSWER = '{\n  "ids": [\n    "p'  # the reply prefix after the question
-DEV = "cuda" if torch.cuda.is_available() else "cpu"
+DEV = "cuda"  # the passes are CUDA kernels: there is no reader on a host alone
 # a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
 BOOK = None if BOOK_ID is None else torch.load(BOOK_PATH, weights_only=True)
 
@@ -105,8 +104,15 @@ def load():
 
 
 M, AT = load()
+LIB = f2pass.Pass(next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors")))  # the weights again, as f2pass lays them
+TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
 if BOOK is not None:
     BOOK = joint.Book(BOOK, DEV)
+    # f2pass reads the book's tensors where they lie for as long as the process runs (BOOK holds them)
+    if not (BOOK.rank and BOOK.fast == torch.float16 and BOOK.lo.dtype == torch.int64 and BOOK.back.is_contiguous() and LIB.book(
+            len(BOOK.step), BOOK.nbytes, *(x.data_ptr() for x in (BOOK.lo, BOOK.shift, BOOK.mask2, BOOK.odd, BOOK.halfstep, BOOK.back, BOOK.mid)),
+            BOOK.rank, BOOK.resid)):
+        raise RuntimeError("the book at %s is not one f2pass unpacks states of (recurrent states as a rank and four bits)" % BOOK_PATH)
 
 
 def template(text):
@@ -211,53 +217,118 @@ def unpacked(cache):
     return size
 
 
-@torch.no_grad()
+def again(f):
+    """f(), and once more if it fails: f2pass's buffers are its own, not
+    PyTorch's, so before the second try what PyTorch holds unused is handed
+    back to the device. A second failure is the caller's"""
+    try:
+        return f()
+    except RuntimeError as e:
+        print("f2: %s; once more" % e, file=sys.stderr, flush=True)
+        torch.cuda.empty_cache()
+        return f()
+
+
 def unpack(state, kept=True):
     """a state as a tail pass reads it, on the GPU: a state whose keys and
     values are coded together gets them back (a copy; the packed state is
     left as it is), any other is returned as it is. A state to be kept gets
     them as int8, the layout the GPU's tier holds; one scored in passing
     (not kept) gets them as the decoding made them, in half precision, since
-    the pass that follows would only turn the int8 back into floats"""
+    the pass that follows would only turn the int8 back into floats.
+    PyTorch gives the memory the unpacked state lies in and f2pass fills it"""
     if not joined(state[1]):
         return state
+    return again(lambda: unpacking(state, kept))
+
+
+def spare(layer, made):
+    """what is left of a packed state's layer once made's names are set, as
+    unpack leaves it: each tensor copied. A packed state may come as views
+    of one block (f2serve's lift), and a view kept in the unpacked state
+    would keep the whole block on the GPU"""
+    for name, v in list(vars(layer).items()):
+        if name in made:
+            continue
+        if torch.is_tensor(v):
+            setattr(layer, name, v.clone())
+        elif isinstance(v, dict):
+            setattr(layer, name, {i: t.clone() if torch.is_tensor(t) else t for i, t in v.items()})
+
+
+def unpacking(state, kept):
+    """unpack's work. ValueError for a packed state whose tensors are not
+    what pack leaves"""
+    held = []  # what is read only until the library returns
+
+    def whole(x, dtype):
+        if x.dtype != dtype:
+            raise ValueError("a packed state's %s where pack leaves %s" % (x.dtype, dtype))
+        if not x.is_contiguous():  # a part kept as a slice (a state not come through f2serve's lift)
+            x = x.contiguous()
+            held.append(x)
+        return x.data_ptr()
+
     c = copy.copy(state[1])
     c.layers = [copy.copy(layer) for layer in state[1].layers]
     mid, top = c.layers[MID], c.layers[SCALED]
-    y = BOOK.decode(mid.joint, mid.joint_at, mid.joint_exact)
-    k7, v7, k11 = joint.tensors(y, mid.joint_rms.to(y.dtype), *(x.to(y.dtype) for x in angles(y.shape[0])))
+    T = mid.joint.shape[0]
+    cos, sin = angles(T)
+    p = f2pass.Packed()
+    p.tokens, p.kept, p.exact = T, int(kept), mid.joint_at.shape[0]
+    p.joint, p.at, p.rows = whole(mid.joint, torch.uint8), whole(mid.joint_at, torch.int32), whole(mid.joint_exact, torch.float16)
+    p.rms, p.cos, p.sin = whole(mid.joint_rms, torch.float16), whole(cos, torch.float32), whole(sin, torch.float32)
+    # the linear-attention layers' states: the recurrent ones made, the convolution ones copied, each kind in one block
+    lin = [(li, layer) for li, layer in enumerate(c.layers) if isinstance(vars(layer).get("low_left"), dict)]
+    if not lin or any(hasattr(layer, "recurrent_states") and not isinstance(vars(layer).get("low_left"), dict) for layer in c.layers):
+        raise ValueError("a packed state whose recurrent states are kept whole")
+    convs = []
+    for li, layer in lin:
+        parts = [(i, t) for i, t in layer.low_left.items() if torch.is_tensor(t)]
+        cv = [(i, t) for i, t in layer.conv_states.items() if torch.is_tensor(t)]
+        if len(parts) != 1 or parts[0][1].shape[-1] != BOOK.rank or len(cv) != 1 or cv[0][1].shape != lin[0][1].conv_states[cv[0][0]].shape:
+            raise ValueError("a packed state whose layer %d holds other than one state of the book's rank" % li)
+        i, left = parts[0]
+        p.left[li], p.right[li] = whole(left, torch.float16), whole(layer.low_right[i], torch.float16)
+        p.rest[li], p.scale[li] = whole(layer.low_rest[i], torch.uint8), whole(layer.low_scale[i], torch.float16)
+        p.conv[li] = whole(cv[0][1], torch.bfloat16)
+        convs.append((i, cv[0][0], cv[0][1].shape))
+    rec = torch.empty((len(lin), 1, 16, 128, 128), dtype=torch.bfloat16, device=DEV)
+    conv = torch.empty((len(lin),) + tuple(convs[0][2]), dtype=torch.bfloat16, device=DEV)
+    p.conv_bytes = conv[0].numel() * 2
+    for at, (li, _) in enumerate(lin):
+        p.rec[li], p.conv_out[li] = rec[at].data_ptr(), conv[at].data_ptr()
     if kept:
-        int8(mid, "keys", k7, -2)
-        int8(mid, "values", v7, -1)
-        int8(top, "keys", k11, -2)
+        # int8, a token's two heads side by side as they are in its row
+        k7, v7, k11 = (torch.empty((T, 2, 256), dtype=torch.int8, device=DEV) for _ in range(3))
+        k7s, k11s = (torch.empty((1, 2, 1, 256), dtype=torch.float32, device=DEV) for _ in range(2))
+        v7s = torch.empty((1, 2, T, 1), dtype=torch.float32, device=DEV)
+        p.k7, p.v7, p.k11 = k7.data_ptr(), v7.data_ptr(), k11.data_ptr()
+        p.k7_scale, p.v7_scale, p.k11_scale = k7s.data_ptr(), v7s.data_ptr(), k11s.data_ptr()
     else:
-        mid.keys, mid.values, top.keys = k7[None], v7[None], k11[None]
+        y = torch.empty((T, joint.WIDE), dtype=torch.float16, device=DEV)
+        p.y = y.data_ptr()
+    if torch.cuda.current_stream() != torch.cuda.default_stream():
+        torch.cuda.current_stream().synchronize()
+    LIB.unpack(p)  # done when it returns: the caller may drop the packed state
+    del held
+    if kept:
+        mid.keys, mid.values, top.keys = (x.transpose(0, 1)[None] for x in (k7, v7, k11))
+        mid.keys_scale, mid.values_scale, top.keys_scale = k7s, v7s, k11s
+    else:
+        mid.keys, mid.values, top.keys = (y[:, at:at + 512].view(-1, 2, 256).transpose(0, 1)[None] for at in (0, 512, 1024))
     for name in ("joint", "joint_at", "joint_exact", "joint_rms"):
         delattr(mid, name)
     made = {id(mid): {"keys", "values", "keys_scale", "values_scale"}, id(top): {"keys", "keys_scale"}}
+    for at, (li, layer) in enumerate(lin):
+        i, ci, _ = convs[at]
+        layer.recurrent_states = {**layer.recurrent_states, i: rec[at]}
+        layer.conv_states = {**layer.conv_states, ci: conv[at]}
+        for name in ("low_left", "low_right", "low_rest", "low_scale"):
+            delattr(layer, name)
+        made[id(layer)] = {"recurrent_states", "conv_states"}
     for layer in c.layers:
-        if isinstance(vars(layer).get("low_left"), dict):
-            layer.recurrent_states = dict(layer.recurrent_states)
-            for i in layer.low_left:
-                layer.recurrent_states[i] = joint.lift(layer.low_left[i], layer.low_right[i], layer.low_rest[i],
-                                                       layer.low_scale[i], BOOK.resid).to(torch.bfloat16)
-            for name in ("low_left", "low_right", "low_rest", "low_scale"):
-                delattr(layer, name)
-            made.setdefault(id(layer), set()).add("recurrent_states")
-        # what is left of the packed state (the convolution states, a few kB) is copied: a packed state may come
-        # as views of one block (f2serve's lift), and a view kept here would keep the whole block on the GPU
-        for name, v in list(vars(layer).items()):
-            if name in made.get(id(layer), ()):
-                continue
-            if torch.is_tensor(v):
-                setattr(layer, name, v.clone())
-            elif isinstance(v, dict):
-                setattr(layer, name, {i: t.clone() if torch.is_tensor(t) else t for i, t in v.items()})
-    if torch.cuda.is_available():
-        # the work above is done before this returns: the caller may now drop the packed state, and a block
-        # freed while kernels that read it are still queued on this stream is handed to the next transfer on
-        # the lift's stream, which writes over it (seen as scores of noise and out-of-range indices)
-        torch.cuda.current_stream().synchronize()
+        spare(layer, made.get(id(layer), ()))
     return (state[0], c) + tuple(state[2:])
 
 
@@ -311,156 +382,9 @@ def together(questions):
     return sum(map(len, tails)) - (len(tails) - 1) * shared(tails)
 
 
-@functools.lru_cache(maxsize=64)
-@torch.no_grad()
-def question_tail(tail, question):
-    """the tail's input embeddings on the device and the question's token
-    count: every shard of a run shares them, so they are made once. Only the
-    question's own tokens are read, and the model is causal, so the tail is
-    cut after them: the tokens that follow cannot change those rows"""
-    t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
-    nq = tokens(question)
-    assert tuple(t_ids[:nq]) == opening(question), "a tail opens with the template and the question"
-    return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
-
-
-def tf32(f):
-    """f run with its fp32 products on the tensor cores (TF32: the factors'
-    mantissas rounded to 10 bits, the sums kept in fp32), the setting put
-    back after. For the delta rule alone: its factors are made from bf16
-    activations and states, which hold 8 bits. The readout's sums over the
-    attention weights are left in full fp32"""
-    @functools.wraps(f)
-    def g(*a, **k):
-        was = torch.backends.cuda.matmul.allow_tf32
-        torch.backends.cuda.matmul.allow_tf32 = True
-        try:
-            return f(*a, **k)
-        finally:
-            torch.backends.cuda.matmul.allow_tf32 = was
-    return g
-
-
-@tf32
-def delta(query, key, value, decay, beta, state, seen):
-    """the gated delta rule's outputs for the questions' tokens, each
-    question starting from its shard's recurrent state: what the stock
-    chunked rule gives a question's tail run alone as one chunk (it pads a
-    tail to 64 tokens, and works out a final state no tail pass keeps).
-    query, key, value [shards, heads, tokens, 128], decay and beta [shards,
-    heads, tokens], state [shards, heads, 128, 128]; seen [tokens, tokens]
-    says, by a token, which tokens come before it or are it: its own
-    question's and the opening all share. The rule's one triangular system
-    is over all the tokens at once, a token's row holding only the tokens
-    it sees, so each question is solved as if alone and the opening once"""
-    N, D = key.shape[-2:]
-    saw = seen.float()
-    query = query * torch.rsqrt((query * query).sum(-1, keepdim=True) + 1e-6) * D ** -0.5
-    key = key * torch.rsqrt((key * key).sum(-1, keepdim=True) + 1e-6)
-    cum = decay @ saw.T  # each token's decay summed over what it sees, itself included
-    grown = cum.exp()[..., None]
-    pair = (cum[..., :, None] - cum[..., None, :]).masked_fill(~seen, float("-inf")).exp()
-    kt = key.transpose(-1, -2)
-    k_beta = key * beta[..., None]
-    # what the old state says to the tokens' keys and to their queries
-    reads = torch.cat([k_beta * grown, query * grown], -2) @ state
-    # each token writes what the state and the tokens before it do not already say of its key
-    new = torch.linalg.solve_triangular((k_beta @ kt) * pair, value * beta[..., None] - reads[..., :N, :],
-                                        upper=False, unitriangular=True)
-    return reads[..., N:, :] + ((query @ kt) * pair) @ new
-
-
-def linear(net, x, rows, seen, at, back):
-    """a linear-attention layer's output for the questions' tokens x
-    [shards, tokens, hidden], from the convolution and recurrent states the
-    shards' caches hold in rows (one cache layer a shard):
-    Qwen3_5GatedDeltaNet.forward with the cache read and not written, over
-    tokens that are several questions end to end. A token's convolution
-    takes the kernel's width of inputs up to its own in its own question
-    (and the opening), the last tokens of the shard before them: for most
-    tokens those are the ones before it in the row, and for the tokens at
-    (the first of each question after the first) back [those tokens,
-    kernel] says which they are"""
-    B, N, _ = x.shape
-    conv = torch.cat([next(v for v in r.conv_states.values() if torch.is_tensor(v)) for r in rows])
-    state = torch.cat([next(v for v in r.recurrent_states.values() if torch.is_tensor(v)) for r in rows]).float()
-    w = net.conv1d.weight
-    full = torch.cat([conv[..., 1 - w.shape[-1]:].to(w.dtype), net.in_proj_qkv(x).transpose(1, 2).to(w.dtype)], -1)
-    mixed = torch.nn.functional.conv1d(full, w, net.conv1d.bias, groups=w.shape[0])
-    if len(at):  # a later question's first tokens: the tokens before them in the row are another question's
-        again = (full[:, :, back] * w).sum(-1)
-        mixed[:, :, at] = again if net.conv1d.bias is None else again + net.conv1d.bias[:, None]
-    mixed = torch.nn.functional.silu(mixed).to(x.dtype).transpose(1, 2)
-    q, k, v = torch.split(mixed, [net.key_dim, net.key_dim, net.value_dim], dim=-1)
-    heads = lambda t, d: t.reshape(B, N, -1, d).transpose(1, 2).float()
-    q, k, v = heads(q, net.head_k_dim), heads(k, net.head_k_dim), heads(v, net.head_v_dim)
-    rep = net.num_v_heads // net.num_k_heads
-    if rep > 1:
-        q, k = q.repeat_interleave(rep, dim=1), k.repeat_interleave(rep, dim=1)
-    beta = net.in_proj_b(x).sigmoid().transpose(1, 2).float()
-    decay = (-net.A_log.float().exp() * torch.nn.functional.softplus(net.in_proj_a(x).float() + net.dt_bias)).transpose(1, 2)
-    out = delta(q, k, v, decay, beta, state, seen).transpose(1, 2).to(x.dtype)  # [shards, tokens, heads, 128]
-    z = net.in_proj_z(x)
-    return net.out_proj(net.norm(out.reshape(-1, net.head_v_dim), z.reshape(-1, net.head_v_dim)).reshape(B, N, -1))
-
-
-def held(rows, name, top, mine):
-    """one bf16 buffer [shards, 2, top + tokens, 256] of what a shard's
-    questions read in a layer: the shard's keys or values (int8 times their
-    scale, zeros from the shard's end to top; none of them when top is 0,
-    layer 3) and after them the questions' own, mine [shards, 2, tokens,
-    256]. Each part is written once, where it is read: a shard's numbers
-    times their scale go straight into the buffer in its precision, and
-    only what lies past a shard's end is filled with zeros"""
-    B, G, N, d = mine.shape
-    buf = torch.empty((B, G, top + N, d), dtype=torch.bfloat16, device=mine.device)
-    for b, r in enumerate(rows if top else ()):
-        x, sc = getattr(r, name), vars(r).get(name + "_scale")
-        n = x.shape[-2]
-        if sc is not None:
-            torch.mul(x[0], sc[0].to(buf.dtype), out=buf[b, :, :n])
-        else:
-            buf[b, :, :n] = x[0]
-        buf[b, :, n:top] = 0
-    buf[:, :, top:] = mine
-    return buf
-
-
-def weights(q, keys, top, lens, seen, scaling):
-    """the attention weights [shards, 2, heads x tokens, top + tokens], in
-    fp32, of the questions' queries q [shards, 2, heads of a group, tokens,
-    256] over keys (held): a token sees its shard up to the shard's length
-    (lens) and, up to itself, its own question's tokens and the opening all
-    the questions share (seen [tokens, tokens]: by a token, the tokens it
-    sees). A query head reads the keys of its
-    group, and a shard's questions and their heads are the rows of one
-    product with the shard's keys, which are held once"""
-    B, G, each, N, d = q.shape
-    w = (q * scaling).reshape(B, G, each * N, d) @ keys.transpose(-1, -2)
-    for b, n in enumerate(lens.tolist() if top else ()):
-        if n < top:
-            w[b, :, :, n:top] = float("-inf")
-    w[..., top:].masked_fill_(~seen.repeat(each, 1), float("-inf"))
-    return torch.softmax(w, -1, dtype=torch.float32)
-
-
-NATIVE = [None]  # f2pass's handle, opened at the first pass; False when its pass is not to be used
-
-
-def native():
-    """f2pass's handle with the model's weights on the device, or False"""
-    if NATIVE[0] is None:
-        NATIVE[0] = False
-        if f2pass is not None and DEV == "cuda" and os.environ.get("F2_NATIVE", "1") != "0" and getattr(f2pass, "ABI", None) == 1:
-            NATIVE[0] = f2pass.Pass(next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors")))
-    return NATIVE[0]
-
-
 def by():
-    """what runs the tail passes: "PyTorch", or f2pass with the first
+    """what runs the tail passes and the unpacking: f2pass, with the first
     twelve hex digits of its library's SHA-1"""
-    if not native():
-        return "PyTorch"
     return "f2pass " + hashlib.sha1(open(f2pass.LIB._name, "rb").read()).hexdigest()[:12]
 
 
@@ -473,29 +397,29 @@ def heads(x):
 
 def lying(state):
     """a state as f2pass reads it where it lies (f2pass.State, and what must
-    be held while it is read), or None for a state it does not take: one
-    whose keys and values are neither a kept state's int8 nor the halves of
-    a state scored in passing"""
+    be held while it is read). ValueError for a state that is not as unpack
+    leaves one: its keys and values a kept state's int8 with their scales,
+    or the halves of a state scored in passing"""
     ids, cache, spans = state[0], state[1], state[2]
     mid, top = cache.layers[MID], cache.layers[SCALED]
     kind = {torch.int8: f2pass.INT8, torch.float16: f2pass.HALF}.get(mid.keys.dtype)
     held = (mid.keys, mid.values, top.keys)
     if kind is None or any(x.dtype != mid.keys.dtype or x.dim() != 4 or x.shape[-2] != len(ids) or x.stride(3) != 1 for x in held):
-        return None
+        raise ValueError("a state whose keys and values are not as unpack leaves them (%s)" % mid.keys.dtype)
     s = f2pass.State()
     s.len, s.kind = len(ids), kind
     (s.k7, s.k7_step), (s.v7, s.v7_step), (s.k11, s.k11_step) = map(heads, held)
     if kind == f2pass.INT8:
         for name, sc, wide in (("k7_scale", mid.keys_scale, 256), ("v7_scale", mid.values_scale, s.len), ("k11_scale", top.keys_scale, 256)):
             if sc.dtype != torch.float32 or not sc.is_contiguous() or sc.numel() != 2 * wide:
-                return None
+                raise ValueError("a kept state whose %s is not a float a channel or a token" % name)
             setattr(s, name, (ctypes.c_void_p * 2)(sc.data_ptr(), sc.data_ptr() + wide * 4))
     for li, layer in enumerate(cache.layers):
         if hasattr(layer, "conv_states"):
             conv = next(v for v in layer.conv_states.values() if torch.is_tensor(v))
             rec = next(v for v in layer.recurrent_states.values() if torch.is_tensor(v))
             if conv.dtype != torch.bfloat16 or rec.dtype != torch.bfloat16 or not conv.is_contiguous() or not rec.is_contiguous():
-                return None
+                raise ValueError("a state whose layer %d does not hold its states in bf16" % li)
             s.conv[li], s.rec[li], s.conv_len = conv.data_ptr(), rec.data_ptr(), conv.shape[-1]
     flat = (ctypes.c_int * (2 * len(spans)))(*[x for sp in spans for x in sp])
     s.spans, s.span = len(spans), flat
@@ -517,40 +441,7 @@ def row(questions):
 
 def tail(states, questions, seen=None):
     """scores(state, question) for every one of several shards and several
-    questions in one pass, [shard][question]: by f2pass when it is there and
-    takes the pass (its states' layouts, at most its count of tokens, no
-    queries asked for), else by torch_tail; so is a pass f2pass fails at"""
-    lib = native() if seen is None else False
-    if lib:
-        ids, who, at, same, lens = row(questions)
-        there = [lying(s) for s in states] if len(ids) <= f2pass.TOKENS else [None]
-        if all(there):
-            most = max(len(s[2]) for s in states)
-            # the library's kernels go on the device's default stream, where PyTorch's own are queued unless a
-            # thread chose another: what such a thread has queued for these states is waited for first
-            if torch.cuda.current_stream() != torch.cuda.default_stream():
-                torch.cuda.current_stream().synchronize()
-            out = None
-            for again in (True, False):
-                try:
-                    out = lib.tail([s for s, _ in there], ids, who, at, same, lens, most)
-                    break
-                except RuntimeError as e:
-                    # its buffers are its own, not PyTorch's: tried once more with what PyTorch holds unused handed
-                    # back to the device, and then the pass is run by PyTorch, and the log says so
-                    if again:
-                        torch.cuda.empty_cache()
-                    else:
-                        print("f2: %s; this pass by PyTorch" % e, file=sys.stderr, flush=True)
-            if out is not None:
-                res = torch.frombuffer(out, dtype=torch.float32).view(len(states), len(questions), most)
-                return [[res[b, k, :len(s[2])].clone() for k in range(len(questions))] for b, s in enumerate(states)]
-    return torch_tail(states, questions, seen)
-
-
-@torch.no_grad()
-def torch_tail(states, questions, seen=None):
-    """tail by PyTorch calls. The questions' tails are laid
+    questions in one pass, [shard][question]. The questions' tails are laid
     end to end, and that row of tokens runs through the layers once a shard,
     each token reading its shard's state where the stock forward would read
     a cache, and of the tokens only those of its own question up to itself.
@@ -560,77 +451,25 @@ def torch_tail(states, questions, seen=None):
     own tokens, not the long one's. The tokens all the questions open with
     (the template's, and the words they share after it) are in the row once:
     a token sees only what comes before it, so what they come to is the
-    same for every question. seen, a dict, is given the queries of
-    layers 7 and 11 as attention used them ("q7", "q11": [shards, 8, tokens,
-    256]), which fit.py weighs a book by"""
-    B, K = len(states), len(questions)
-    tails = [question_tail(states[0][3], q) for q in questions]
-    ns = [nq for _, nq in tails]
-    same = shared([opening(q) for q in questions])  # the tokens every question opens with are run once: what they come to depends on the shard alone
-    # each token's question (-1: the opening all share) and its place in the question's tail
-    whose = [-1] * same + [k for k, n in enumerate(ns) for _ in range(same, n)]
-    place = list(range(same)) + [t for n in ns for t in range(same, n)]
-    who, at = torch.tensor(whose, device=DEV), torch.tensor(place, device=DEV)
-    N = len(whose)
-    sees = ((who[None] == who[:, None]) | (who[None] < 0)) & (at[None] <= at[:, None])  # by the row's token, of the column's
-    # the inputs of each token's convolution: the kernel's width of places up to its own in its question's tail,
-    # as places in [the shard's last tokens, the row]: a place before the tail is one of the shard's
-    width = next(l.linear_attn.conv1d.weight.shape[-1] for l in M.model.layers if hasattr(l, "linear_attn"))
-    first = {k: p for p, k in reversed(list(enumerate(whose)))}  # each question's first own token in the row
-    row = lambda k, t: t if t < same else first[k] + t - same
-    back = [[width - 1 + row(k, t - d) if t >= d else width - 1 + t - d for d in range(width - 1, -1, -1)]
-            for k, t in zip(whose, place)]
-    apart = [p for p, b in enumerate(back) if b != list(range(p, p + width))]  # the tokens whose inputs are not the row's before them
-    back, apart = torch.tensor([back[p] for p in apart], dtype=torch.long, device=DEV).view(-1, width), torch.tensor(apart, dtype=torch.long, device=DEV)
-    h = torch.cat([tails[0][0][0, :same]] + [e[0, same:] for e, _ in tails])[None].expand(B, -1, -1)
-    caches = [s[1] for s in states]
-    lens = torch.tensor([len(s[0]) for s in states], device=DEV)
-    top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
-    cos, sin = M.model.rotary_emb(h, (lens[:, None] + at)[None].expand(3, -1, -1))
-    for li, layer in enumerate(M.model.layers):
-        x = layer.input_layernorm(h)
-        rows = [c.layers[li] for c in caches]
-        if hasattr(layer, "linear_attn"):
-            y = linear(layer.linear_attn, x, rows, sees, apart, back)
-        else:
-            # Qwen3_5Attention.forward, the shard's keys and values read from its state
-            attn = layer.self_attn
-            q, gate = torch.chunk(attn.q_proj(x).view(B, N, -1, attn.head_dim * 2), 2, dim=-1)
-            q = attn.q_norm(q).transpose(1, 2)
-            k = attn.k_norm(attn.k_proj(x).view(B, N, -1, attn.head_dim)).transpose(1, 2)
-            q, k = apply_rotary_pos_emb(q, k, cos, sin)
-            if seen is not None:
-                seen["q%d" % li] = q.float()
-            G = k.shape[1]
-            q = q.view(B, G, -1, N, attn.head_dim)
-            if li == SCALED:
-                break
-            far = 0 if li == ALONE else top  # layer 3's tokens see their question alone
-            w = weights(q, held(rows, "keys", far, k), far, lens, sees, attn.scaling).to(x.dtype)
-            y = w @ held(rows, "values", far, attn.v_proj(x).view(B, N, G, -1).transpose(1, 2))
-            y = y.view(B, G, -1, N, attn.head_dim).permute(0, 3, 1, 2, 4).reshape(B, N, -1)  # [shards, tokens, heads x 256]
-            y = attn.o_proj(y * torch.sigmoid(gate.reshape(B, N, -1)))
-        h = h + y
-        h = h + layer.mlp(layer.post_attention_layernorm(h))
-    # layer 11: only the weights of the heads that are read, one in each group, over the shard's tokens
-    each = q.shape[2]
-    assert [hd // each for hd in HEADS] == list(range(G)), "one read head in each key-value group"
-    q = torch.stack([q[:, g, hd % each] for g, hd in enumerate(HEADS)], 1)[:, :, None]
-    w = weights(q, held(rows, "keys", top, k), top, lens, sees, layer.self_attn.scaling)[..., :top]  # [shards, groups, tokens, top]
-    # the mean over each question's own tokens but the first two, the heads summed
-    share = torch.zeros((K, N), device=DEV)
-    for kk, n in enumerate(ns):
-        share[kk, ((who == kk) | (who < 0)) & (at >= 2)] = 1.0 / max(n - 2, 1)
-    mass = share @ w.sum(1)  # [shards, questions, top]
-    cum = torch.nn.functional.pad(mass.cumsum(-1), (1, 0))
+    same for every question. A token's score for a paragraph is the
+    attention it pays the paragraph's tokens in the two heads read, summed;
+    a question's is the mean over its tokens but the first two. seen, a
+    dict, is given the queries of layers 7 and 11 as attention used them
+    ("q7": [shards, 8, tokens, 256]; "q11": [shards, 2, tokens, 256], the
+    two heads read, in HEADS' order), which fit.py weighs a book by"""
+    ids, who, at, same, lens = row(questions)
+    there = [lying(s) for s in states]
     most = max(len(s[2]) for s in states)
-    cs, ce = torch.zeros((2, B, most), dtype=torch.long)
-    for b, s in enumerate(states):
-        sp = torch.tensor(s[2], dtype=torch.long).view(-1, 2)
-        cs[b, :len(sp)], ce[b, :len(sp)] = sp[:, 0], sp[:, 1]
-    cs, ce = (x.to(DEV)[:, None].expand(B, K, most) for x in (cs, ce))
-    out = (cum.gather(2, ce) - cum.gather(2, cs)).cpu()
-    return [[out[b, kk, :len(s[2])] for kk in range(K)] for b, s in enumerate(states)]
+    # the library's kernels go on the device's default stream, where PyTorch's own are queued unless a thread
+    # chose another: what such a thread has queued for these states is waited for first
+    if torch.cuda.current_stream() != torch.cuda.default_stream():
+        torch.cuda.current_stream().synchronize()
+    out = again(lambda: LIB.tail([s for s, _ in there], ids, who, at, same, lens, most))
+    if seen is not None:
+        for name, wide, q in zip(("q7", "q11"), (8, len(HEADS)), LIB.queries(len(states) * len(ids))):
+            seen[name] = torch.frombuffer(q, dtype=torch.bfloat16).view(len(states), len(ids), wide, 256).transpose(1, 2).float().to(DEV)
+    res = torch.frombuffer(out, dtype=torch.float32).view(len(states), len(questions), most)
+    return [[res[b, k, :len(s[2])].clone() for k in range(len(questions))] for b, s in enumerate(states)]
 
 
 def scores(state, question):

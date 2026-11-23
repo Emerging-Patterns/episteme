@@ -1,6 +1,6 @@
-# The F2 reader's compiled part: the tail pass (native/f2pass.cu) built with
-# the CUDA toolkit's compiler and installed, with its ctypes bridge, as the
-# Python package f2pass. The reader's own modules (f2serve.py, model.py, ...)
+# The F2 reader's compiled part: the tail pass and the unpacking of states
+# (native/f2pass.cu) built with the CUDA toolkit's compiler and installed,
+# with its ctypes bridge, as the Python package f2pass. The reader's own modules (f2serve.py, model.py, ...)
 # are run from this directory and are not installed.
 #
 # The compiler is the nvcc meson finds on PATH (it reads no environment

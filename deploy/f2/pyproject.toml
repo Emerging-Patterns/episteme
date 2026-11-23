@@ -1,6 +1,7 @@
 # The F2 reader as a uv project: `uv sync --no-editable` here makes the
-# environment the reader runs in (uv.lock) and builds its compiled tail pass
-# (meson.build) into it; f2serve.py's header says the rest.
+# environment the reader runs in (uv.lock) and builds its compiled part, the
+# tail pass and the unpacking of states (meson.build), into it; f2serve.py's
+# header says the rest.
 [project]
 name = "episteme-f2"
 version = "0.1.0"

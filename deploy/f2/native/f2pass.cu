@@ -1,9 +1,10 @@
-/* The tail pass of the F2 reader as one program of its own kernels.
+/* The tail pass of the F2 reader and the unpacking of its coded states, as
+   one program of its own kernels.
 
-   What model.tail does with PyTorch calls, written out: the questions'
-   tail tokens, laid end to end, run through layers 0..11 of Qwen3.5-0.8B
-   once a shard, each token reading its shard's state in place, and the
-   attention heads 3 and 4 of layer 11 pay to each paragraph is summed.
+   The pass: the questions' tail tokens, laid end to end, run through layers
+   0..11 of Qwen3.5-0.8B once a shard, each token reading its shard's state
+   in place, and the attention heads 3 and 4 of layer 11 pay to each
+   paragraph is summed (model.py says what a state and a score are).
 
    The dense products (the projections, the MLPs, layer 7's and layer 11's
    products with a shard's keys and values, the delta rule's products with
@@ -16,12 +17,20 @@
    scales go on the queries and on the weights); a state scored in passing
    is multiplied where it lies, in the half precision it has.
 
-   Arithmetic follows the PyTorch pass: where it holds a tensor in bf16
-   the value is rounded to bf16 here too, so that the two differ by the
-   order of sums and not by precision. The delta rule's factors are halves
-   and its sums fp32 (there TF32: factors of 10 bits). Its scores are as far
-   from the PyTorch pass's as that pass's are from its own at another shape
-   of pass (a few hundredths of a shard's largest score at the median). */
+   Arithmetic follows the model's own forward in PyTorch, which this pass
+   replaced: where that holds a tensor in bf16 the value is rounded to bf16
+   here too, so the two differ by the order of sums and not by precision (a
+   few hundredths of a shard's largest score at the median, as the PyTorch
+   pass differed from itself between two shapes of pass). The delta rule's
+   factors are halves and its sums fp32.
+
+   The unpacking (joint.py's decoding): a token's bytes to its coefficients,
+   one product with the book's transform by cuBLAS, the keys' rotary
+   channels turned forward and the values put back over their scales where
+   the product left them, then either left as halves or made int8 over the
+   scales model.int8 gives; the recurrent states from their low-rank parts.
+   Every step rounds as PyTorch's half-precision arithmetic does, in its
+   order, and the result is joint.py's bit for bit. */
 #include "f2pass.h"
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -54,7 +63,7 @@
 #define ALONE 3
 #define MID 7
 #define TOP 11
-#define MAXN 1024   // the most tail tokens a pass may hold
+#define MAXN 4096   // the most tail tokens a pass may hold
 #define EPS 1e-6f
 typedef uint16_t bf16;
 
@@ -137,8 +146,7 @@ __global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const f
    rule, a block a (token, head): the convolution over the kernel's inputs
    (src [tokens][4]: 0..2 the shard's last three, 3 + i the row's token i),
    its activation, queries and keys over their lengths (X [shard, head][2 x
-   tokens][128]: the keys' rows, then the queries', in half precision, which
-   holds more of them than the TF32 the PyTorch pass multiplies in), beta
+   tokens][128]: the keys' rows, then the queries', in half precision), beta
    and the decay.
    lin holds the input projection of every shard's rows (each) or, in layer
    0, where the rows are the embeddings whatever the shard, of the row once */
@@ -487,6 +495,125 @@ __global__ void span_k(const float *mass, int TM, const int *span, const int *le
     out[i] = acc;
 }
 
+// ---------------------------------------------------------------- unpacking a coded state
+
+struct Bin {  // where a coefficient's bin lies in a token's bytes, and half its step
+    int lo;
+    short shift, mask2, odd;
+    __half halfstep;
+};
+
+// halves as PyTorch's half-precision arithmetic leaves them: every product and every sum rounded to a half
+static __device__ __forceinline__ float h2f(__half a) { return __half2float(a); }
+static __device__ __forceinline__ float rh(float x) { return __half2float(__float2half(x)); }
+
+/* a token's coefficients from its bytes, a thread a (token, coefficient): a
+   bin is at most eight bits, so it is in the two bytes from its first bit's
+   on; its middle is (twice its number less odd) half steps */
+__global__ void coef_k(const uint8_t *joint, int bytes, const Bin *bin, int K, __half *C, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = i / K;
+    Bin b = bin[i % K];
+    const uint8_t *p = joint + t * bytes + b.lo;
+    unsigned two = ((unsigned)p[0] | (b.lo + 1 < bytes ? (unsigned)p[1] << 8 : 0u)) << 1;
+    int m = (int)((two >> b.shift) & (unsigned)b.mask2) - b.odd;
+    C[i] = __float2half((float)m * __half2float(b.halfstep));
+}
+
+/* a row as the model holds it, from the row the book gives: the keys'
+   rotary channels turned forward to the token's position (a pair of
+   channels a thread) and the values put back over their root mean squares.
+   col is a place in the row; the pair's other channel is 32 on */
+static __device__ __forceinline__ void finish(__half *row, int col, const __half *in, const __half *mean, const float *cs, const float *sn,
+                                              float rms0, float rms1) {
+    int blk = col >> 8, c = col & 255;
+    bool key = blk != 2 && blk != 3;
+    if (key && c < 64) {
+        if (c >= 32) return;  // written with its pair
+        float a = h2f(in[col]), b = h2f(in[col + 32]);
+        if (mean) a = rh(a + h2f(mean[col])), b = rh(b + h2f(mean[col + 32]));
+        row[col] = __float2half(rh(a * rh(cs[c])) + rh(-b * rh(sn[c])));
+        row[col + 32] = __float2half(rh(b * rh(cs[c + 32])) + rh(a * rh(sn[c + 32])));
+        return;
+    }
+    float a = h2f(in[col]);
+    if (mean) a = rh(a + h2f(mean[col]));
+    row[col] = __float2half(key ? a : a * (blk == 2 ? rms0 : rms1));
+}
+
+/* every row finished where the product left it, a thread a (token, place) */
+__global__ void rows_k(__half *y, const __half *mean, const __half *rms, const float *cos, const float *sin, int T, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = i / 1536;
+    finish(y + t * 1536, i % 1536, y + t * 1536, mean, cos + t * 64, sin + t * 64, __half2float(rms[t]), __half2float(rms[T + t]));
+}
+
+/* the tokens kept exact: their rows as they were kept, finished the same way, over what the book gave */
+__global__ void exact_k(__half *y, const int *at, const __half *rows, const __half *rms, const float *cos, const float *sin, int T, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = at[i / 1536];
+    finish(y + t * 1536, i % 1536, rows + (i / 1536) * 1536, nullptr, cos + t * 64, sin + t * 64, __half2float(rms[t]), __half2float(rms[T + t]));
+}
+
+/* a scale as model.int8 makes it: the largest magnitude, floored, over 127, in half precision */
+static __device__ __forceinline__ float scale_of(float most) {
+    return __half2float(__float2half(__half2float(__float2half(fmaxf(most, 6.103515625e-05f))) / 127.f));
+}
+
+/* the keys' scales, one a channel over the tokens: a block a (keys head of
+   the four, channel); scales [4][256]: layer 7's two heads, then layer 11's */
+__global__ void kscale_k(const __half *y, int T, float *scales) {
+    __shared__ float sh[8];
+    int blk = blockIdx.x >> 8, c = blockIdx.x & 255, col = (blk < 2 ? blk : blk + 2) * 256 + c;
+    float m = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) m = fmaxf(m, fabsf(__half2float(y[(size_t)t * 1536 + col])));
+    m = bmax(m, sh);
+    if (threadIdx.x == 0) scales[blockIdx.x] = scale_of(m);
+}
+
+/* the values' scales, one a token over the channels: a block a (token, head); scales [2][T] */
+__global__ void vscale_k(const __half *y, int T, float *scales) {
+    __shared__ float sh[8];
+    size_t t = blockIdx.x >> 1;
+    int g = blockIdx.x & 1;
+    float m = bmax(fabsf(__half2float(y[t * 1536 + 512 + g * 256 + threadIdx.x])), sh);
+    if (threadIdx.x == 0) scales[(size_t)g * T + t] = scale_of(m);
+}
+
+/* the rows as int8 over their scales, a thread a (token, place): k7, v7, k11 [T][2][256] */
+__global__ void int8_k(const __half *y, int T, const float *ks, const float *vs, int8_t *k7, int8_t *v7, int8_t *k11, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = i / 1536;
+    int col = i % 1536, blk = col >> 8, c = col & 255;
+    float sc = blk < 2 ? ks[blk * 256 + c] : blk < 4 ? vs[(size_t)(blk - 2) * T + t] : ks[(blk - 2) * 256 + c];
+    int8_t q = (int8_t)rintf(__half2float(__float2half(__half2float(y[i]) / sc)));
+    (blk < 2 ? k7 : blk < 4 ? v7 : k11)[t * 512 + (col & 511)] = q;
+}
+
+/* the recurrent states of every linear-attention layer from their parts, a
+   thread a (layer, head, row, column): the low-rank product, and the rest,
+   four bits an entry (two to a byte, the low half first) over a scale a
+   row. The same launch copies the layers' convolution states */
+__global__ void lift_k(const __half *const *left, const __half *const *right, const uint8_t *const *rest, const __half *const *scale,
+                       bf16 *const *out, int rank, size_t n, const uint16_t *const *conv, uint16_t *const *conv_out, int words) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {  // past the states: the layers' convolution states, copied a 16-bit word a thread
+        i -= n;
+        if (i < (n / (LH * LD * LD)) * words) conv_out[i / words][i % words] = conv[i / words][i % words];
+        return;
+    }
+    int l = i / (LH * LD * LD), e = i % (LH * LD * LD), h = e / (LD * LD), r = e / LD % LD, j = e % LD;
+    const __half *a = left[l] + ((size_t)h * LD + r) * rank, *b = right[l] + (size_t)h * rank * LD + j;
+    float x = 0;
+    for (int k = 0; k < rank; k++) x += __half2float(a[k]) * __half2float(b[k * LD]);
+    int nib = (rest[l][((size_t)h * LD + r) * (LD / 2) + (j >> 1)] >> ((j & 1) * 4)) & 15;
+    out[l][e] = f2bf(x + (float)(nib - 7) * __half2float(scale[l][h * LD + r]));
+}
+
 // ---------------------------------------------------------------- the weights
 
 struct Tensor {
@@ -565,9 +692,10 @@ struct Buf {
     size_t cap = 0;
 };
 
-enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_COUNT };
+enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_COUNT };
 static const char *PNAMES[P_COUNT] = {"setup", "norm", "dense", "conv", "delta: decay, state", "delta: products", "delta: solve", "gate", "swiglu", "qk", "alone", "cast",
-                                      "attention products", "softmax", "combine", "readout", "out"};
+                                      "attention products", "softmax", "combine", "readout", "out", "unpack: coefficients",
+                                      "unpack: product", "unpack: rows", "unpack: int8", "unpack: recurrent states"};
 
 struct F2 {
     File file;
@@ -577,11 +705,15 @@ struct F2 {
     float invf[32];
     int stop = -1;
     long hidden = 0;
+    size_t rows = 0;  // the last pass's shards by tokens: its queries are in Qp and Q11
     bool prof = false;
     double secs[P_COUNT] = {0};
     double mark = 0;
     std::mutex one;  // a pass at a time: the buffers are the handle's
-    Buf h, x, o, lin, y, act, X, S, Rd, G, v, beta, g, out, Qp, Ko, Qs, Kb, Lb, Ya, wown, mass, stat, emb, tab, ptr, sc, res, cum;
+    int K = 0, bytes = 0, rank = 0;  // the book: coefficients, bytes a token, the recurrent states' rank
+    Bin *bin = nullptr;
+    const __half *back = nullptr, *mean = nullptr;
+    Buf h, x, o, lin, y, act, X, S, Rd, G, v, beta, g, out, Qp, Ko, Qs, Kb, Lb, Ya, wown, mass, stat, emb, tab, ptr, sc, res, cum, C, Y, us, Q11;
 };
 
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -869,7 +1001,7 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
         !room(c->y, R * 2048 * 2) || !room(c->act, R * MLP * 2) || !room(c->X, R * LH * 2 * LD * 2) || !room(c->S, (size_t)BH * LD * LD * 2) ||
         !room(c->v, R * LH * LD * 4) || !room(c->out, R * LH * LD * 4) || !room(c->Rd, R * LH * 2 * LD * 4) || !room(c->beta, R * LH * 4) ||
         !room(c->g, R * LH * 4) || !room(c->cum, R * LH * 4) || !room(c->G, R * LH * 2 * N * 4) || !room(c->Qp, R * NQ * HD * 2) ||
-        !room(c->Ko, R * NG * HD * 2) || !room(c->Qs, R * NQ * HD * 2) || !room(c->Kb, (size_t)total * HD * 2) ||
+        !room(c->Ko, R * NG * HD * 2) || !room(c->Qs, R * NQ * HD * 2) || !room(c->Q11, R * NG * HD * 2) || !room(c->Kb, (size_t)total * HD * 2) ||
         !room(c->Lb, (size_t)total * each * N * 2) || !room(c->Ya, R * NQ * HD * 2) || !room(c->wown, R * NQ * N * 4) ||
         !room(c->mass, (size_t)B * K * TM * 4) || !room(c->stat, (size_t)SG * N * 2 * 4) || !room(c->res, (size_t)B * K * most * 4))
         return false;
@@ -877,6 +1009,7 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
     __half *X = (__half *)c->X.p, *S = (__half *)c->S.p;
     bf16 *Qp = (bf16 *)c->Qp.p, *Ko = (bf16 *)c->Ko.p, *Qs = (bf16 *)c->Qs.p, *Kb = (bf16 *)c->Kb.p, *Lb = (bf16 *)c->Lb.p, *Ya = (bf16 *)c->Ya.p;
     c->hidden = R * HID * 2;
+    c->rows = 0;
     lap(c, P_SETUP);
 
     const float one = 1, zero = 0;
@@ -952,7 +1085,7 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
             const int LW = 2 * HD + NG * HD;
             if (!dense(c, L.Win, LW, HID, x, R, lin)) return false;
             lap(c, P_GEMM);
-            qk_k<<<R * (NG + NG), HD>>>(lin, LW, N, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, Ko, Qs, PT(const float *const *, T_K11S));
+            qk_k<<<R * (NG + NG), HD>>>(lin, LW, N, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, (bf16 *)c->Q11.p, Ko, Qs, PT(const float *const *, T_K11S));
             lap(c, P_QK);
             cast_k<<<castgrid, 256>>>(PT(const int8_t *const *, T_K11), PT(const long *, T_K11P), d_cast, d_off, Kb);
             lap(c, P_CAST);
@@ -961,7 +1094,7 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
                             Qs + (size_t)sg * N * HD, Lb + (size_t)segoff[sg] * N))
                     return false;
             lap(c, P_AGEMM);
-            stat_k<<<dim3(N, SG), HD>>>(Lb, d_T, d_off, PT(const float *const *, T_K11S), Qp, Ko, N, same, d_start, scaling, (float *)c->stat.p);
+            stat_k<<<dim3(N, SG), HD>>>(Lb, d_T, d_off, PT(const float *const *, T_K11S), (bf16 *)c->Q11.p, Ko, N, same, d_start, scaling, (float *)c->stat.p);
             mass_k<<<dim3(((size_t)K * TM + 255) / 256, B), 256>>>(Lb, d_T, d_off, PT(const float *const *, T_K11S), (float *)c->stat.p, d_rows, d_rfirst, d_rcount, d_share, K, N,
                                                                   (float *)c->mass.p, TM);
             lap(c, P_READ);
@@ -990,9 +1123,105 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
     span_k<<<((size_t)B * K * most + 255) / 256, 256>>>((float *)c->mass.p, TM, d_span, d_lens, B, K, most, (float *)c->res.p);
     CU(cudaMemcpy(out, c->res.p, (size_t)B * K * most * 4, cudaMemcpyDeviceToHost));
     CU(cudaGetLastError());
+    c->rows = R;
     lap(c, P_OUT);
     return true;
 #undef PT
+}
+
+long f2_queries(F2 *c, void *q7, void *q11, long rows) {
+    std::lock_guard<std::mutex> lock(c->one);
+    if (rows != (long)c->rows || !rows) return -1;
+    if (cudaMemcpy(q7, c->Qp.p, (size_t)rows * NQ * HD * 2, cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(q11, c->Q11.p, (size_t)rows * NG * HD * 2, cudaMemcpyDeviceToHost) != cudaSuccess)
+        return -1;
+    return rows;
+}
+
+int f2_book(F2 *c, int K, int bytes, const long *lo, const short *shift, const short *mask2, const short *odd, const void *halfstep,
+            const void *back, const void *mean, int rank, int resid) {
+    std::lock_guard<std::mutex> lock(c->one);
+    auto book = [&]() -> bool {
+        if (resid != 4 || rank < 1 || K < 1) return fail("a book whose recurrent states are not kept as a rank and four bits", resid);
+        std::vector<long> l(K);
+        std::vector<short> s(K), m(K), o(K);
+        std::vector<__half> h(K);
+        CU(cudaMemcpy(l.data(), lo, K * 8, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(s.data(), shift, K * 2, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(m.data(), mask2, K * 2, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(o.data(), odd, K * 2, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(h.data(), halfstep, K * 2, cudaMemcpyDeviceToHost));
+        std::vector<Bin> bins(K);
+        for (int k = 0; k < K; k++) bins[k] = Bin{(int)l[k], s[k], m[k], o[k], h[k]};
+        if (c->bin) cudaFree(c->bin);
+        c->bin = nullptr, c->K = 0;
+        CU(cudaMalloc((void **)&c->bin, K * sizeof(Bin)));
+        CU(cudaMemcpy(c->bin, bins.data(), K * sizeof(Bin), cudaMemcpyHostToDevice));
+        c->K = K, c->bytes = bytes, c->rank = rank, c->back = (const __half *)back, c->mean = (const __half *)mean;
+        return true;
+    };
+    return book() ? 0 : -1;
+}
+
+static bool unpack(F2 *c, const F2Packed *p) {
+    if (!c->K) return fail("no book", 0);
+    cudaGetLastError();
+    c->mark = now();
+    const int T = p->tokens, K = c->K;
+    const size_t n = (size_t)T * 1536;
+    const float one = 1, zero = 0;
+    if (!room(c->C, (size_t)T * K * 2) || (p->kept && !room(c->Y, n * 2)) || !room(c->us, 4 * 256 * 4 + 7 * LAYERS * 8)) return false;
+    __half *C = (__half *)c->C.p, *y = (__half *)(p->kept ? c->Y.p : p->y);
+    coef_k<<<((size_t)T * K + 255) / 256, 256>>>((const uint8_t *)p->joint, c->bytes, c->bin, K, C, (size_t)T * K);
+    lap(c, P_UCOEF);
+    // rows [T][1536] = coefficients [T][K] times the book's [K][1536]
+    BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, 1536, T, K, &one, c->back, CUDA_R_16F, 1536, C, CUDA_R_16F, K, &zero, y, CUDA_R_16F, 1536,
+                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+    lap(c, P_UGEMM);
+    rows_k<<<(n + 255) / 256, 256>>>(y, c->mean, (const __half *)p->rms, p->cos, p->sin, T, n);
+    if (p->exact)
+        exact_k<<<((size_t)p->exact * 1536 + 255) / 256, 256>>>(y, p->at, (const __half *)p->rows, (const __half *)p->rms, p->cos, p->sin, T,
+                                                                  (size_t)p->exact * 1536);
+    lap(c, P_UROWS);
+    if (p->kept) {
+        float *ks = (float *)c->us.p;  // the keys' scales, [4][256]
+        kscale_k<<<4 * 256, 256>>>(y, T, ks);
+        vscale_k<<<(size_t)T * 2, 256>>>(y, T, p->v7_scale);
+        int8_k<<<(n + 255) / 256, 256>>>(y, T, ks, p->v7_scale, (int8_t *)p->k7, (int8_t *)p->v7, (int8_t *)p->k11, n);
+        CU(cudaMemcpyAsync(p->k7_scale, ks, 2 * 256 * 4, cudaMemcpyDeviceToDevice));
+        CU(cudaMemcpyAsync(p->k11_scale, ks + 2 * 256, 2 * 256 * 4, cudaMemcpyDeviceToDevice));
+        lap(c, P_UINT8);
+    }
+    // the recurrent states: the layers' parts and where they go, as tables on the device
+    const void *tab[7 * LAYERS];
+    int layers = 0;
+    for (int li = 0; li < LAYERS; li++)
+        if (c->layer[li].linear) {
+            if (!p->left[li] || !p->rec[li] || !p->conv[li] || !p->conv_out[li]) return fail("a packed state with no states for a layer", li);
+            layers++;
+        }
+    for (int li = 0, l = 0; li < LAYERS; li++)
+        if (c->layer[li].linear) {
+            tab[l] = p->left[li], tab[layers + l] = p->right[li], tab[2 * layers + l] = p->rest[li], tab[3 * layers + l] = p->scale[li],
+            tab[4 * layers + l] = p->rec[li], tab[5 * layers + l] = p->conv[li], tab[6 * layers + l] = p->conv_out[li];
+            l++;
+        }
+    const void **d = (const void **)((float *)c->us.p + 4 * 256);
+    CU(cudaMemcpy(d, tab, 7 * layers * 8, cudaMemcpyHostToDevice));
+    const size_t m = (size_t)layers * LH * LD * LD, words = p->conv_bytes / 2;
+    lift_k<<<(m + layers * words + 255) / 256, 256>>>((const __half *const *)d, (const __half *const *)(d + layers),
+                                                      (const uint8_t *const *)(d + 2 * layers), (const __half *const *)(d + 3 * layers),
+                                                      (bf16 *const *)(d + 4 * layers), c->rank, m, (const uint16_t *const *)(d + 5 * layers),
+                                                      (uint16_t *const *)(d + 6 * layers), (int)words);
+    CU(cudaStreamSynchronize(0));
+    CU(cudaGetLastError());
+    lap(c, P_ULIFT);
+    return true;
+}
+
+int f2_unpack(F2 *c, const F2Packed *p) {
+    std::lock_guard<std::mutex> lock(c->one);
+    return unpack(c, p) ? 0 : -1;
 }
 
 int f2_abi(void) { return F2_ABI; }

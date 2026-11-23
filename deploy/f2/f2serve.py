@@ -145,11 +145,9 @@ past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
 Setup: this directory is a uv project (pyproject.toml, uv.lock). With the
 CUDA 12 toolkit's bin first on PATH,
   UV_PROJECT_ENVIRONMENT=<venv> uv sync --no-editable
-makes the venv and builds into it f2pass, the tail pass in C++ and CUDA
-(native/, meson.build); run it again after a change under native/. Without
-the toolkit, `uv sync --no-install-project` makes the venv alone and the
-passes are PyTorch's (model.py says how the two differ; F2_NATIVE=0 asks for
-PyTorch's). The weights:
+makes the venv and builds into it f2pass, the tail pass and the unpacking of
+states in C++ and CUDA (native/, meson.build); run it again after a change
+under native/. The weights:
   huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
 Run: EPISTEME_HOME=... <venv>/bin/python f2serve.py, then point config.json's
 pool at http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
@@ -169,7 +167,7 @@ the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt), F2_NATIVE (1).
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
 """
 import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
@@ -204,7 +202,7 @@ SLABS = int(os.environ.get("SLABS", "12"))
 SLAB_BYTES = int(float(os.environ.get("SLAB_MB", "64")) * 2**20)
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 BATCH = int(os.environ.get("BATCH", "8"))
-PASS = int(os.environ.get("PASS", "768"))
+PASS = min(int(os.environ.get("PASS", "768")), model.TOKENS)
 LOTS_MAX = int(os.environ.get("LOTS", "4"))
 SCORES_MAX = int(os.environ.get("SCORES", "65536"))
 WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
