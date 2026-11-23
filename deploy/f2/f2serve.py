@@ -106,7 +106,8 @@ each state just before it is needed and never hits. When a state in RAM
 is needed and the GPU holds only states the runs being scored have read, it
 is scored from a copy that is not kept: promoting it would push one of
 their own states back to RAM, and the next question would bring that one up
-again. RAM keeps the host copy
+again. Such a copy is unpacked no further than the pass needs (with a book:
+to half precision, not on to the tier's int8). RAM keeps the host copy
 of a state it hands to the GPU, and of one read from disk while it has
 room; it evicts those copies first, and a state leaving the GPU with a host
 copy is dropped, not copied back.
@@ -605,11 +606,12 @@ class States:
         if k in self.ram:
             (state, null), _held = self.ram[k]
             self.ram.move_to_end(k)
-            st = (model.unpack(staged[2][0] if staged is not None else copy_to(state, model.DEV)), null)
-            size = nbytes(st[0][1])
+            there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
+            size = model.unpacked(there[1])
             self.n["ram"] += 1
             if self.own(k, size, keep, among):
-                return st
+                return model.unpack(there, kept=False), null
+            st = (model.unpack(there), null)
         elif staged is not None or self.kept(k):
             state, null = staged[:2] if staged is not None else self.load(k)
             there = staged[2][0] if staged is not None else copy_to(state, model.DEV)
@@ -621,12 +623,14 @@ class States:
                 null = model.scores(there, "N/A")
                 self.slots.acquire()
                 self.writer.apply_async(self.save, (k, (state, null)))
+                passing = False
             else:
-                there = model.unpack(there)
+                passing = self.own(k, model.unpacked(there[1]), keep, among)
+                there = model.unpack(there, kept=not passing)
             null = self.wordnull(k, there, null, pool)
             st, size, held = (there, null), nbytes(there[1]), nbytes(state[1])
             self.n["ram" if staged is not None and staged[3] else "disk"] += 1
-            if self.own(k, size, keep, among):
+            if passing or self.own(k, size, keep, among):
                 if RAM_BYTES > 0:  # into RAM as a state leaving the GPU would go: over what the run does not read later
                     self.put_ram(k, (state, null), held, keep)
                 return st
