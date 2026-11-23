@@ -379,12 +379,19 @@ def held(rows, name, top, mine):
     questions read in a layer: the shard's keys or values (int8 times their
     scale, zeros from the shard's end to top; none of them when top is 0,
     layer 3) and after them the questions' own, mine [shards, 2, tokens,
-    256]"""
+    256]. Each part is written once, where it is read: a shard's numbers
+    times their scale go straight into the buffer in its precision, and
+    only what lies past a shard's end is filled with zeros"""
     B, G, N, d = mine.shape
-    buf = torch.zeros((B, G, top + N, d), dtype=torch.bfloat16, device=mine.device)
+    buf = torch.empty((B, G, top + N, d), dtype=torch.bfloat16, device=mine.device)
     for b, r in enumerate(rows if top else ()):
         x, sc = getattr(r, name), vars(r).get(name + "_scale")
-        buf[b, :, :x.shape[-2]] = torch.mul(x[0], sc[0]) if sc is not None else x[0]  # rounded to bf16 as it is written
+        n = x.shape[-2]
+        if sc is not None:
+            torch.mul(x[0], sc[0].to(buf.dtype), out=buf[b, :, :n])
+        else:
+            buf[b, :, :n] = x[0]
+        buf[b, :, n:top] = 0
     buf[:, :, top:] = mine
     return buf
 
