@@ -83,8 +83,8 @@
 # `.json` files in name order, so a source's frozen shards ascend by number
 # and its tail comes last; any other name is skipped.
 #
-# Why it is trusted: It is IO sequencing over ezsys's `file.read`, `file.save`
-# and `dir.list` and Base's `Process.run` (`mkdir -p`, `rm -rf`, `mv -T`),
+# Why it is trusted: It is IO sequencing over ezsys's `file.read`, `file.save`,
+# `file.write` and `dir.list` and Base's `Process.run` (`mkdir -p`, `rm -rf`, `mv -T`),
 # which no law reaches; ezsys's own gate trusts the same effects (on its
 # src/sys.bend).
 # `tests/smoke.sh` runs it end to end.
@@ -200,6 +200,17 @@ def Store.saved(res: Result<&1, &1, U32 & String, Unit>, +path: String) -> IO(Un
 def Store.save(+path: String, text: String) -> IO(Unit):
   do IO<Unit>:
     res : Result<&1, &1, U32 & String, Unit> <- Sys.file.save(path, text)
+    Store.saved(res, path)
+
+# write a file that nothing reads before this command names it, or stop: no
+# temporary file, no flush and no rename. A run's files lie in a directory
+# the run alone made and are named only once all are written, so no reader
+# sees one half written, and a run cut short leaves a directory nothing
+# names; saved as the store's own files are, each cost a flush to the disk,
+# a second and more of a question that writes thirty
+def Store.put(+path: String, text: String) -> IO(Unit):
+  do IO<Unit>:
+    res : Result<&1, &1, U32 & String, Unit> <- Sys.file.write(path, text)
     Store.saved(res, path)
 
 # the exit code of an ingest refused because another holds the lock:

@@ -406,7 +406,7 @@ def Ask.files(srcs: List<&2, String>, +dir: String, +xs: List<&2, E.Ex>) -> IO(U
       IO.pure(Unit, Unit{})
     case Con{+src, rest}:
       do IO<Unit>:
-        St.Store.save(dir ++ "/" ++ Rd.Read.file(src), E.Excerpt.lines(Rd.Read.of_source(src, xs)))
+        St.Store.put(dir ++ "/" ++ Rd.Read.file(src), E.Excerpt.lines(Rd.Read.of_source(src, xs)))
         Ask.files(rest, dir, xs)
 
 # base for idx 0, else base-<idx>
@@ -449,7 +449,7 @@ def Ask.page(empty: Bool, dir: String, k: Nat, xs: List<&2, E.Ex>) -> IO(Unit):
     case True{}:
       IO.pure(Unit, Unit{})
     case False{}:
-      St.Store.save(dir ++ "/" ++ Rd.Read.page.file(k), E.Excerpt.render(xs))
+      St.Store.put(dir ++ "/" ++ Rd.Read.page.file(k), E.Excerpt.render(xs))
 
 # write the pages k, k + 1, ... to page-<k>.md under dir
 def Ask.pages(pages: List<&2, List<&2, E.Ex>>, +dir: String, +k: Nat) -> IO(Unit):
@@ -468,14 +468,16 @@ def Ask.index(+all: List<&2, E.Ex>, pages: List<&2, List<&2, E.Ex>>) -> String:
 
 # write the excerpts to run files under runs/<now>/: each source's excerpts
 # to <source>.md, the pages after the first to page-<k>.md and INDEX.md;
-# answers Read.more of the directory
+# answers Read.more of the directory. The files are written plainly
+# (Store.put): the directory is this run's own and is named only after all
+# of them are written
 def Ask.spill(+xs: List<&2, E.Ex>, +pages: List<&2, List<&2, E.Ex>>) -> IO(String):
   do IO<String>:
     stamp : String <- Sys.time.now_iso()
     +runs : String <- St.Store.path("runs")
     St.Store.mkdir(runs)
     +dir : String <- Ask.claim(100n, runs ++ "/" ++ stamp, 0)
-    St.Store.save(dir ++ "/INDEX.md", Ask.index(xs, pages))
+    St.Store.put(dir ++ "/INDEX.md", Ask.index(xs, pages))
     Ask.files(Rd.Read.sources(xs, []), dir, xs)
     Ask.pages(pages, dir, 2n)
     return Rd.Read.more(dir, String.drop(dir, 1n+String.length(runs)))
