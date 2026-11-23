@@ -1124,6 +1124,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class Server(ThreadingHTTPServer):
+    """the HTTP server, with room for a burst of connections waiting to be
+    accepted. The stock server lets five wait; a question's reads come four
+    at a time from each command that asks, so a few commands at once
+    overflowed that, the kernel dropped the connection requests it had no
+    room for, and each dropped one was sent again a second later: every
+    question asked beside others waited that second, whatever its size"""
+    request_queue_size = 1024
+
+
 def warm():
     """one prefill and one tail pass on a two-line shard, so the kernels are
     compiled and tuned before the first question rather than during it"""
@@ -1141,4 +1151,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores" % (PORT, RAM_BYTES / 1e9, had), flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    Server(("127.0.0.1", PORT), Handler).serve_forever()
