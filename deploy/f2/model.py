@@ -12,6 +12,12 @@ between. A question's score for each paragraph is the attention its tokens
 pay to the paragraph's line in heads 3 and 4 of layer 11, averaged over the
 question's tokens.
 
+A question's tail is not run through the stock forward (tail): the tails of
+several questions over several shards go through the layers as the rows of
+one pass, each reading its shard's state in place, so a shard's keys and
+values are held once for all the questions asked of it, and nothing of a
+state is copied for a row or written back.
+
 A state is kept packed (pack) and read unpacked (unpack). With no book
 (F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
 values and layer 11's keys as int8, a byte a channel. With a book the three
@@ -21,8 +27,6 @@ either way; the scores are always those of the unpacked state, also for the
 question that prefills it."""
 import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.cache_utils import DynamicLayer
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 import joint
 import store
@@ -42,37 +46,6 @@ BOOK = None if BOOK_ID is None else torch.load(BOOK_PATH, weights_only=True)
 tok = AutoTokenizer.from_pretrained(DIR)
 
 
-def grouped(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
-    """the stock eager attention's weights and output, with no copy of a
-    key-value head's keys and values for each query head that shares them
-    (four here): the query heads of a group are the rows of one product with
-    the group's keys, and their weights the rows of one with its values"""
-    b, heads, t, d = query.shape
-    kv = heads // module.num_key_value_groups
-    w = torch.matmul(query.reshape(b, kv, -1, d), key.transpose(2, 3)).view(b, heads, t, -1) * scaling
-    if attention_mask is not None:
-        w = w + attention_mask
-    w = torch.nn.functional.softmax(w, dim=-1, dtype=torch.float32).to(query.dtype)
-    out = torch.matmul(w.view(b, kv, -1, w.shape[-1]), value).view(b, heads, t, d)
-    return out.transpose(1, 2).contiguous(), w
-
-
-ALL_ATTENTION_FUNCTIONS.register("grouped", grouped)
-
-
-def alone(attn, stock, **kwargs):
-    """layer 3's attention: as stock while a shard is prefilled; when a tail
-    is read (grouped), the tail's tokens attend to the tail alone. The state
-    holds no keys of the shard for this layer, so its cache starts empty
-    (stack), and of the mask, which has a column for each of the shard's
-    tokens and then one for each of the tail's, only the tail's columns
-    apply"""
-    mask = kwargs.get("attention_mask")
-    if attn.config._attn_implementation == "grouped" and mask is not None:
-        kwargs["attention_mask"] = mask[..., -kwargs["hidden_states"].shape[-2]:]
-    return stock(**kwargs)
-
-
 class Zero(torch.nn.Module):
     """layer 11's MLP: its output feeds nothing that is read"""
 
@@ -81,30 +54,15 @@ class Zero(torch.nn.Module):
 
 
 def last(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
-    """layer 11's attention, cut to what scores reads: its keys go to the
-    cache with no values, and when a tail is read (grouped) its attention
-    weights are those of the stock eager path; the output is zeros, since
-    no layer follows and the logits are never read"""
+    """layer 11's attention while a shard is prefilled: its keys go to the
+    cache with no values, and the output is zeros, since no layer follows
+    and the logits are never read (a tail's weights are made by tail)"""
     shape = (*hidden_states.shape[:-1], -1, self.head_dim)
     key = self.k_norm(self.k_proj(hidden_states).view(shape)).transpose(1, 2)
-    cos, sin = position_embeddings
-    weights = None
-    if self.config._attn_implementation != "sdpa":
-        q, _gate = torch.chunk(self.q_proj(hidden_states).view(*shape[:-1], self.head_dim * 2), 2, dim=-1)
-        q = self.q_norm(q.view(shape)).transpose(1, 2)
-        q, key = apply_rotary_pos_emb(q, key, cos, sin)
-    else:
-        q, key = None, apply_rotary_pos_emb(key, key, cos, sin)[1]
+    key = apply_rotary_pos_emb(key, key, *position_embeddings)[1]
     if past_key_values is not None:
-        key = past_key_values.update(key, key[..., :0], self.layer_idx)[0]
-    if q is not None:
-        b, heads, t, d = q.shape
-        kv = heads // self.num_key_value_groups  # as grouped: no copy of the keys per query head
-        weights = torch.matmul(q.reshape(b, kv, -1, d), key.transpose(2, 3)).view(b, heads, t, -1) * self.scaling
-        if attention_mask is not None:
-            weights = weights + attention_mask
-        weights = torch.nn.functional.softmax(weights, dim=-1, dtype=torch.float32).to(q.dtype)
-    return torch.zeros_like(hidden_states), weights
+        past_key_values.update(key, key[..., :0], self.layer_idx)
+    return torch.zeros_like(hidden_states), None
 
 
 def load():
@@ -128,8 +86,6 @@ def load():
     w = top.self_attn.q_norm.weight
     with torch.no_grad():
         w.copy_((1 + w.float()) * 2.0 - 1)
-    low = m.model.layers[ALONE].self_attn
-    low.forward = functools.partial(alone, low, low.forward)
     full = [i for i, t in enumerate(cfg.layer_types) if t == "full_attention"]
     return m, full.index(SCALED)
 
@@ -137,12 +93,6 @@ def load():
 M, AT = load()
 if BOOK is not None:
     BOOK = joint.Book(BOOK, DEV)
-
-
-def attention(name):
-    for layer in M.model.layers:
-        if hasattr(layer, "self_attn"):
-            layer.self_attn.config._attn_implementation = name
 
 
 def template(text):
@@ -272,7 +222,6 @@ def prefill(shard, raw=False):
     head, tail = template(shard["text"])
     enc = tok(head, add_special_tokens=False, return_offsets_mapping=True)
     ids = enc["input_ids"]
-    attention("sdpa")
     cache = None
     for i in range(0, len(ids), CHUNK):
         out = M(input_ids=torch.tensor([ids[i:i + CHUNK]], device=DEV), past_key_values=cache,
@@ -288,7 +237,13 @@ def prefill(shard, raw=False):
     return ids, cache if raw else pack(cache), spans, tail
 
 
-@functools.lru_cache(maxsize=8)
+@functools.lru_cache(maxsize=4096)
+def tokens(question):
+    """how many tokens of a question's tail a pass runs (question_tail)"""
+    return len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+
+
+@functools.lru_cache(maxsize=64)
 @torch.no_grad()
 def question_tail(tail, question):
     """the tail's input embeddings on the device and the question's token
@@ -296,130 +251,170 @@ def question_tail(tail, question):
     question's own tokens are read, and the model is causal, so the tail is
     cut after them: the tokens that follow cannot change those rows"""
     t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
-    nq = len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+    nq = tokens(question)
     return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
 
 
-class Roomy(DynamicLayer):
-    """a full-attention layer of a stacked cache: its keys and values sit in
-    buffers with room after them for the tail's, which update writes there
-    (the stock layer appends by copying the whole cache)"""
+def delta(query, key, value, decay, beta, state, B):
+    """the gated delta rule's outputs for a tail of T tokens that starts
+    from a shard's recurrent state, as the stock chunked rule gives them
+    with one chunk of T (it pads a tail to 64 tokens, and works out a final
+    state no tail pass keeps). Rows are (shard, question) pairs, a shard's
+    questions together: query, key, value [rows, heads, T, 128], decay and
+    beta [rows, heads, T], state [B, heads, 128, 128], one for each shard;
+    the questions of a shard are the rows of one product with its state"""
+    R, H, T, D = key.shape
+    query = query * torch.rsqrt((query * query).sum(-1, keepdim=True) + 1e-6) * D ** -0.5
+    key = key * torch.rsqrt((key * key).sum(-1, keepdim=True) + 1e-6)
+    cum = decay.cumsum(-1)
+    grown = cum.exp()[..., None]
+    pair = (cum[..., :, None] - cum[..., None, :]).masked_fill(
+        torch.ones(T, T, dtype=torch.bool, device=key.device).triu(1), float("-inf")).exp()
+    kt = key.transpose(-1, -2)
+    k_beta = key * beta[..., None]
+    # what the old state says to the tail's keys and to its queries: [rows, heads, 2T, 128] by [B, heads, 128, 128]
+    reads = torch.cat([k_beta * grown, query * grown], -2)
+    reads = reads.view(B, R // B, H, 2 * T, D).transpose(1, 2).reshape(B, H, -1, D) @ state
+    reads = reads.view(B, H, R // B, 2 * T, -1).transpose(1, 2).reshape(R, H, 2 * T, -1)
+    # each token writes what the state and the tokens before it do not already say of its key
+    new = torch.linalg.solve_triangular((k_beta @ kt) * pair, value * beta[..., None] - reads[..., :T, :],
+                                        upper=False, unitriangular=True)
+    return reads[..., T:, :] + ((query @ kt) * pair) @ new
 
-    def update(self, key_states, value_states, *args, **kwargs):
-        end = self.used + key_states.shape[-2]
-        self.keys[..., self.used:end, :] = key_states
-        self.values[..., self.used:end, :] = value_states
-        self.used = end
-        return self.keys[..., :end, :], self.values[..., :end, :]
 
-    def get_seq_length(self):
-        return self.used
+def linear(net, x, rows, B):
+    """a linear-attention layer's output for the tails x [rows, T, hidden],
+    from the convolution and recurrent states the shards' caches hold in
+    rows (one cache layer a shard): Qwen3_5GatedDeltaNet.forward with the
+    cache read and not written"""
+    R, T, _ = x.shape
+    conv = torch.cat([next(v for v in r.conv_states.values() if torch.is_tensor(v)) for r in rows])
+    state = torch.cat([next(v for v in r.recurrent_states.values() if torch.is_tensor(v)) for r in rows]).float()
+    mixed = net.in_proj_qkv(x).transpose(1, 2)
+    w = net.conv1d.weight
+    # the last tokens of the shard, then the tail: each output sees the kernel's width of inputs up to its own
+    before = conv[..., 1 - w.shape[-1]:].to(w.dtype)[:, None].expand(-1, R // B, -1, -1).reshape(R, w.shape[0], -1)
+    mixed = torch.nn.functional.silu(torch.nn.functional.conv1d(
+        torch.cat([before, mixed.to(w.dtype)], -1), w, net.conv1d.bias, groups=w.shape[0])).to(x.dtype).transpose(1, 2)
+    q, k, v = torch.split(mixed, [net.key_dim, net.key_dim, net.value_dim], dim=-1)
+    heads = lambda t, d: t.reshape(R, T, -1, d).transpose(1, 2).float()
+    q, k, v = heads(q, net.head_k_dim), heads(k, net.head_k_dim), heads(v, net.head_v_dim)
+    rep = net.num_v_heads // net.num_k_heads
+    if rep > 1:
+        q, k = q.repeat_interleave(rep, dim=1), k.repeat_interleave(rep, dim=1)
+    beta = net.in_proj_b(x).sigmoid().transpose(1, 2).float()
+    decay = (-net.A_log.float().exp() * torch.nn.functional.softplus(net.in_proj_a(x).float() + net.dt_bias)).transpose(1, 2)
+    out = delta(q, k, v, decay, beta, state, B).transpose(1, 2).to(x.dtype)  # [rows, T, heads, 128]
+    z = net.in_proj_z(x).reshape(R, T, -1, net.head_v_dim)
+    return net.out_proj(net.norm(out.reshape(-1, net.head_v_dim), z.reshape(-1, net.head_v_dim)).reshape(R, T, -1))
 
 
-def stack(caches, room):
-    """one bf16 cache for several shards' packed caches, the caches left as
-    they are: the linear-attention states stacked, the full-attention keys and
-    values dequantized into one buffer, right-padded with zeros to the longest
-    shard and then by room more tokens for the tail (Roomy); layer 3's buffer
-    is the tail's room alone. The layers are fresh objects with fresh tensors,
-    so the tail pass touches no shard's own state"""
-    out = copy.copy(caches[0])
-    out.layers = [copy.copy(layer) for layer in caches[0].layers]
+def held(rows, name, top, mine):
+    """one bf16 buffer [shards, 2, top + questions x T, 256] of what a
+    shard's questions read in a layer: the shard's keys or values (int8
+    times their scale, zeros from the shard's end to top; none of them when
+    top is 0, layer 3) and after them the tails' own, mine [rows, 2, T,
+    256], the questions of a shard one after another"""
+    B, (R, G, T, d) = len(rows), mine.shape
+    buf = torch.zeros((B, G, top + R // B * T, d), dtype=torch.bfloat16, device=mine.device)
+    for b, r in enumerate(rows if top else ()):
+        x, sc = getattr(r, name), vars(r).get(name + "_scale")
+        buf[b, :, :x.shape[-2]] = torch.mul(x[0], sc[0]) if sc is not None else x[0]  # rounded to bf16 as it is written
+    buf[:, :, top:] = mine.view(B, R // B, G, T, d).transpose(1, 2).reshape(B, G, -1, d)
+    return buf
+
+
+def weights(q, keys, top, lens, K, scaling):
+    """the attention weights [B, 2, questions x heads x T, top + questions x
+    T], in fp32, of the tails' queries q [rows, 2, heads of a group, T, 256]
+    over keys (held): a token sees its shard up to the shard's length (lens)
+    and its own question's tokens up to itself. A query head reads the keys
+    of its group, and a shard's questions and their heads are the rows of
+    one product with the shard's keys, which are held once"""
+    R, G, each, T, d = q.shape
+    B = R // K
+    w = (q * scaling).view(B, K, G, each * T, d).transpose(1, 2).reshape(B, G, -1, d) @ keys.transpose(-1, -2)
+    if top:
+        w[..., :top].masked_fill_(torch.arange(top, device=q.device) >= lens[:, None, None, None], float("-inf"))
+    # row (question, head, token) against column (question, token): its own question, up to its own token
+    rq, rt = (torch.arange(K * each * T, device=q.device) // (each * T))[:, None], (torch.arange(K * each * T, device=q.device) % T)[:, None]
+    cq, ct = torch.arange(K * T, device=q.device) // T, torch.arange(K * T, device=q.device) % T
+    w[..., top:].masked_fill_((rq != cq) | (ct > rt), float("-inf"))
+    return torch.softmax(w, -1, dtype=torch.float32)
+
+
+@torch.no_grad()
+def tail(states, questions, seen=None):
+    """scores(state, question) for every one of several shards and several
+    questions in one pass, [shard][question]: the tails of the questions run
+    through the layers as rows, a row a shard and a question, each reading
+    its shard's state where the stock forward would read a cache. A shard's
+    keys and values are held once for all its questions and its recurrent
+    states are read, never written, so nothing is copied for a row but the
+    tail's own tokens. Questions are padded at their ends to the longest; a
+    token attends to nothing after it, so padding changes no score. seen, a
+    dict, is given the queries of layers 7 and 11 as attention used them
+    ("q7", "q11": [rows, 8, T, 256]), which fit.py weighs a book by"""
+    B, K = len(states), len(questions)
+    tails = [question_tail(states[0][3], q) for q in questions]
+    T = max(nq for _, nq in tails)
+    emb = tails[0][0].new_zeros((K, T, tails[0][0].shape[-1]))
+    for k, (e, nq) in enumerate(tails):
+        emb[k, :nq] = e[0]
+    R = B * K
+    h = emb[None].expand(B, -1, -1, -1).reshape(R, T, -1)
+    caches = [s[1] for s in states]
+    lens = torch.tensor([len(s[0]) for s in states], device=DEV)
     top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
-    for li, layer in enumerate(out.layers):
+    pos = (lens[:, None, None] + torch.arange(T, device=DEV)).expand(B, K, T).reshape(R, T)
+    cos, sin = M.model.rotary_emb(h, pos[None].expand(3, -1, -1))
+    for li, layer in enumerate(M.model.layers):
+        x = layer.input_layernorm(h)
         rows = [c.layers[li] for c in caches]
-        if hasattr(layer, "conv_states"):
-            for d in ("conv_states", "recurrent_states"):
-                fresh = dict(getattr(layer, d))
-                for i, v in fresh.items():
-                    if torch.is_tensor(v):
-                        fresh[i] = torch.cat([getattr(r, d)[i] for r in rows])
-                        if d == "recurrent_states":
-                            fresh[i] = fresh[i].float()  # kept in bf16 (pack)
-                setattr(layer, d, fresh)
+        if hasattr(layer, "linear_attn"):
+            y = linear(layer.linear_attn, x, rows, B)
         else:
-            layer = out.layers[li] = Roomy()
-            held = 0 if li == ALONE else top
-            layer.is_initialized, layer.dtype, layer.used = True, torch.bfloat16, held
-            for name in ("keys", "values"):
-                x0 = getattr(rows[0], name)
-                layer.device = x0.device
-                buf = torch.zeros((len(rows), *x0.shape[1:-2], held + room, x0.shape[-1]), dtype=torch.bfloat16, device=x0.device)
-                for b, r in enumerate(rows):
-                    x, sc = getattr(r, name), vars(r).get(name + "_scale")
-                    # int8 times its fp32 scale, rounded to bf16 as it is written
-                    buf[b, ..., :x.shape[-2], :] = torch.mul(x[0], sc[0]) if sc is not None else x[0]
-                setattr(layer, name, buf)
-    return out, top
-
-
-@torch.no_grad()
-def scores_batch(states, question):
-    """scores(state, question) for several shards in one forward: each
-    shard's cache is padded to the longest, the padding masked out, and each
-    row's question positions start at its own shard's length"""
-    emb, nq = question_tail(states[0][3], question)
-    lens = [len(s[0]) for s in states]
-    n, t = len(states), emb.shape[1]
-    cache, top = stack([s[1] for s in states], t)
-    ln = torch.tensor(lens, device=DEV)
-    pos = ln[:, None] + torch.arange(t, device=DEV)[None]
-    j = torch.arange(top + t, device=DEV)[None, None]
-    row = torch.arange(t, device=DEV)[None, :, None]
-    ok = (j < ln[:, None, None]) | ((j >= top) & (j - top <= row))
-    mask = torch.zeros(ok.shape, dtype=torch.bfloat16, device=DEV).masked_fill(~ok, torch.finfo(torch.bfloat16).min)
-    attention("grouped")
-    o = M(inputs_embeds=emb.expand(n, -1, -1), past_key_values=cache, position_ids=pos,
-          attention_mask={"full_attention": mask[:, None], "linear_attention": None},
-          use_cache=True, output_attentions=True, logits_to_keep=1)
-    attention("sdpa")
-    A = [x for x in o.attentions if x is not None][AT].float()  # shards, heads, tail tokens, keys
-    out = []
-    for b, (ids, _cache, spans, _tail) in enumerate(states):
-        cum = torch.nn.functional.pad(A[b, :, :, :len(ids)].cumsum(-1), (1, 0))
-        cs = torch.tensor([s for s, e in spans])
-        ce = torch.tensor([e for s, e in spans])
-        mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()
-        out.append(mass[HEADS[0]] + mass[HEADS[1]])
-    return out
-
-
-@torch.no_grad()
-def scores_each(state, questions):
-    """scores(state, q) for several questions over one shard in one forward:
-    the shard's cache once a question, each question padded at its end to
-    the longest. A question's tokens attend to nothing after them, so the
-    padding changes none of its scores"""
-    tails = [question_tail(state[3], q) for q in questions]
-    n, t = len(tails), max(nq for _, nq in tails)
-    emb = tails[0][0].new_zeros((n, t, tails[0][0].shape[-1]))
-    for b, (e, nq) in enumerate(tails):
-        emb[b, :nq] = e[0]
-    ids, _cache, spans, _tail = state
-    cache, top = stack([state[1]] * n, t)
-    ln = torch.full((n,), len(ids), device=DEV)
-    pos = ln[:, None] + torch.arange(t, device=DEV)[None]
-    j = torch.arange(top + t, device=DEV)[None, None]
-    row = torch.arange(t, device=DEV)[None, :, None]
-    ok = (j < ln[:, None, None]) | ((j >= top) & (j - top <= row))
-    mask = torch.zeros(ok.shape, dtype=torch.bfloat16, device=DEV).masked_fill(~ok, torch.finfo(torch.bfloat16).min)
-    attention("grouped")
-    o = M(inputs_embeds=emb, past_key_values=cache, position_ids=pos,
-          attention_mask={"full_attention": mask[:, None], "linear_attention": None},
-          use_cache=True, output_attentions=True, logits_to_keep=1)
-    attention("sdpa")
-    A = [x for x in o.attentions if x is not None][AT].float()  # questions, heads, tail tokens, keys
-    cs = torch.tensor([s for s, e in spans])
-    ce = torch.tensor([e for s, e in spans])
-    out = []
-    for b, (_e, nq) in enumerate(tails):
-        cum = torch.nn.functional.pad(A[b, :, :, :len(ids)].cumsum(-1), (1, 0))
-        mass = (cum[:, :, ce] - cum[:, :, cs])[:, 2:nq].mean(1).cpu()
-        out.append(mass[HEADS[0]] + mass[HEADS[1]])
-    return out
+            # Qwen3_5Attention.forward, the shard's keys and values read from its state
+            attn = layer.self_attn
+            q, gate = torch.chunk(attn.q_proj(x).view(R, T, -1, attn.head_dim * 2), 2, dim=-1)
+            q = attn.q_norm(q).transpose(1, 2)
+            k = attn.k_norm(attn.k_proj(x).view(R, T, -1, attn.head_dim)).transpose(1, 2)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            G = k.shape[1]
+            if seen is not None:
+                seen["q%d" % li] = q.float()
+            q = q.view(R, G, -1, T, attn.head_dim)
+            if li == SCALED:
+                break
+            far = 0 if li == ALONE else top  # layer 3's tail tokens see the tail alone
+            w = weights(q, held(rows, "keys", far, k), far, lens, K, attn.scaling).to(x.dtype)
+            y = w @ held(rows, "values", far, attn.v_proj(x).view(R, T, G, -1).transpose(1, 2))
+            y = y.view(B, G, K, -1, T, attn.head_dim).permute(0, 2, 4, 1, 3, 5).reshape(R, T, -1)  # [rows, T, heads x 256]
+            y = attn.o_proj(y * torch.sigmoid(gate.reshape(R, T, -1)))
+        h = h + y
+        h = h + layer.mlp(layer.post_attention_layernorm(h))
+    # layer 11: only the weights of the heads that are read, one in each group, over the shard's tokens
+    each = q.shape[2]
+    assert [hd // each for hd in HEADS] == list(range(G)), "one read head in each key-value group"
+    q = torch.stack([q[:, g, hd % each] for g, hd in enumerate(HEADS)], 1)[:, :, None]
+    w = weights(q, held(rows, "keys", top, k), top, lens, K, layer.self_attn.scaling)[..., :top]  # [B, groups, questions x T, top]
+    # the mean over each question's own tokens but the first two, the heads summed
+    share = torch.zeros((K, T), device=DEV)
+    for kk, (_e, nq) in enumerate(tails):
+        share[kk, 2:nq] = 1.0 / max(nq - 2, 1)
+    mass = (w.view(B, G, K, T, top) * share[None, None, :, :, None]).sum((1, 3))  # [B, questions, top]
+    cum = torch.nn.functional.pad(mass.cumsum(-1), (1, 0))
+    most = max(len(s[2]) for s in states)
+    cs, ce = torch.zeros((2, B, most), dtype=torch.long)
+    for b, s in enumerate(states):
+        sp = torch.tensor(s[2], dtype=torch.long).view(-1, 2)
+        cs[b, :len(sp)], ce[b, :len(sp)] = sp[:, 0], sp[:, 1]
+    cs, ce = (x.to(DEV)[:, None].expand(B, K, most) for x in (cs, ce))
+    out = (cum.gather(2, ce) - cum.gather(2, cs)).cpu()
+    return [[out[b, kk, :len(s[2])] for kk in range(K)] for b, s in enumerate(states)]
 
 
 def scores(state, question):
     """per paragraph: the mean over the question's tokens of the attention
     heads 3 and 4 of layer 11 pay to its line, summed over the two heads"""
-    return scores_batch([state], question)[0]
+    return tail([state], [question])[0][0]

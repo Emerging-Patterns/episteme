@@ -31,7 +31,6 @@ OUT = os.environ.get("F2_BOOK") or (os.environ.get("EPISTEME_HOME") or os.path.e
 os.environ["F2_BOOK"] = os.devnull  # the model is loaded with no book: the rows are the model's own
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
-from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 import joint, model, store
 
 BITS = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
@@ -81,27 +80,7 @@ def asked():
     return sorted(qs)
 
 
-SEEN = {}  # "q7", "q11" -> the queries of the last tail pass, as attention used them
-stock = model.grouped
-
-
-def grouped(module, query, key, value, attention_mask, scaling, dropout=0.0, **kwargs):
-    SEEN["q7"] = query.float()
-    return stock(module, query, key, value, attention_mask, scaling, dropout, **kwargs)
-
-
-def last(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
-    if self.config._attn_implementation != "sdpa":
-        shape = (*hidden_states.shape[:-1], -1, self.head_dim)
-        q, _gate = torch.chunk(self.q_proj(hidden_states).view(*shape[:-1], self.head_dim * 2), 2, dim=-1)
-        q = self.q_norm(q.view(shape)).transpose(1, 2)
-        SEEN["q11"] = apply_rotary_pos_emb(q, q, *position_embeddings)[0].float()
-    return model.last(self, hidden_states, position_embeddings, attention_mask, past_key_values, **kwargs)
-
-
-model.ALL_ATTENTION_FUNCTIONS.register("grouped", grouped)
-top = model.M.model.layers[model.SCALED].self_attn
-top.forward = last.__get__(top)
+SEEN = {}  # "q7", "q11" -> the queries of the last tail pass, as attention used them (model.tail)
 READ = {"q7": {0: (0, 1, 2, 3), 1: (4, 5, 6, 7)},  # query heads by the key-value head they read
         "q11": {h // 4: (h,) for h in model.HEADS}}
 
@@ -127,7 +106,7 @@ with torch.no_grad():
         n += x.shape[0]
         words = re.findall(r"[A-Za-z]{4,}", shard["text"])
         qs = rnd.sample(real, 12) if real else ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(12)]
-        model.scores_each((ids, model.pack(cache), spans, tail), qs)
+        model.tail([(ids, model.pack(cache), spans, tail)], qs, SEEN)
         for name, tensor in (("q7", "k7"), ("q11", "k11")):
             for h, heads in READ[name].items():
                 v = SEEN[name][:, list(heads)].reshape(-1, 256)
