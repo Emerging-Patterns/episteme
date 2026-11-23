@@ -1,5 +1,6 @@
-"""The F2 reader's tail pass as a compiled library (f2pass.cu: C++, CUDA and
-cuBLAS, no PyTorch), called through ctypes.
+"""The F2 reader's tail pass and the unpacking of its coded states as a
+compiled library (f2pass.cu: C++, CUDA and cuBLAS, no PyTorch), called
+through ctypes.
 
 The library reads a shard's state where it lies on the device: State says
 where (pointers into tensors the caller holds) and nothing is copied. A
@@ -8,7 +9,7 @@ file, and the buffers of its passes; its calls take plain ints and ctypes
 arrays, so this module needs no tensor library."""
 import ctypes, os
 
-ABI = 1  # what f2pass.h calls F2_ABI: the layout of State and the calls' meaning
+ABI = 2  # what f2pass.h calls F2_ABI: the layout of State and the calls' meaning
 
 
 class State(ctypes.Structure):
@@ -21,8 +22,19 @@ class State(ctypes.Structure):
                 ("conv_len", ctypes.c_int), ("spans", ctypes.c_int), ("span", ctypes.POINTER(ctypes.c_int))]
 
 
+class Packed(ctypes.Structure):
+    """F2Packed of f2pass.h"""
+    _fields_ = [("tokens", ctypes.c_int), ("kept", ctypes.c_int), ("exact", ctypes.c_int),
+                ("joint", ctypes.c_void_p), ("at", ctypes.c_void_p), ("rows", ctypes.c_void_p), ("rms", ctypes.c_void_p),
+                ("cos", ctypes.c_void_p), ("sin", ctypes.c_void_p),
+                ("left", ctypes.c_void_p * 12), ("right", ctypes.c_void_p * 12), ("rest", ctypes.c_void_p * 12), ("scale", ctypes.c_void_p * 12),
+                ("conv", ctypes.c_void_p * 12), ("conv_bytes", ctypes.c_int), ("y", ctypes.c_void_p), ("k7", ctypes.c_void_p), ("v7", ctypes.c_void_p), ("k11", ctypes.c_void_p),
+                ("k7_scale", ctypes.c_void_p), ("v7_scale", ctypes.c_void_p), ("k11_scale", ctypes.c_void_p),
+                ("rec", ctypes.c_void_p * 12), ("conv_out", ctypes.c_void_p * 12)]
+
+
 INT8, HALF = 0, 1  # State.kind
-TOKENS = 1024  # the most tail tokens a pass may hold (MAXN)
+TOKENS = 4096  # the most tail tokens a pass may hold (MAXN)
 LIB = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libf2pass.so"))
 assert LIB.f2_abi() == ABI, "libf2pass.so was built for another f2pass.py"
 INTS = ctypes.POINTER(ctypes.c_int)
@@ -30,6 +42,10 @@ LIB.f2_open.restype = ctypes.c_void_p
 LIB.f2_open.argtypes = [ctypes.c_char_p]
 LIB.f2_tail.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(State), ctypes.c_int, INTS, INTS, INTS, ctypes.c_int, ctypes.c_int,
                         INTS, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
+LIB.f2_book.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int] + [ctypes.c_void_p] * 7 + [ctypes.c_int, ctypes.c_int]
+LIB.f2_unpack.argtypes = [ctypes.c_void_p, ctypes.POINTER(Packed)]
+LIB.f2_queries.restype = ctypes.c_long
+LIB.f2_queries.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
 LIB.f2_stop.argtypes = [ctypes.c_void_p, ctypes.c_int]
 LIB.f2_hidden.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
 LIB.f2_prof.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_char_p)), ctypes.POINTER(ctypes.POINTER(ctypes.c_double))]
@@ -41,6 +57,8 @@ def ints(v):
 
 class Pass:
     """the weights on the device and the buffers of the passes run with them"""
+
+    unpacks = False  # whether a book was given that the library unpacks states of
 
     def __init__(self, weights):
         self.ctx = LIB.f2_open(os.fsencode(weights))
@@ -59,6 +77,27 @@ class Pass:
         if LIB.f2_tail(self.ctx, len(states), arr, len(ids), ints(ids), ints(who), ints(at), same, len(lens), ints(lens), out, most):
             raise RuntimeError("the f2pass tail pass failed (its reason is on stderr)")
         return out
+
+    def queries(self, rows):
+        """the last pass's queries as attention used them, two buffers of
+        bf16: layer 7's [rows][8][256] and layer 11's two read heads'
+        [rows][2][256]; rows is that pass's shards by tokens"""
+        q7, q11 = ctypes.create_string_buffer(rows * 8 * 256 * 2), ctypes.create_string_buffer(rows * 2 * 256 * 2)
+        if LIB.f2_queries(self.ctx, q7, q11, rows) != rows:
+            raise RuntimeError("the last f2pass pass was not one of %d rows" % rows)
+        return q7, q11
+
+    def book(self, coefficients, bytes, lo, shift, mask2, odd, halfstep, back, mean, rank, resid):
+        """the book states are coded by (f2_book: pointers to its tensors on
+        the device, which the caller goes on holding); whether the library
+        unpacks states of such a book"""
+        self.unpacks = not LIB.f2_book(self.ctx, coefficients, bytes, lo, shift, mask2, odd, halfstep, back, mean, rank, resid)
+        return self.unpacks
+
+    def unpack(self, packed):
+        """a packed state (Packed) unpacked into the memory it names"""
+        if LIB.f2_unpack(self.ctx, ctypes.byref(packed)):
+            raise RuntimeError("the f2pass unpacking failed (its reason is on stderr)")
 
     def hidden(self, layer, rows, *tail):
         """for checks: the hidden states (bf16 bytes, [rows][1024]) a pass of

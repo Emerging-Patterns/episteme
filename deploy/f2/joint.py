@@ -37,7 +37,9 @@ attends to, lies far outside the range the steps were made for, and coded
 it alone carried a third of all the error and moved the scores.
 
 Decoding is the unpacking, one matrix product and the turning forward of the
-keys' rotary part; it runs on the GPU as a state arrives there.
+keys' rotary part; it runs on the GPU as a state arrives there. The reader's
+is f2pass's (native/f2pass.cu), which gives these functions' bits; they are
+the codec's own decoding, checked against its coding below.
 
 Not coded further: the bins' order-0 entropy is 6 to 10% under their fixed
 length, which no decoder faster than the disk would win back, and a token's
