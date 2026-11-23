@@ -312,6 +312,24 @@ def question_tail(tail, question):
     return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
 
 
+def tf32(f):
+    """f run with its fp32 products on the tensor cores (TF32: the factors'
+    mantissas rounded to 10 bits, the sums kept in fp32), the setting put
+    back after. For the delta rule alone: its factors are made from bf16
+    activations and states, which hold 8 bits. The readout's sums over the
+    attention weights are left in full fp32"""
+    @functools.wraps(f)
+    def g(*a, **k):
+        was = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            return f(*a, **k)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = was
+    return g
+
+
+@tf32
 def delta(query, key, value, decay, beta, state, seen):
     """the gated delta rule's outputs for the questions' tokens, each
     question starting from its shard's recurrent state: what the stock
