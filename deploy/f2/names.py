@@ -4,14 +4,13 @@ running reader.
 
 A shard's key is its text's. Its state's name is the key's with what a kept
 state depends on (VERSION: the model's directory, the layout of a state and,
-with a book, the book's bytes); a state kept before there was a book has
-the name PLAIN gives. A change to any of them leaves the old files under
-names no reader says again."""
-import hashlib, os
+with a book, the book's bytes; PLAIN with none). A change to any of them
+leaves the old files under names no reader says again."""
+import hashlib, os, struct
 import store
 
 DIR = os.environ.get("F2_MODEL") or os.environ.get("QWEN_DIR") or store.HOME + "/f2/qwen08"
-BOOK_PATH = os.environ.get("F2_BOOK") or store.HOME + "/f2/book.pt"
+BOOK_PATH = os.environ.get("F2_BOOK") or store.HOME + "/f2/book.f2"
 STATES_DIR = os.environ.get("F2_STATES") or os.environ.get("DISK") or store.HOME + "/f2/states"
 WN_DIR = os.environ.get("F2_WORDNULLS") or STATES_DIR
 
@@ -25,8 +24,30 @@ def book_id(path):
 
 
 BOOK_ID = book_id(BOOK_PATH)
-PLAIN = "12|11:2.0|%s|v5" % DIR  # what a state kept with no book depends on
-VERSION = PLAIN if BOOK_ID is None else "12|11:2.0|%s|v6|%s" % (DIR, BOOK_ID)  # what a kept state depends on
+PLAIN = "12|11:2.0|%s|v7" % DIR  # what a state kept with no book depends on
+VERSION = PLAIN if BOOK_ID is None else "12|11:2.0|%s|v7|%s" % (DIR, BOOK_ID)  # what a kept state depends on
+
+
+def book(path):
+    """the book kept at path (fit.py writes it): the eight bytes "F2BOOK1"
+    and a newline, then as little-endian int32s its coefficients, the rank
+    and the bits its recurrent states are coded with, as floats the error
+    over the median's above which a token is kept exact and the bits a
+    channel it was made for, and then its numbers: the mean (fp32 [1536]),
+    the transform there (fp32 [coefficients][1536]) and back (fp32
+    [1536][coefficients]), each coefficient's width in bits (bytes, padded
+    to a multiple of 8) and its step (fp32). The numbers are given as their
+    bytes"""
+    raw = open(path, "rb").read()
+    if raw[:8] != b"F2BOOK1\n":
+        raise ValueError("%s is not a book this reader reads (fit.py makes one)" % path)
+    k, rank, resid, exact, bits = struct.unpack_from("<3i2f", raw, 8)
+    out, at = {"coefficients": k, "rank": rank, "resid": resid, "exact": exact, "bits": bits}, 28 + 4
+    for name, n in (("mean", 1536 * 4), ("fwd", k * 1536 * 4), ("inv", 1536 * k * 4), ("widths", (k + 7) // 8 * 8), ("step", k * 4)):
+        out[name], at = raw[at:at + n], at + n
+    if at != len(raw):
+        raise ValueError("the book at %s is not whole" % path)
+    return out
 
 
 def key(text):
@@ -35,17 +56,9 @@ def key(text):
 
 def state(k):
     """where k's state is kept"""
-    return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + VERSION).encode()).hexdigest())
-
-
-def plain(k):
-    """where k's state was kept before there was a book, or None when there
-    is none now"""
-    if BOOK_ID is None:
-        return None
-    return "%s/%s.pt" % (STATES_DIR, hashlib.sha1((k + PLAIN).encode()).hexdigest())
+    return "%s/%s.f2" % (STATES_DIR, hashlib.sha1((k + VERSION).encode()).hexdigest())
 
 
 def null(k):
     """where k's word null is kept"""
-    return "%s/%s.wn.pt" % (WN_DIR, hashlib.sha1((k + VERSION).encode()).hexdigest())
+    return "%s/%s.wn.f2" % (WN_DIR, hashlib.sha1((k + VERSION).encode()).hexdigest())

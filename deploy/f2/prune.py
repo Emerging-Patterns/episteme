@@ -12,10 +12,8 @@ fed every hour leaves its tails' behind every hour, and a new book or layout
 leaves a whole store's.
 
 Kept, for each shard of the store (the frozen shards and the tail of each
-source's directory, rendered as the reader renders them): its state, its
-word null, and the state kept before there was a book while there is none
-coded by the book (the reader codes that one when the shard is next asked
-about). Every other file there whose name is a kept file's (forty hex
+source's directory, rendered as the reader renders them): its state and its
+word null. Every other file there whose name is a kept file's (forty hex
 digits, then a suffix) is removed; --dry removes nothing and prints the
 same counts. A file of any other name is left and counted.
 
@@ -74,13 +72,9 @@ def main(args):
     keys = shards()
     keep, stated = set(), 0
     for k in keys:
-        state, plain = names.state(k), names.plain(k)
+        state = names.state(k)
         keep.update((state, names.null(k)))
-        if kept(state):
-            stated += 1
-        elif plain is not None and kept(plain):
-            keep.add(plain)
-            stated += 1
+        stated += kept(state)
     gone = [(p, b) for p, b, m in files
             if p not in keep and NAME.match(os.path.basename(p)) and not (p.endswith(".tmp") and t0 - m < TMP_AGE)]
     other = sum(1 for p, b, m in files if not NAME.match(os.path.basename(p)))

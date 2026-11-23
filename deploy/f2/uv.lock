@@ -39,14 +39,18 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "tokenizers" },
+]
+
+[package.dev-dependencies]
+fit = [
     { name = "torch" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "tokenizers", specifier = "==0.23.3" },
-    { name = "torch", specifier = "==2.6.0+cu124", index = "https://download.pytorch.org/whl/cu124" },
-]
+requires-dist = [{ name = "tokenizers", specifier = "==0.23.3" }]
+
+[package.metadata.requires-dev]
+fit = [{ name = "torch", specifier = "==2.6.0+cu124", index = "https://download.pytorch.org/whl/cu124" }]
 
 [[package]]
 name = "filelock"

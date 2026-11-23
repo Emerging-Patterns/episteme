@@ -90,12 +90,6 @@ class Store:
         return None
 
 
-class Bag:
-    """a state's cache or one layer of it, as a reader's files hold them: a
-    plain holder of attributes (a cache's layers; a layer's keys and values,
-    or its convolution and recurrent states)"""
-
-
 def messages(text, question):
     """src/read.bend Read.messages"""
     return [{"role": "system", "content": PROMPT},

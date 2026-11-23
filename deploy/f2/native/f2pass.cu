@@ -1,5 +1,11 @@
-/* The tail pass of the F2 reader and the unpacking of its coded states, as
-   one program of its own kernels.
+/* The F2 reader's model and its states, as one program of its own kernels.
+
+   It runs layers 0..11 of Qwen3.5-0.8B three ways: over a shard's prompt
+   when the shard is read for the first time (prefill), over questions'
+   tails against shards already read (the pass), and it packs what a shard
+   left into the bytes the reader keeps and unpacks them onto the device
+   again, where it holds the unpacked states itself (model.py says what a
+   state and a score are; f2pass.h a packed state's layout).
 
    The pass: the questions' tail tokens, laid end to end, run through layers
    0..11 of Qwen3.5-0.8B once a shard, each token reading its shard's state
@@ -45,9 +51,54 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
+
+/* A shard's state as a pass reads it, its tensors on the device.
+   kind 0: layer 7's keys and values and layer 11's keys as int8, a scale a
+   channel for keys and a scale a token for values (a kept state);
+   kind 1: the same three in half precision, no scales (a state scored in
+   passing). A tensor of two key-value heads is given as a pointer a head and
+   the bytes from one token's row to the next. */
+typedef struct {
+    int len;            /* the shard's tokens: the tail's positions start here */
+    int kind;
+    const void *k7[2], *v7[2], *k11[2];
+    long k7_step, v7_step, k11_step;
+    const float *k7_scale[2], *v7_scale[2], *k11_scale[2];
+    const void *conv[12]; /* linear-attention layers: bf16 [6144, conv_len] */
+    const void *rec[12];  /* bf16 [16, 128, 128] */
+    int conv_len;
+    int spans;            /* paragraphs */
+    const int *span;      /* host: [spans][2] token spans */
+} F2State;
+
+/* a packed state's parts on the device, and where its unpacking goes (unpack) */
+typedef struct {
+    int tokens, kept, exact;
+    const void *joint;
+    const int *at;
+    const void *rows, *rms;
+    const float *cos, *sin;
+    const void *left[12], *right[12], *rest[12], *scale[12], *conv[12];
+    int conv_bytes;
+    void *y;
+    void *k7, *v7, *k11;
+    float *k7_scale, *v7_scale, *k11_scale;
+    void *rec[12], *conv_out[12];
+} F2Packed;
+
+/* where a prefill writes what a state is made of, on the device (prefill) */
+typedef struct {
+    int tokens;
+    const int *ids;
+    void *k7, *v7, *k11;
+    void *conv[12];
+    float *rec[12];
+} F2Fill;
 
 #define HID 1024    // hidden size
 #define HD 256      // an attention head's width
@@ -840,11 +891,12 @@ struct Buf {
     size_t cap = 0;
 };
 
-enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_FDENSE, P_FDELTA, P_FATT, P_FREST, P_COUNT };
+enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_FDENSE, P_FDELTA, P_FATT, P_FREST, P_FPACK, P_TWAIT, P_TROOM, P_COUNT };
 static const char *PNAMES[P_COUNT] = {"setup", "norm", "dense", "conv", "delta: decay, state", "delta: products", "delta: solve", "gate", "swiglu", "qk", "alone", "cast",
                                       "attention products", "softmax", "combine", "readout", "out", "unpack: coefficients",
                                       "unpack: product", "unpack: rows", "unpack: int8", "unpack: recurrent states", "prefill: dense",
-                                      "prefill: delta rule", "prefill: attention", "prefill: the rest"};
+                                      "prefill: delta rule", "prefill: attention", "prefill: the rest", "prefill: packing", "take: its transfer's end",
+                                      "take: room on the device"};
 
 struct F2 {
     File file;
@@ -859,11 +911,99 @@ struct F2 {
     double secs[P_COUNT] = {0};
     double mark = 0;
     std::mutex one;  // a pass at a time: the buffers are the handle's
-    int K = 0, bytes = 0, rank = 0;  // the book: coefficients, bytes a token, the recurrent states' rank
-    Bin *bin = nullptr;
-    const __half *back = nullptr, *mean = nullptr;
+    // the book: coefficients, bytes a token, the recurrent states' rank, the error over the median's that keeps a token exact
+    int K = 0, bytes = 0, rank = 0;
+    float exact = 0;
+    Bin *bin = nullptr;                                           // each coefficient's place in a token's bytes
+    __half *back = nullptr, *mean = nullptr;                      // to decode: [K][1536], [1536]
+    float *fwd = nullptr, *mean32 = nullptr, *step = nullptr, *halfw = nullptr;  // to code: [K][1536], [1536], [K], [K]
+    int *firstbit = nullptr, *bytefirst = nullptr;               // each coefficient's first bit; each byte's first coefficient
+    float *probe = nullptr;                                       // the recurrent states' subspaces are found from it: [128][rank + 8]
+    Buf cosb, sinb;                                               // the rotary angles' cosines and sines, [angles][64]
+    int angles = 0;
+    std::vector<struct Dev *> devs;                               // the unpacked states, by handle - 1
+    std::vector<struct Ticket *> tickets;                         // the staged ones, by ticket - 1
+    std::mutex staging;
+    cudaStream_t sent = nullptr;                                  // the stream packed states are sent on
+    struct Slab *slabs = nullptr;
+    int nslabs = 0, slab = 0;
+    size_t slab_bytes = 0;
     Buf h, x, o, lin, y, act, X, S, Rd, G, v, beta, g, out, Qp, Ko, Qs, Kb, Lb, Ya, wown, mass, stat, emb, tab, ptr, sc, res, cum, C, Y, us, Q11;
 };
+
+static std::atomic<long> HELD{0};  // the device bytes held through the two calls below
+
+static cudaError_t dalloc(void **p, size_t bytes) {
+    cudaError_t e = cudaMalloc(p, bytes ? bytes : 8);
+    if (e == cudaSuccess) HELD += (long)bytes;
+    return e;
+}
+
+static void dfree(void *p, size_t bytes) {
+    if (!p) return;
+    cudaFree(p);
+    HELD -= (long)bytes;
+}
+
+/* Blocks that live for a pass or two (a packed state on its way, a state
+   scored in passing) come from a pool: the device's own allocator takes
+   most of a millisecond to give and to take back a block, more than half of
+   what unpacking a state costs. A block's size is rounded up to one of a few
+   (its top four bits), a freed block is kept for the next of its size while
+   the pool is under its cap, and the whole pool is given back when the
+   device has no room for something else */
+#include <map>
+static std::mutex POOL_LOCK;
+static std::multimap<size_t, void *> POOL;
+static size_t POOLED = 0;
+static const size_t POOL_CAP = (size_t)768 << 20;
+
+static size_t rounded(size_t bytes) {
+    size_t step = 1 << 16;
+    while (step * 16 < bytes) step <<= 1;
+    return (bytes + step - 1) / step * step;
+}
+
+static void drain() {
+    std::lock_guard<std::mutex> lock(POOL_LOCK);
+    for (auto &b : POOL) dfree(b.second, b.first);
+    POOL.clear();
+    POOLED = 0;
+}
+
+/* device memory, the pool given back first when there is none */
+static cudaError_t dalloc_hard(void **p, size_t bytes) {
+    cudaError_t e = dalloc(p, bytes);
+    if (e == cudaSuccess) return e;
+    cudaGetLastError();
+    drain();
+    return dalloc(p, bytes);
+}
+
+static void *palloc(size_t bytes) {
+    const size_t n = rounded(bytes);
+    {
+        std::lock_guard<std::mutex> lock(POOL_LOCK);
+        auto it = POOL.find(n);
+        if (it != POOL.end()) {
+            void *p = it->second;
+            POOL.erase(it);
+            POOLED -= n;
+            return p;
+        }
+    }
+    void *p = nullptr;
+    return dalloc_hard(&p, n) == cudaSuccess ? p : nullptr;
+}
+
+static void pfree(void *p, size_t bytes) {
+    if (!p) return;
+    const size_t n = rounded(bytes);
+    std::lock_guard<std::mutex> lock(POOL_LOCK);
+    if (POOLED + n > POOL_CAP) return dfree(p, n);
+    POOL.insert({n, p});
+    POOLED += n;
+}
 
 static double now() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 
@@ -884,9 +1024,9 @@ static bool fail(const char *what, int code) {
 
 static bool room(Buf &b, size_t bytes) {
     if (b.cap >= bytes) return true;
-    if (b.p) cudaFree(b.p);
+    dfree(b.p, b.cap);
     b.p = nullptr, b.cap = 0;
-    CU(cudaMalloc(&b.p, bytes + bytes / 4));
+    CU(dalloc_hard(&b.p, bytes + bytes / 4));
     b.cap = bytes + bytes / 4;
     return true;
 }
@@ -903,7 +1043,7 @@ static bool stack(const File &f, const std::vector<std::pair<std::string, std::p
         long rows = p.second.second < 0 ? t.shape[0] : p.second.second;
         total += rows * (t.count() / t.shape[0]);
     }
-    CU(cudaMalloc((void **)out, total * 2));
+    CU(dalloc((void **)out, total * 2));
     size_t at = 0;
     for (size_t i = 0; i < parts.size(); i++) {
         size_t wide = ts[i].count() / ts[i].shape[0];
@@ -932,7 +1072,7 @@ template <class F> static bool vec(const File &f, const std::string &name, float
             return fail("a vector of an unknown type", 0);
         v[i] = fn(x);
     }
-    CU(cudaMalloc((void **)out, v.size() * 4));
+    CU(dalloc((void **)out, v.size() * 4));
     CU(cudaMemcpy(*out, v.data(), v.size() * 4, cudaMemcpyHostToDevice));
     return true;
 }
@@ -1287,35 +1427,9 @@ long f2_queries(F2 *c, void *q7, void *q11, long rows) {
     return rows;
 }
 
-int f2_book(F2 *c, int K, int bytes, const long *lo, const short *shift, const short *mask2, const short *odd, const void *halfstep,
-            const void *back, const void *mean, int rank, int resid) {
-    std::lock_guard<std::mutex> lock(c->one);
-    auto book = [&]() -> bool {
-        if (resid != 4 || rank < 1 || K < 1) return fail("a book whose recurrent states are not kept as a rank and four bits", resid);
-        std::vector<long> l(K);
-        std::vector<short> s(K), m(K), o(K);
-        std::vector<__half> h(K);
-        CU(cudaMemcpy(l.data(), lo, K * 8, cudaMemcpyDeviceToHost));
-        CU(cudaMemcpy(s.data(), shift, K * 2, cudaMemcpyDeviceToHost));
-        CU(cudaMemcpy(m.data(), mask2, K * 2, cudaMemcpyDeviceToHost));
-        CU(cudaMemcpy(o.data(), odd, K * 2, cudaMemcpyDeviceToHost));
-        CU(cudaMemcpy(h.data(), halfstep, K * 2, cudaMemcpyDeviceToHost));
-        std::vector<Bin> bins(K);
-        for (int k = 0; k < K; k++) bins[k] = Bin{(int)l[k], s[k], m[k], o[k], h[k]};
-        if (c->bin) cudaFree(c->bin);
-        c->bin = nullptr, c->K = 0;
-        CU(cudaMalloc((void **)&c->bin, K * sizeof(Bin)));
-        CU(cudaMemcpy(c->bin, bins.data(), K * sizeof(Bin), cudaMemcpyHostToDevice));
-        c->K = K, c->bytes = bytes, c->rank = rank, c->back = (const __half *)back, c->mean = (const __half *)mean;
-        return true;
-    };
-    return book() ? 0 : -1;
-}
-
 static bool unpack(F2 *c, const F2Packed *p) {
-    if (!c->K) return fail("no book", 0);
+    if (!c->K) return fail("a state coded by a book, and no book", 0);
     cudaGetLastError();
-    c->mark = now();
     const int T = p->tokens, K = c->K;
     const size_t n = (size_t)T * 1536;
     const float one = 1, zero = 0;
@@ -1368,21 +1482,16 @@ static bool unpack(F2 *c, const F2Packed *p) {
     return true;
 }
 
-int f2_unpack(F2 *c, const F2Packed *p) {
-    std::lock_guard<std::mutex> lock(c->one);
-    return unpack(c, p) ? 0 : -1;
-}
-
 /* device memory held for one call */
 struct Held {
-    std::vector<void *> all;
+    std::vector<std::pair<void *, size_t>> all;
     ~Held() {
-        for (void *p : all) cudaFree(p);
+        for (auto &p : all) dfree(p.first, p.second);
     }
     void *get(size_t bytes, bool zero = false) {
         void *p = nullptr;
-        if (cudaMalloc(&p, bytes ? bytes : 8) != cudaSuccess) return nullptr;
-        all.push_back(p);
+        if (dalloc_hard(&p, bytes) != cudaSuccess) return nullptr;
+        all.push_back({p, bytes});
         if (zero) cudaMemsetAsync(p, 0, bytes);
         return p;
     }
@@ -1520,15 +1629,813 @@ static bool prefill(F2 *c, const F2Fill *f) {
     return true;
 }
 
-int f2_prefill(F2 *c, const F2Fill *f) {
-    std::lock_guard<std::mutex> lock(c->one);
-    return prefill(c, f) ? 0 : -1;
-}
-
 int f2_abi(void) { return F2_ABI; }
 
-int f2_tail(F2 *c, int B, const F2State *st, int N, const int *ids, const int *who, const int *at, int same, int K, const int *lens,
+
+// ---------------------------------------------------------------- the book
+
+static uint16_t tohalf(float f) {  // to nearest, ties to even, on the host
+    uint32_t x;
+    memcpy(&x, &f, 4);
+    uint32_t sign = (x >> 16) & 0x8000u, man = x & 0x7fffffu;
+    int e = (int)((x >> 23) & 0xff);
+    if (e == 0xff) return (uint16_t)(sign | 0x7c00u | (man ? 0x200u : 0));
+    e = e - 127 + 15;
+    if (e >= 31) return (uint16_t)(sign | 0x7c00u);
+    if (e <= 0) {
+        if (e < -10) return (uint16_t)sign;
+        man |= 0x800000u;
+        int shift = 14 - e;
+        uint32_t h = man >> shift, rem = man & ((1u << shift) - 1), mid = 1u << (shift - 1);
+        if (rem > mid || (rem == mid && (h & 1))) h++;
+        return (uint16_t)(sign | h);
+    }
+    uint32_t h = ((uint32_t)e << 10) | (man >> 13), rem = man & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1))) h++;
+    return (uint16_t)(sign | h);
+}
+
+template <class T> static bool upload(T **out, const std::vector<T> &v) {
+    dfree(*out, 0);
+    *out = nullptr;
+    CU(dalloc((void **)out, v.size() * sizeof(T)));
+    CU(cudaMemcpy(*out, v.data(), v.size() * sizeof(T), cudaMemcpyHostToDevice));
+    return true;
+}
+
+int f2_book(F2 *c, int K, const float *mean, const float *fwd, const float *inv, const unsigned char *widths, const float *step, float exact,
+            int rank, int resid) {
+    std::lock_guard<std::mutex> lock(c->one);
+    auto book = [&]() -> bool {
+        if (resid != 4 || rank < 1 || rank + 8 > LD || K < 1) return fail("a book whose recurrent states are not kept as a rank and four bits", resid);
+        // where each coefficient's bin lies in a token's bytes: the bins end to end, the widest first
+        std::vector<Bin> bins(K);
+        std::vector<int> fb(K);
+        std::vector<float> halfw(K);
+        int at = 0;
+        for (int k = 0; k < K; k++) {
+            int w = widths[k];
+            if (w < 1 || w > 8 || (k && w > widths[k - 1])) return fail("a book whose widths are not 8 to 1 bits, falling", w);
+            fb[k] = at;
+            halfw[k] = (float)(1 << (w - 1));
+            uint16_t hs = tohalf(step[k] / 2);
+            bins[k].lo = at / 8, bins[k].shift = (short)(at % 8), bins[k].mask2 = (short)(2 * ((1 << w) - 1)), bins[k].odd = (short)((1 << w) - 1);
+            memcpy(&bins[k].halfstep, &hs, 2);
+            at += w;
+        }
+        const int bytes = (at + 7) / 8;
+        std::vector<int> first(bytes + 1, K);  // each byte's first coefficient
+        for (int k = K - 1; k >= 0; k--)
+            for (int b = fb[k] / 8; b <= (fb[k] + widths[k] - 1) / 8; b++) first[b] = k;
+        std::vector<uint16_t> back((size_t)K * 1536), meanh(1536);
+        for (int k = 0; k < K; k++)
+            for (int d = 0; d < 1536; d++) back[(size_t)k * 1536 + d] = tohalf(inv[(size_t)d * K + k]);
+        for (int d = 0; d < 1536; d++) meanh[d] = tohalf(mean[d]);
+        // the directions a recurrent state's leading subspace is found from: fixed, so that a state packs the same way twice
+        std::vector<float> probe((size_t)LD * (rank + 8));
+        uint64_t seed = 0x9e3779b97f4a7c15ull;
+        auto unit = [&]() {
+            seed ^= seed << 13, seed ^= seed >> 7, seed ^= seed << 17;
+            return ((seed >> 11) + 0.5) / 9007199254740992.0;
+        };
+        for (float &x : probe) x = (float)(sqrt(-2.0 * log(unit())) * cos(6.283185307179586 * unit()));
+        c->K = 0;
+        if (!upload(&c->bin, bins) || !upload((uint16_t **)&c->back, back) || !upload((uint16_t **)&c->mean, meanh) ||
+            !upload(&c->fwd, std::vector<float>(fwd, fwd + (size_t)K * 1536)) || !upload(&c->mean32, std::vector<float>(mean, mean + 1536)) ||
+            !upload(&c->step, std::vector<float>(step, step + K)) || !upload(&c->halfw, halfw) || !upload(&c->firstbit, fb) ||
+            !upload(&c->bytefirst, first) || !upload(&c->probe, probe))
+            return false;
+        c->K = K, c->bytes = bytes, c->rank = rank, c->exact = exact;
+        return true;
+    };
+    return book() ? 0 : -1;
+}
+
+int f2_book_bytes(F2 *c) { return c->K ? c->bytes : 0; }
+
+/* the cosines and sines of the rotary angles at places 0.., [places][64]: 32 frequencies, said twice. A thread a number */
+__global__ void angle_k(float *cs, float *sn, const float *invf, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float a = __fmul_rn((float)(i / 64), invf[i % 32]);
+    cs[i] = cosf(a);
+    sn[i] = sinf(a);
+}
+
+static bool angles(F2 *c, int T) {
+    if (c->angles >= T) return true;
+    const int n = T > 32768 ? T : 32768;
+    if (!room(c->cosb, (size_t)n * 64 * 4) || !room(c->sinb, (size_t)n * 64 * 4)) return false;
+    float *invf;
+    CU(dalloc((void **)&invf, 32 * 4));
+    CU(cudaMemcpy(invf, c->invf, 32 * 4, cudaMemcpyHostToDevice));
+    angle_k<<<((size_t)n * 64 + 255) / 256, 256>>>((float *)c->cosb.p, (float *)c->sinb.p, invf, (size_t)n * 64);
+    CU(cudaDeviceSynchronize());
+    dfree(invf, 32 * 4);
+    c->angles = n;
+    return true;
+}
+
+// ---------------------------------------------------------------- a packed state's parts, and an unpacked state's
+
+static const int LINEAR[9] = {0, 1, 2, 4, 5, 6, 8, 9, 10};  // the linear-attention layers
+static size_t pad8(size_t n) { return (n + 7) & ~(size_t)7; }
+
+struct Parts {
+    size_t ids, span, tail, null, joint, at, rows, rms, left[9], right[9], rest[9], scale[9], conv[9];
+    size_t k7, v7, k11, k7s, v7s, k11s, rec[9], end;
+};
+
+static Parts parts(const F2Head &h) {
+    Parts p;
+    memset(&p, 0, sizeof p);
+    size_t at = sizeof(F2Head);
+    auto take = [&](size_t bytes) {
+        size_t a = at;
+        at = pad8(at + bytes);
+        return a;
+    };
+    const size_t T = h.tokens;
+    p.ids = take(T * 4), p.span = take((size_t)h.spans * 8), p.tail = take(h.tail), p.null = take((size_t)h.null * 4);
+    if (h.kind == 1) {
+        p.joint = take(T * h.bytes), p.at = take((size_t)h.exact * 4), p.rows = take((size_t)h.exact * 1536 * 2), p.rms = take(2 * T * 2);
+        for (int l = 0; l < 9; l++) {
+            p.left[l] = take((size_t)LH * LD * h.rank * 2), p.right[l] = take((size_t)LH * h.rank * LD * 2);
+            p.rest[l] = take((size_t)LH * LD * (LD / 2)), p.scale[l] = take((size_t)LH * LD * 2), p.conv[l] = take((size_t)LQKV * h.conv * 2);
+        }
+    } else {
+        p.k7 = take(T * 512), p.v7 = take(T * 512), p.k11 = take(T * 512);
+        p.k7s = take(512 * 4), p.v7s = take(2 * T * 4), p.k11s = take(512 * 4);
+        for (int l = 0; l < 9; l++) p.rec[l] = take((size_t)LH * LD * LD * 2), p.conv[l] = take((size_t)LQKV * h.conv * 2);
+    }
+    p.end = at;
+    return p;
+}
+
+static bool sound(const F2Head &h) {
+    return !memcmp(h.magic, "F2STATE1", 8) && (h.kind == 0 || h.kind == 1) && h.tokens > 0 && h.spans >= 0 && h.exact >= 0 && h.conv >= KS - 1 &&
+           h.tail >= 0 && h.null >= 0 && (h.kind == 0 || (h.bytes > 0 && h.rank > 0));
+}
+
+long f2_packed_bytes(const F2Head *h) { return sound(*h) ? (long)parts(*h).end : -1; }
+
+/* an unpacked state's one block on the device: to keep, the three as int8
+   and their scales; else the rows in halves; then the layers' recurrent and
+   convolution states */
+struct Lay {
+    size_t k7, v7, k11, k7s, v7s, k11s, y, rec[9], conv[9], end;
+};
+
+static Lay lay(const F2Head &h, bool int8) {
+    Lay l;
+    memset(&l, 0, sizeof l);
+    size_t at = 0;
+    auto take = [&](size_t bytes) {
+        size_t a = at;
+        at = pad8(at + bytes);
+        return a;
+    };
+    const size_t T = h.tokens;
+    if (int8) l.k7 = take(T * 512), l.v7 = take(T * 512), l.k11 = take(T * 512), l.k7s = take(512 * 4), l.v7s = take(2 * T * 4), l.k11s = take(512 * 4);
+    else l.y = take(T * 1536 * 2);
+    for (int i = 0; i < 9; i++) l.rec[i] = take((size_t)LH * LD * LD * 2), l.conv[i] = take((size_t)LQKV * h.conv * 2);
+    l.end = at;
+    return l;
+}
+
+long f2_unpacked_bytes(const F2Head *h, int keep) { return sound(*h) ? (long)lay(*h, keep || h->kind == 0).end : -1; }
+
+struct Dev {  // an unpacked state
+    void *block = nullptr;
+    size_t bytes = 0;
+    bool pooled = false;  // scored in passing: its block is the pool's
+    F2State st;
+    std::vector<int> spans;
+};
+
+struct Ticket {  // a packed state on its way to the device
+    void *dev = nullptr;
+    size_t bytes = 0;
+    cudaEvent_t done = nullptr;  // its transfer's end; none when it was copied at once
+    F2Head head;
+    std::vector<int> spans;
+};
+
+struct Slab {
+    void *host = nullptr;
+    cudaEvent_t done = nullptr;  // the end of the last transfer out of it
+    bool sent = false;
+};
+
+long f2_held(F2 *) { return HELD.load(); }
+
+/* Staging is one thread's work at a time (sending), and the table of
+   tickets is locked only to put one in or take one out, so that a pass's
+   thread taking a state never waits for the copy of another */
+long f2_stage(F2 *c, const void *blob, long bytes) {
+    static std::mutex sending;
+    std::lock_guard<std::mutex> one_sender(sending);
+    auto stage = [&]() -> long {
+        F2Head h;
+        if (bytes < (long)sizeof h) return fail("a packed state shorter than its header", (int)bytes) - 1;
+        memcpy(&h, blob, sizeof h);
+        if (!sound(h) || (long)parts(h).end != bytes) return fail("a packed state whose header does not say its size", (int)bytes) - 1;
+        if (!c->sent) {
+            const char *n = getenv("SLABS"), *mb = getenv("SLAB_MB");
+            c->nslabs = n ? atoi(n) : 12, c->slab_bytes = (size_t)((mb ? atof(mb) : 64) * 1048576);
+            if (c->nslabs < 1) c->nslabs = 1;
+            // a stream the default one does not wait for (and that does not wait for it): a plain one would take turns with the passes
+            if (cudaStreamCreateWithFlags(&c->sent, cudaStreamNonBlocking) != cudaSuccess) return fail("no stream to send states on", 0) - 1;
+            c->slabs = new Slab[c->nslabs];
+        }
+        Ticket *t = new Ticket();
+        t->bytes = bytes, t->head = h;
+        const Parts p = parts(h);
+        t->spans.assign((const int *)((const char *)blob + p.span), (const int *)((const char *)blob + p.span) + (size_t)h.spans * 2);
+        if (!(t->dev = palloc(bytes))) {
+            delete t;
+            return fail("no room on the device for a packed state", (int)(bytes >> 20)) - 1;
+        }
+        bool ok;
+        if ((size_t)bytes <= c->slab_bytes) {
+            // through a pinned slab, taken in turn, each only once its last transfer is done
+            Slab &s = c->slabs[c->slab];
+            c->slab = (c->slab + 1) % c->nslabs;
+            if (!s.host) ok = cudaHostAlloc(&s.host, c->slab_bytes, cudaHostAllocDefault) == cudaSuccess && cudaEventCreate(&s.done) == cudaSuccess;
+            else ok = !s.sent || cudaEventSynchronize(s.done) == cudaSuccess;
+            if (ok) {
+                memcpy(s.host, blob, bytes);
+                ok = cudaEventCreate(&t->done) == cudaSuccess && cudaMemcpyAsync(t->dev, s.host, bytes, cudaMemcpyHostToDevice, c->sent) == cudaSuccess &&
+                     cudaEventRecord(t->done, c->sent) == cudaSuccess && cudaEventRecord(s.done, c->sent) == cudaSuccess;
+                s.sent = ok;
+            }
+        } else
+            ok = cudaMemcpy(t->dev, blob, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+        if (!ok) {
+            if (t->done) cudaEventDestroy(t->done);
+            pfree(t->dev, bytes);
+            delete t;
+            return fail("a packed state could not be sent", 0) - 1;
+        }
+        std::lock_guard<std::mutex> lock(c->staging);
+        for (size_t i = 0; i < c->tickets.size(); i++)
+            if (!c->tickets[i]) {
+                c->tickets[i] = t;
+                return (long)i + 1;
+            }
+        c->tickets.push_back(t);
+        return (long)c->tickets.size();
+    };
+    return stage();
+}
+
+/* a ticket taken out of the table, its transfer waited for; none for a number that is no ticket */
+static Ticket *arrived(F2 *c, long ticket) {
+    Ticket *t;
+    {
+        std::lock_guard<std::mutex> lock(c->staging);
+        if (ticket < 1 || ticket > (long)c->tickets.size() || !c->tickets[ticket - 1]) return nullptr;
+        t = c->tickets[ticket - 1];
+        c->tickets[ticket - 1] = nullptr;
+    }
+    if (t->done) {
+        if (cudaEventSynchronize(t->done) != cudaSuccess) fail("a staged state's transfer", 0);
+        cudaEventDestroy(t->done);
+    }
+    return t;
+}
+
+static bool unpack(F2 *c, const F2Packed *p);
+
+/* a staged state unpacked into a block of its own */
+static long take(F2 *c, long ticket, int keep) {
+    c->mark = now();
+    Ticket *t = arrived(c, ticket);
+    if (!t) return fail("no such staged state", (int)ticket) - 1;
+    lap(c, P_TWAIT);
+    const F2Head &h = t->head;
+    const bool int8 = keep || h.kind == 0;
+    const Parts p = parts(h);
+    const Lay l = lay(h, int8);
+    Dev *d = new Dev();
+    d->bytes = l.end, d->pooled = !keep, d->spans.swap(t->spans);
+    auto fill = [&]() -> bool {
+        if (h.kind == 1 && (!c->K || h.bytes != c->bytes || h.rank != c->rank)) return fail("a state coded by another book than the reader's", h.bytes);
+        if (d->pooled) d->block = palloc(l.end);
+        else CU(dalloc_hard(&d->block, l.end));
+        if (!d->block) return fail("no room on the device for a state", (int)(l.end >> 20));
+        lap(c, P_TROOM);
+        char *b = (char *)d->block;
+        const char *s = (const char *)t->dev;
+        if (h.kind == 1) {
+            if (!angles(c, h.tokens)) return false;
+            F2Packed u;
+            memset(&u, 0, sizeof u);
+            u.tokens = h.tokens, u.kept = int8, u.exact = h.exact;
+            u.joint = s + p.joint, u.at = (const int *)(s + p.at), u.rows = s + p.rows, u.rms = s + p.rms;
+            u.cos = (const float *)c->cosb.p, u.sin = (const float *)c->sinb.p;
+            u.conv_bytes = LQKV * h.conv * 2;
+            for (int i = 0; i < 9; i++) {
+                const int li = LINEAR[i];
+                u.left[li] = s + p.left[i], u.right[li] = s + p.right[i], u.rest[li] = s + p.rest[i], u.scale[li] = s + p.scale[i], u.conv[li] = s + p.conv[i];
+                u.rec[li] = b + l.rec[i], u.conv_out[li] = b + l.conv[i];
+            }
+            if (int8) u.k7 = b + l.k7, u.v7 = b + l.v7, u.k11 = b + l.k11, u.k7_scale = (float *)(b + l.k7s), u.v7_scale = (float *)(b + l.v7s), u.k11_scale = (float *)(b + l.k11s);
+            else u.y = b + l.y;
+            if (!unpack(c, &u)) return false;
+        } else {
+            // with no book a state is kept as the device holds it: its parts are copied
+            const size_t T = h.tokens;
+            const std::pair<size_t, std::pair<size_t, size_t>> same[] = {{l.k7, {p.k7, T * 512}}, {l.v7, {p.v7, T * 512}}, {l.k11, {p.k11, T * 512}},
+                                                                         {l.k7s, {p.k7s, 512 * 4}}, {l.v7s, {p.v7s, 2 * T * 4}}, {l.k11s, {p.k11s, 512 * 4}}};
+            for (auto &x : same) CU(cudaMemcpyAsync(b + x.first, s + x.second.first, x.second.second, cudaMemcpyDeviceToDevice));
+            for (int i = 0; i < 9; i++) {
+                CU(cudaMemcpyAsync(b + l.rec[i], s + p.rec[i], (size_t)LH * LD * LD * 2, cudaMemcpyDeviceToDevice));
+                CU(cudaMemcpyAsync(b + l.conv[i], s + p.conv[i], (size_t)LQKV * h.conv * 2, cudaMemcpyDeviceToDevice));
+            }
+            CU(cudaStreamSynchronize(0));
+        }
+        F2State &st = d->st;
+        memset(&st, 0, sizeof st);
+        st.len = h.tokens, st.kind = int8 ? 0 : 1, st.conv_len = h.conv, st.spans = h.spans, st.span = d->spans.data();
+        for (int gq = 0; gq < NG; gq++) {
+            if (int8) {
+                st.k7[gq] = b + l.k7 + gq * HD, st.v7[gq] = b + l.v7 + gq * HD, st.k11[gq] = b + l.k11 + gq * HD;
+                st.k7_scale[gq] = (float *)(b + l.k7s) + gq * HD, st.v7_scale[gq] = (float *)(b + l.v7s) + (size_t)gq * h.tokens, st.k11_scale[gq] = (float *)(b + l.k11s) + gq * HD;
+            } else
+                st.k7[gq] = b + l.y + gq * HD * 2, st.v7[gq] = b + l.y + (512 + gq * HD) * 2, st.k11[gq] = b + l.y + (1024 + gq * HD) * 2;
+        }
+        st.k7_step = st.v7_step = st.k11_step = int8 ? 512 : 1536 * 2;
+        for (int i = 0; i < 9; i++) st.rec[LINEAR[i]] = b + l.rec[i], st.conv[LINEAR[i]] = b + l.conv[i];
+        return true;
+    };
+    const bool ok = fill();
+    pfree(t->dev, t->bytes);
+    delete t;
+    if (!ok) {
+        if (d->pooled) pfree(d->block, l.end);
+        else dfree(d->block, d->block ? l.end : 0);
+        delete d;
+        return -1;
+    }
+    for (size_t i = 0; i < c->devs.size(); i++)
+        if (!c->devs[i]) {
+            c->devs[i] = d;
+            return (long)i + 1;
+        }
+    c->devs.push_back(d);
+    return (long)c->devs.size();
+}
+
+long f2_take(F2 *c, long ticket, int keep) {
+    std::lock_guard<std::mutex> lock(c->one);
+    return take(c, ticket, keep);
+}
+
+long f2_put(F2 *c, const void *blob, long bytes, int keep) {
+    long t = f2_stage(c, blob, bytes);
+    return t < 0 ? -1 : f2_take(c, t, keep);
+}
+
+void f2_unstage(F2 *c, long ticket) {
+    Ticket *t = arrived(c, ticket);  // its transfer writes there until it is done
+    if (!t) return;
+    pfree(t->dev, t->bytes);
+    delete t;
+}
+
+void f2_drop(F2 *c, long handle) {
+    std::lock_guard<std::mutex> lock(c->one);
+    if (handle < 1 || handle > (long)c->devs.size() || !c->devs[handle - 1]) return;
+    Dev *d = c->devs[handle - 1];
+    c->devs[handle - 1] = nullptr;
+    if (d->pooled) pfree(d->block, d->bytes);
+    else dfree(d->block, d->bytes);
+    delete d;
+}
+
+int f2_tail(F2 *c, int B, const long *states, int N, const int *ids, const int *who, const int *at, int same, int K, const int *lens,
             float *out, int most) {
     std::lock_guard<std::mutex> lock(c->one);
-    return tail(c, B, st, N, ids, who, at, same, K, lens, out, most) ? 0 : -1;
+    std::vector<F2State> st(B > 0 ? B : 0);
+    for (int b = 0; b < B; b++) {
+        if (states[b] < 1 || states[b] > (long)c->devs.size() || !c->devs[states[b] - 1]) return fail("no such state", (int)states[b]) - 1;
+        st[b] = c->devs[states[b] - 1]->st;
+    }
+    return tail(c, B, st.data(), N, ids, who, at, same, K, lens, out, most) ? 0 : -1;
+}
+
+// ---------------------------------------------------------------- packing a new state
+
+/* a token's row as the book codes it, a block a (token, tensor's head): the
+   keys with their rotary position turned back out, each values head over
+   its own root mean square (rms [2][T]). x [T][1536]; with xm, also the row
+   less the book's mean */
+__global__ void xrow_k(const bf16 *k7, const bf16 *v7, const bf16 *k11, const float *cs, const float *sn, const float *mean, float *x,
+                       float *xm, float *rms, int T) {
+    __shared__ float sh[8];
+    __shared__ float val[HD];
+    size_t t = blockIdx.x / 6;
+    int blk = blockIdx.x % 6, gq = blk & 1, c = threadIdx.x;
+    const bf16 *src = (blk < 2 ? k7 : blk < 4 ? v7 : k11) + (t * NG + gq) * HD;
+    float a = bf2f(src[c]), out;
+    if (blk == 2 || blk == 3) {
+        float r = sqrtf(bsum(a * a, sh) * (1.f / HD));
+        r = fmaxf(r, 1e-8f);
+        if (c == 0) rms[(size_t)gq * T + t] = r;
+        out = a / r;
+    } else {
+        val[c] = a;
+        __syncthreads();
+        out = a;
+        if (c < 64) {  // turned back: by minus the angle
+            const float co = cs[t * 64 + c], si = sn[t * 64 + c];
+            out = c < 32 ? __fadd_rn(__fmul_rn(a, co), __fmul_rn(val[c + 32], si)) : __fadd_rn(__fmul_rn(a, co), __fmul_rn(-val[c - 32], si));
+        }
+    }
+    size_t at = t * 1536 + blk * HD + c;
+    x[at] = out;
+    if (xm) xm[at] = out - mean[blk * HD + c];
+}
+
+/* a token's coefficients (C [T][K], the row less the mean times the book's
+   transform) to their bins and the squared error the bins leave, a block a
+   token: a bin is the coefficient over its step, floored, within its width */
+__global__ void bins_k(const float *C, const float *step, const float *halfw, int K, uint8_t *bins, float *err) {
+    __shared__ float sh[8];
+    size_t t = blockIdx.x;
+    float e = 0;
+    for (int k = threadIdx.x; k < K; k += blockDim.x) {
+        float cq = C[t * K + k] / step[k], q = fminf(fmaxf(floorf(cq), -halfw[k]), halfw[k] - 1), d = (q + 0.5f - cq) * step[k];
+        e += d * d;
+        bins[t * K + k] = (uint8_t)(q + halfw[k]);
+    }
+    e = bsum(e, sh);
+    if (threadIdx.x == 0) err[t] = e;
+}
+
+/* a token's bins packed end to end into its bytes, a thread a byte: the bits of every bin that reaches into it */
+__global__ void bits_k(const uint8_t *bins, const int *firstbit, const int *bytefirst, int K, int bytes, uint8_t *out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = i / bytes;
+    int b = i % bytes, lo = b * 8;
+    unsigned v = 0;
+    for (int k = bytefirst[b]; k < K && firstbit[k] < lo + 8; k++) {
+        int rel = firstbit[k] - lo;
+        unsigned q = bins[t * K + k];
+        v |= rel >= 0 ? q << rel : q >> -rel;
+    }
+    out[i] = (uint8_t)v;
+}
+
+/* rows picked out in half precision: the tokens kept exact. A thread a number */
+__global__ void pick_k(const float *x, const int *at, __half *out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = __float2half(x[(size_t)at[i / 1536] * 1536 + i % 1536]);
+}
+
+/* floats to halves, a thread a number */
+__global__ void half_k(const float *x, __half *out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __float2half(x[i]);
+}
+
+/* recurrent states as a state keeps them, bf16, widened again: what their coding starts from */
+__global__ void bfround_k(const float *x, float *out, bf16 *kept, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    bf16 b = f2bf(x[i]);
+    if (kept) kept[i] = b;
+    if (out) out[i] = bf2f(b);
+}
+
+/* what a low-rank product leaves of a matrix, four bits an entry over a
+   scale a row, a block a (matrix, row): the rest is the matrix less left
+   times right (halves, as they are kept), its scale the row's largest
+   magnitude over 7, an entry its rest over the scale, rounded, within -7..7,
+   plus 7; two entries a byte, the low half first */
+__global__ void rest_k(const float *a, const __half *left, const __half *right, int rank, uint8_t *rest, __half *scale) {
+    __shared__ float sh[4];
+    __shared__ float r[LD];
+    size_t m = blockIdx.x / LD;
+    int i = blockIdx.x % LD, j = threadIdx.x;
+    float x = 0;
+    for (int k = 0; k < rank; k++) x += __half2float(left[(m * LD + i) * rank + k]) * __half2float(right[(m * rank + k) * LD + j]);
+    x = a[(m * LD + i) * LD + j] - x;
+    float most = bmax(fabsf(x), sh);
+    __half sc = __float2half(fmaxf(most, 1e-12f) / 7.f);
+    float s = __half2float(sc);
+    r[j] = s > 0 ? fminf(fmaxf(rintf(x / s), -7.f), 7.f) + 7.f : 7.f;
+    __syncthreads();
+    if (j == 0) scale[m * LD + i] = sc;
+    if (!(j & 1)) rest[(m * LD + i) * (LD / 2) + j / 2] = (uint8_t)((int)r[j] | ((int)r[j + 1] << 4));
+}
+
+/* keys or values as int8 with no book (model.int8 as it was): a scale a
+   channel over the tokens (keys) or a token over the channels (values), the
+   largest magnitude times one 127th (as PyTorch divides by a constant, which
+   states kept by a reader on it have in them), and each number over its
+   scale, rounded */
+__global__ void plain_kscale_k(const bf16 *x, int T, float *scales) {
+    __shared__ float sh[8];
+    int col = blockIdx.x;  // [2][256]
+    float m = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) m = fmaxf(m, fabsf(bf2f(x[(size_t)t * 512 + col])));
+    m = bmax(m, sh);
+    if (threadIdx.x == 0) scales[col] = fmaxf(m, 1e-8f) * (1.f / 127.f);
+}
+
+__global__ void plain_vscale_k(const bf16 *x, int T, float *scales) {
+    __shared__ float sh[8];
+    size_t t = blockIdx.x >> 1;
+    int gq = blockIdx.x & 1;
+    float m = bmax(fabsf(bf2f(x[(t * NG + gq) * HD + threadIdx.x])), sh);
+    if (threadIdx.x == 0) scales[(size_t)gq * T + t] = fmaxf(m, 1e-8f) * (1.f / 127.f);
+}
+
+__global__ void plain_int8_k(const bf16 *x, int T, const float *scales, int by_token, int8_t *out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t t = i / 512;
+    int col = i % 512;
+    out[i] = (int8_t)rintf(bf2f(x[i]) / (by_token ? scales[(size_t)(col >> 8) * T + t] : scales[col]));
+}
+
+/* columns made orthonormal, in place: a [n][p] (rows of p), by Gram-Schmidt twice over */
+static void orth(float *a, int n, int p) {
+    for (int j = 0; j < p; j++) {
+        for (int pass = 0; pass < 2; pass++)
+            for (int k = 0; k < j; k++) {
+                double d = 0;
+                for (int i = 0; i < n; i++) d += (double)a[i * p + k] * a[i * p + j];
+                for (int i = 0; i < n; i++) a[i * p + j] -= (float)d * a[i * p + k];
+            }
+        double nn = 0;
+        for (int i = 0; i < n; i++) nn += (double)a[i * p + j] * a[i * p + j];
+        float inv = nn > 1e-30 ? (float)(1.0 / sqrt(nn)) : 0.f;
+        for (int i = 0; i < n; i++) a[i * p + j] *= inv;
+    }
+}
+
+/* a symmetric matrix's eigenvalues and eigenvectors by Jacobi rotations: m [p][p] is spent, v [p][p] takes the vectors as columns */
+static void eigen(double *m, double *v, int p) {
+    for (int i = 0; i < p * p; i++) v[i] = i % (p + 1) == 0;
+    for (int sweep = 0; sweep < 30; sweep++) {
+        double off = 0;
+        for (int i = 0; i < p; i++)
+            for (int j = i + 1; j < p; j++) off += m[i * p + j] * m[i * p + j];
+        if (off < 1e-28) break;
+        for (int a = 0; a < p; a++)
+            for (int b = a + 1; b < p; b++) {
+                if (fabs(m[a * p + b]) < 1e-300) continue;
+                double th = (m[b * p + b] - m[a * p + a]) / (2 * m[a * p + b]);
+                double t = (th >= 0 ? 1 : -1) / (fabs(th) + sqrt(th * th + 1)), cs = 1 / sqrt(t * t + 1), sn = t * cs;
+                for (int k = 0; k < p; k++) {
+                    double x = m[k * p + a], y = m[k * p + b];
+                    m[k * p + a] = cs * x - sn * y, m[k * p + b] = sn * x + cs * y;
+                }
+                for (int k = 0; k < p; k++) {
+                    double x = m[a * p + k], y = m[b * p + k];
+                    m[a * p + k] = cs * x - sn * y, m[b * p + k] = sn * x + cs * y;
+                }
+                for (int k = 0; k < p; k++) {
+                    double x = v[k * p + a], y = v[k * p + b];
+                    v[k * p + a] = cs * x - sn * y, v[k * p + b] = sn * x + cs * y;
+                }
+            }
+    }
+}
+
+/* The recurrent states of the nine layers (A: 144 matrices [128][128] on the
+   device, as a state keeps them) each as its first rank singular triples
+   and the rest in four bits (joint.low): the leading subspace by three
+   rounds of subspace iteration from the book's fixed directions, the
+   products on the device, the small orthogonalisations and one small
+   decomposition a matrix on the host. left [144][128][rank], right
+   [144][rank][128] (halves), rest [144][128][64], scale [144][128] to the
+   host */
+static bool lowrank(F2 *c, Held &m, const float *A, uint16_t *left, uint16_t *right, uint8_t *rest, uint16_t *scale) {
+    const int M = 9 * LH, P = c->rank + 8, R = c->rank;
+    const float one = 1, zero = 0;
+    float *Y = (float *)m.get((size_t)M * LD * P * 4), *Z = (float *)m.get((size_t)M * LD * P * 4), *Bd = (float *)m.get((size_t)M * P * LD * 4);
+    __half *dl = (__half *)m.get((size_t)M * LD * R * 2), *dr = (__half *)m.get((size_t)M * R * LD * 2), *ds = (__half *)m.get((size_t)M * LD * 2);
+    uint8_t *drest = (uint8_t *)m.get((size_t)M * LD * (LD / 2));
+    if (!Y || !Z || !Bd || !dl || !dr || !ds || !drest) return fail("out of memory for a state's packing", 0);
+    std::vector<float> y((size_t)M * LD * P), b((size_t)M * P * LD);
+    // a matrix is rows here and columns to cuBLAS, so each is its own transpose there: for A times a [128][P] block,
+    // the block (as [P][128] there) times A as it lies; for A transposed times it, times A transposed there
+    BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, P, LD, LD, &one, c->probe, P, 0, A, LD, LD * LD, &zero, Y, P, LD * P, M));
+    for (int round = 0; round < 4; round++) {
+        CU(cudaMemcpy(y.data(), Y, y.size() * 4, cudaMemcpyDeviceToHost));
+        for (int i = 0; i < M; i++) orth(&y[(size_t)i * LD * P], LD, P);
+        CU(cudaMemcpy(Y, y.data(), y.size() * 4, cudaMemcpyHostToDevice));
+        if (round == 3) break;
+        BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_T, P, LD, LD, &one, Y, P, LD * P, A, LD, LD * LD, &zero, Z, P, LD * P, M));  // A^T Q
+        BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, P, LD, LD, &one, Z, P, LD * P, A, LD, LD * LD, &zero, Y, P, LD * P, M));  // A (A^T Q)
+    }
+    // B = Q^T A, [P][128] a matrix
+    BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_T, LD, P, LD, &one, A, LD, LD * LD, Y, P, LD * P, &zero, Bd, LD, P * LD, M));
+    CU(cudaMemcpy(b.data(), Bd, b.size() * 4, cudaMemcpyDeviceToHost));
+    std::vector<double> g(P * P), v(P * P);
+    std::vector<int> ord(P);
+    for (int i = 0; i < M; i++) {
+        const float *q = &y[(size_t)i * LD * P], *bb = &b[(size_t)i * P * LD];
+        for (int r = 0; r < P; r++)
+            for (int s = r; s < P; s++) {
+                double d = 0;
+                for (int j = 0; j < LD; j++) d += (double)bb[r * LD + j] * bb[s * LD + j];
+                g[r * P + s] = g[s * P + r] = d;
+            }
+        eigen(g.data(), v.data(), P);
+        for (int r = 0; r < P; r++) ord[r] = r;
+        std::sort(ord.begin(), ord.end(), [&](int a, int bq) { return g[a * P + a] > g[bq * P + bq]; });
+        for (int r = 0; r < R; r++) {
+            const int e = ord[r];
+            const double sv = sqrt(g[e * P + e] > 0 ? g[e * P + e] : 0);
+            for (int row = 0; row < LD; row++) {  // left: Q times the vector, times the singular value
+                double d = 0;
+                for (int k = 0; k < P; k++) d += (double)q[row * P + k] * v[k * P + e];
+                left[((size_t)i * LD + row) * R + r] = tohalf((float)(d * sv));
+            }
+            for (int j = 0; j < LD; j++) {  // right: the vector's row of B over the singular value
+                double d = 0;
+                for (int k = 0; k < P; k++) d += v[k * P + e] * bb[k * LD + j];
+                right[((size_t)i * R + r) * LD + j] = tohalf(sv > 1e-30 ? (float)(d / sv) : 0.f);
+            }
+        }
+    }
+    CU(cudaMemcpy(dl, left, (size_t)M * LD * R * 2, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(dr, right, (size_t)M * R * LD * 2, cudaMemcpyHostToDevice));
+    rest_k<<<M * LD, LD>>>(A, dl, dr, R, drest, ds);
+    CU(cudaMemcpy(rest, drest, (size_t)M * LD * (LD / 2), cudaMemcpyDeviceToHost));
+    CU(cudaMemcpy(scale, ds, (size_t)M * LD * 2, cudaMemcpyDeviceToHost));
+    return true;
+}
+
+static bool prefill(F2 *c, const F2Fill *f);
+
+static long read(F2 *c, int T, const int *ids, int spans, const int *span, const char *tail, int tail_bytes, int null, void *blob, long room) {
+    Held m;
+    bf16 *k7 = (bf16 *)m.get((size_t)T * 512 * 2), *v7 = (bf16 *)m.get((size_t)T * 512 * 2), *k11 = (bf16 *)m.get((size_t)T * 512 * 2),
+         *conv = (bf16 *)m.get((size_t)9 * LQKV * KS * 2);
+    float *rec = (float *)m.get((size_t)9 * LH * LD * LD * 4);
+    if (!k7 || !v7 || !k11 || !conv || !rec) return fail("out of memory for a prefill", T) - 1;
+    F2Fill f;
+    memset(&f, 0, sizeof f);
+    f.tokens = T, f.ids = ids, f.k7 = k7, f.v7 = v7, f.k11 = k11;
+    for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * KS, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
+    if (!prefill(c, &f)) return -1;
+    c->mark = now();
+    F2Head h;
+    memset(&h, 0, sizeof h);
+    memcpy(h.magic, "F2STATE1", 8);
+    h.kind = c->K ? 1 : 0, h.tokens = T, h.spans = spans, h.bytes = c->K ? c->bytes : 0, h.rank = c->K ? c->rank : 0, h.conv = KS, h.tail = tail_bytes, h.null = null;
+    char *out = (char *)blob;
+    auto pack = [&]() -> bool {
+        const size_t n = (size_t)T * 1536, M = 9 * LH;
+        if (h.kind == 1) {
+            const int K = c->K;
+            if (!angles(c, T)) return false;
+            float *x = (float *)m.get(n * 4), *xm = (float *)m.get(n * 4), *rms = (float *)m.get((size_t)2 * T * 4), *C = (float *)m.get((size_t)T * K * 4),
+                  *err = (float *)m.get((size_t)T * 4), *A = (float *)m.get(M * LD * LD * 4);
+            uint8_t *bins = (uint8_t *)m.get((size_t)T * K), *pk = (uint8_t *)m.get((size_t)T * c->bytes);
+            __half *rmsh = (__half *)m.get((size_t)2 * T * 2);
+            if (!x || !xm || !rms || !C || !err || !A || !bins || !pk || !rmsh) return fail("out of memory for a state's packing", T);
+            const float one = 1, zero = 0;
+            xrow_k<<<(size_t)T * 6, HD>>>(k7, v7, k11, (const float *)c->cosb.p, (const float *)c->sinb.p, c->mean32, x, xm, rms, T);
+            // coefficients [T][K] = rows less the mean [T][1536] times the transform [K][1536] transposed
+            BL(cublasSgemm(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, K, T, 1536, &one, c->fwd, 1536, xm, 1536, &zero, C, K));
+            bins_k<<<T, 256>>>(C, c->step, c->halfw, K, bins, err);
+            bits_k<<<((size_t)T * c->bytes + 255) / 256, 256>>>(bins, c->firstbit, c->bytefirst, K, c->bytes, pk, (size_t)T * c->bytes);
+            half_k<<<((size_t)2 * T + 255) / 256, 256>>>(rms, rmsh, (size_t)2 * T);
+            bfround_k<<<(M * LD * LD + 255) / 256, 256>>>(rec, A, nullptr, M * LD * LD);
+            // the tokens kept exact: those whose coding error is far over the median token's
+            std::vector<float> e(T);
+            CU(cudaMemcpy(e.data(), err, (size_t)T * 4, cudaMemcpyDeviceToHost));
+            std::vector<float> sorted(e);
+            std::nth_element(sorted.begin(), sorted.begin() + (T - 1) / 2, sorted.end());
+            const float cutoff = c->exact * sorted[(T - 1) / 2];
+            std::vector<int> at;
+            for (int t = 0; t < T; t++)
+                if (e[t] > cutoff) at.push_back(t);
+            h.exact = (int)at.size();
+            const Parts p = parts(h);
+            if ((long)p.end > room) return fail("no room for the packed state", (int)(p.end >> 20));
+            memset(out, 0, p.end);
+            if (h.exact) {
+                int *dat = (int *)m.get(at.size() * 4);
+                __half *rows = (__half *)m.get(at.size() * 1536 * 2);
+                if (!dat || !rows) return fail("out of memory for a state's packing", h.exact);
+                CU(cudaMemcpy(dat, at.data(), at.size() * 4, cudaMemcpyHostToDevice));
+                pick_k<<<(at.size() * 1536 + 255) / 256, 256>>>(x, dat, rows, at.size() * 1536);
+                CU(cudaMemcpy(out + p.rows, rows, at.size() * 1536 * 2, cudaMemcpyDeviceToHost));
+                memcpy(out + p.at, at.data(), at.size() * 4);
+            }
+            CU(cudaMemcpy(out + p.joint, pk, (size_t)T * c->bytes, cudaMemcpyDeviceToHost));
+            CU(cudaMemcpy(out + p.rms, rmsh, (size_t)2 * T * 2, cudaMemcpyDeviceToHost));
+            std::vector<uint16_t> left(M * LD * c->rank), right(M * c->rank * LD), scale(M * LD);
+            std::vector<uint8_t> rest(M * LD * (LD / 2));
+            if (!lowrank(c, m, A, left.data(), right.data(), rest.data(), scale.data())) return false;
+            for (int i = 0; i < 9; i++) {
+                const size_t a = (size_t)i * LH;
+                memcpy(out + p.left[i], &left[a * LD * c->rank], (size_t)LH * LD * c->rank * 2);
+                memcpy(out + p.right[i], &right[a * c->rank * LD], (size_t)LH * c->rank * LD * 2);
+                memcpy(out + p.rest[i], &rest[a * LD * (LD / 2)], (size_t)LH * LD * (LD / 2));
+                memcpy(out + p.scale[i], &scale[a * LD], (size_t)LH * LD * 2);
+                CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * KS, (size_t)LQKV * KS * 2, cudaMemcpyDeviceToHost));
+            }
+            memcpy(out + p.ids, ids, (size_t)T * 4);
+            memcpy(out + p.span, span, (size_t)spans * 8);
+            memcpy(out + p.tail, tail, tail_bytes);
+            return true;
+        }
+        const Parts p = parts(h);
+        if ((long)p.end > room) return fail("no room for the packed state", (int)(p.end >> 20));
+        memset(out, 0, p.end);
+        int8_t *q = (int8_t *)m.get((size_t)T * 512);
+        float *ks = (float *)m.get(512 * 4), *vs = (float *)m.get((size_t)2 * T * 4);
+        bf16 *rb = (bf16 *)m.get(M * LD * LD * 2);
+        if (!q || !ks || !vs || !rb) return fail("out of memory for a state's packing", T);
+        const std::pair<const bf16 *, std::pair<size_t, size_t>> three[] = {{k7, {p.k7, p.k7s}}, {v7, {p.v7, p.v7s}}, {k11, {p.k11, p.k11s}}};
+        for (int i = 0; i < 3; i++) {
+            const bool values = i == 1;
+            if (values) plain_vscale_k<<<(size_t)T * 2, HD>>>(three[i].first, T, vs);
+            else plain_kscale_k<<<512, 256>>>(three[i].first, T, ks);
+            plain_int8_k<<<((size_t)T * 512 + 255) / 256, 256>>>(three[i].first, T, values ? vs : ks, values, q, (size_t)T * 512);
+            CU(cudaMemcpy(out + three[i].second.first, q, (size_t)T * 512, cudaMemcpyDeviceToHost));
+            CU(cudaMemcpy(out + three[i].second.second, values ? vs : ks, values ? (size_t)2 * T * 4 : 512 * 4, cudaMemcpyDeviceToHost));
+        }
+        bfround_k<<<(M * LD * LD + 255) / 256, 256>>>(rec, nullptr, rb, M * LD * LD);
+        for (int i = 0; i < 9; i++) {
+            CU(cudaMemcpy(out + p.rec[i], rb + (size_t)i * LH * LD * LD, (size_t)LH * LD * LD * 2, cudaMemcpyDeviceToHost));
+            CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * KS, (size_t)LQKV * KS * 2, cudaMemcpyDeviceToHost));
+        }
+        memcpy(out + p.ids, ids, (size_t)T * 4);
+        memcpy(out + p.span, span, (size_t)spans * 8);
+        memcpy(out + p.tail, tail, tail_bytes);
+        return true;
+    };
+    if (!pack()) return -1;
+    memcpy(out, &h, sizeof h);
+    CU(cudaGetLastError());
+    lap(c, P_FPACK);
+    return (long)parts(h).end;
+}
+
+long f2_read(F2 *c, int T, const int *ids, int spans, const int *span, const char *tail, int tail_bytes, int null, void *blob, long room) {
+    std::lock_guard<std::mutex> lock(c->one);
+    return read(c, T, ids, spans, span, tail, tail_bytes, null, blob, room);
+}
+
+int f2_raw(F2 *c, int T, const int *ids, void *k7, void *v7, void *k11) {
+    std::lock_guard<std::mutex> lock(c->one);
+    auto raw = [&]() -> bool {
+        Held m;
+        bf16 *d7 = (bf16 *)m.get((size_t)T * 512 * 2), *dv = (bf16 *)m.get((size_t)T * 512 * 2), *d11 = (bf16 *)m.get((size_t)T * 512 * 2),
+             *conv = (bf16 *)m.get((size_t)9 * LQKV * KS * 2);
+        float *rec = (float *)m.get((size_t)9 * LH * LD * LD * 4);
+        if (!d7 || !dv || !d11 || !conv || !rec) return fail("out of memory for a prefill", T);
+        F2Fill f;
+        memset(&f, 0, sizeof f);
+        f.tokens = T, f.ids = ids, f.k7 = d7, f.v7 = dv, f.k11 = d11;
+        for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * KS, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
+        if (!prefill(c, &f)) return false;
+        CU(cudaMemcpy(k7, d7, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(v7, dv, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
+        CU(cudaMemcpy(k11, d11, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
+        return true;
+    };
+    return raw() ? 0 : -1;
+}
+
+// ---------------------------------------------------------------- a run's paragraphs put in order
+
+void f2_fuse(int n, const double *bm, const float *att, const int *of, double weight, double neighbour, double shard, int *order) {
+    std::vector<double> fused(n), near(n);
+    auto z = [&](auto get, double scale) {  // over the run's mean and deviation
+        double mean = 0, dev = 0;
+        for (int i = 0; i < n; i++) mean += get(i);
+        mean /= n > 1 ? n : 1;
+        for (int i = 0; i < n; i++) dev += (get(i) - mean) * (get(i) - mean);
+        dev = n > 1 ? sqrt(dev / (n - 1)) : 0;
+        for (int i = 0; i < n; i++) fused[i] += scale * (get(i) - mean) / (dev + 1e-9);
+    };
+    z([&](int i) { return bm[i]; }, 1.0);
+    z([&](int i) { return (double)att[i]; }, weight);
+    for (int i = 0; i < n; i++) {  // the better of its two neighbours in the same shard
+        double best = -INFINITY;
+        if (i > 0 && of[i - 1] == of[i]) best = fused[i - 1];
+        if (i + 1 < n && of[i + 1] == of[i] && fused[i + 1] > best) best = fused[i + 1];
+        near[i] = best > -INFINITY ? fused[i] + neighbour * best : fused[i];
+    }
+    for (int i = 0; i < n;) {  // the best of its shard
+        int j = i;
+        double best = -INFINITY;
+        for (; j < n && of[j] == of[i]; j++) best = near[j] > best ? near[j] : best;
+        for (; i < j; i++) fused[i] = near[i] + shard * best;
+    }
+    for (int i = 0; i < n; i++) order[i] = i;
+    std::stable_sort(order, order + n, [&](int a, int b) { return fused[a] > fused[b]; });
 }
