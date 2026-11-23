@@ -245,9 +245,31 @@ def prefill(shard, raw=False):
 
 
 @functools.lru_cache(maxsize=4096)
+def opening(question):
+    """the tokens of a question's tail a pass runs (question_tail): the
+    template's up to the question, then the question's"""
+    return tuple(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+
+
 def tokens(question):
-    """how many tokens of a question's tail a pass runs (question_tail)"""
-    return len(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+    """how many tokens of a question's tail a pass runs"""
+    return len(opening(question))
+
+
+def shared(tails):
+    """how many tokens several tails (their tokens) all open with, each
+    left at least one of its own; none for one tail"""
+    same = 0
+    while len(tails) > 1 and same < min(map(len, tails)) - 1 and len({ids[same] for ids in tails}) == 1:
+        same += 1
+    return same
+
+
+def together(questions):
+    """how many tokens a pass runs for these questions: what they all open
+    with once, then each one's own (tail)"""
+    tails = [opening(q) for q in questions]
+    return sum(map(len, tails)) - (len(tails) - 1) * shared(tails)
 
 
 @functools.lru_cache(maxsize=64)
@@ -259,67 +281,68 @@ def question_tail(tail, question):
     cut after them: the tokens that follow cannot change those rows"""
     t_ids = tok(tail.replace("QQQ", question) + ANSWER, add_special_tokens=False)["input_ids"]
     nq = tokens(question)
+    assert tuple(t_ids[:nq]) == opening(question), "a tail opens with the template and the question"
     return M.model.embed_tokens(torch.tensor([t_ids[:nq]])), nq
 
 
-def delta(query, key, value, decay, beta, state, B):
-    """the gated delta rule's outputs for a tail of T tokens that starts
-    from a shard's recurrent state, as the stock chunked rule gives them
-    with one chunk of T (it pads a tail to 64 tokens, and works out a final
-    state no tail pass keeps). Rows are (shard, question) pairs, a shard's
-    questions together: query, key, value [rows, heads, T, 128], decay and
-    beta [rows, heads, T], state [B, heads, 128, 128], one for each shard;
-    the questions of a shard are the rows of one product with its state"""
-    R, H, T, D = key.shape
+def delta(query, key, value, decay, beta, state, seen):
+    """the gated delta rule's outputs for the questions' tokens, each
+    question starting from its shard's recurrent state: what the stock
+    chunked rule gives a question's tail run alone as one chunk (it pads a
+    tail to 64 tokens, and works out a final state no tail pass keeps).
+    query, key, value [shards, heads, tokens, 128], decay and beta [shards,
+    heads, tokens], state [shards, heads, 128, 128]; seen [tokens, tokens]
+    says, by a token, which tokens come before it or are it: its own
+    question's and the opening all share. The rule's one triangular system
+    is over all the tokens at once, a token's row holding only the tokens
+    it sees, so each question is solved as if alone and the opening once"""
+    N, D = key.shape[-2:]
+    saw = seen.float()
     query = query * torch.rsqrt((query * query).sum(-1, keepdim=True) + 1e-6) * D ** -0.5
     key = key * torch.rsqrt((key * key).sum(-1, keepdim=True) + 1e-6)
-    cum = decay.cumsum(-1)
+    cum = decay @ saw.T  # each token's decay summed over what it sees, itself included
     grown = cum.exp()[..., None]
-    pair = (cum[..., :, None] - cum[..., None, :]).masked_fill(
-        torch.ones(T, T, dtype=torch.bool, device=key.device).triu(1), float("-inf")).exp()
+    pair = (cum[..., :, None] - cum[..., None, :]).masked_fill(~seen, float("-inf")).exp()
     kt = key.transpose(-1, -2)
     k_beta = key * beta[..., None]
-    # what the old state says to the tail's keys and to its queries: [rows, heads, 2T, 128] by [B, heads, 128, 128]
-    reads = torch.cat([k_beta * grown, query * grown], -2)
-    reads = reads.view(B, R // B, H, 2 * T, D).transpose(1, 2).reshape(B, H, -1, D) @ state
-    reads = reads.view(B, H, R // B, 2 * T, -1).transpose(1, 2).reshape(R, H, 2 * T, -1)
+    # what the old state says to the tokens' keys and to their queries
+    reads = torch.cat([k_beta * grown, query * grown], -2) @ state
     # each token writes what the state and the tokens before it do not already say of its key
-    new = torch.linalg.solve_triangular((k_beta @ kt) * pair, value * beta[..., None] - reads[..., :T, :],
+    new = torch.linalg.solve_triangular((k_beta @ kt) * pair, value * beta[..., None] - reads[..., :N, :],
                                         upper=False, unitriangular=True)
-    return reads[..., T:, :] + ((query @ kt) * pair) @ new
+    return reads[..., N:, :] + ((query @ kt) * pair) @ new
 
 
-def linear(net, x, rows, K, T, flat, slot):
+def linear(net, x, rows, seen, at, back):
     """a linear-attention layer's output for the questions' tokens x
     [shards, tokens, hidden], from the convolution and recurrent states the
     shards' caches hold in rows (one cache layer a shard):
-    Qwen3_5GatedDeltaNet.forward with the cache read and not written. The
-    convolution and the delta rule run over a question's tokens in order, so
-    for them each question is laid in a row of its own, T long (slot: the
-    token at each place of the rows, or one past the last for none; flat:
-    each token's place in them); the products before and after are over the
-    tokens there are"""
+    Qwen3_5GatedDeltaNet.forward with the cache read and not written, over
+    tokens that are several questions end to end. A token's convolution
+    takes the kernel's width of inputs up to its own in its own question
+    (and the opening), the last tokens of the shard before them: for most
+    tokens those are the ones before it in the row, and for the tokens at
+    (the first of each question after the first) back [those tokens,
+    kernel] says which they are"""
     B, N, _ = x.shape
-    R = B * K
-    padded = lambda t: torch.cat([t, t.new_zeros((B, 1, t.shape[-1]))], 1)[:, slot].reshape(R, T, -1)
     conv = torch.cat([next(v for v in r.conv_states.values() if torch.is_tensor(v)) for r in rows])
     state = torch.cat([next(v for v in r.recurrent_states.values() if torch.is_tensor(v)) for r in rows]).float()
-    mixed = padded(net.in_proj_qkv(x)).transpose(1, 2)
     w = net.conv1d.weight
-    # the last tokens of the shard, then the question: each output sees the kernel's width of inputs up to its own
-    before = conv[..., 1 - w.shape[-1]:].to(w.dtype)[:, None].expand(-1, K, -1, -1).reshape(R, w.shape[0], -1)
-    mixed = torch.nn.functional.silu(torch.nn.functional.conv1d(
-        torch.cat([before, mixed.to(w.dtype)], -1), w, net.conv1d.bias, groups=w.shape[0])).to(x.dtype).transpose(1, 2)
+    full = torch.cat([conv[..., 1 - w.shape[-1]:].to(w.dtype), net.in_proj_qkv(x).transpose(1, 2).to(w.dtype)], -1)
+    mixed = torch.nn.functional.conv1d(full, w, net.conv1d.bias, groups=w.shape[0])
+    if len(at):  # a later question's first tokens: the tokens before them in the row are another question's
+        again = (full[:, :, back] * w).sum(-1)
+        mixed[:, :, at] = again if net.conv1d.bias is None else again + net.conv1d.bias[:, None]
+    mixed = torch.nn.functional.silu(mixed).to(x.dtype).transpose(1, 2)
     q, k, v = torch.split(mixed, [net.key_dim, net.key_dim, net.value_dim], dim=-1)
-    heads = lambda t, d: t.reshape(R, T, -1, d).transpose(1, 2).float()
+    heads = lambda t, d: t.reshape(B, N, -1, d).transpose(1, 2).float()
     q, k, v = heads(q, net.head_k_dim), heads(k, net.head_k_dim), heads(v, net.head_v_dim)
     rep = net.num_v_heads // net.num_k_heads
     if rep > 1:
         q, k = q.repeat_interleave(rep, dim=1), k.repeat_interleave(rep, dim=1)
-    beta = padded(net.in_proj_b(x).sigmoid()).transpose(1, 2).float()
-    decay = padded(-net.A_log.float().exp() * torch.nn.functional.softplus(net.in_proj_a(x).float() + net.dt_bias)).transpose(1, 2)
-    out = delta(q, k, v, decay, beta, state, B).transpose(1, 2)  # [rows, T, heads, 128]
-    out = out.reshape(B, K * T, -1)[:, flat].to(x.dtype)
+    beta = net.in_proj_b(x).sigmoid().transpose(1, 2).float()
+    decay = (-net.A_log.float().exp() * torch.nn.functional.softplus(net.in_proj_a(x).float() + net.dt_bias)).transpose(1, 2)
+    out = delta(q, k, v, decay, beta, state, seen).transpose(1, 2).to(x.dtype)  # [shards, tokens, heads, 128]
     z = net.in_proj_z(x)
     return net.out_proj(net.norm(out.reshape(-1, net.head_v_dim), z.reshape(-1, net.head_v_dim)).reshape(B, N, -1))
 
@@ -339,12 +362,13 @@ def held(rows, name, top, mine):
     return buf
 
 
-def weights(q, keys, top, lens, who, at, scaling):
+def weights(q, keys, top, lens, seen, scaling):
     """the attention weights [shards, 2, heads x tokens, top + tokens], in
     fp32, of the questions' queries q [shards, 2, heads of a group, tokens,
     256] over keys (held): a token sees its shard up to the shard's length
-    (lens) and its own question's tokens up to itself (who: each token's
-    question, at: its place in it). A query head reads the keys of its
+    (lens) and, up to itself, its own question's tokens and the opening all
+    the questions share (seen [tokens, tokens]: by a token, the tokens it
+    sees). A query head reads the keys of its
     group, and a shard's questions and their heads are the rows of one
     product with the shard's keys, which are held once"""
     B, G, each, N, d = q.shape
@@ -352,7 +376,7 @@ def weights(q, keys, top, lens, who, at, scaling):
     for b, n in enumerate(lens.tolist() if top else ()):
         if n < top:
             w[b, :, :, n:top] = float("-inf")
-    w[..., top:].masked_fill_(((who[:, None] != who[None]) | (at[None] > at[:, None])).repeat(each, 1), float("-inf"))
+    w[..., top:].masked_fill_(~seen.repeat(each, 1), float("-inf"))
     return torch.softmax(w, -1, dtype=torch.float32)
 
 
@@ -366,19 +390,32 @@ def tail(states, questions, seen=None):
     A shard's keys and values are held once for all its questions and its
     recurrent states are read, never written, so nothing of a state is
     copied for a question, and a short question beside a long one costs its
-    own tokens, not the long one's. seen, a dict, is given the queries of
+    own tokens, not the long one's. The tokens all the questions open with
+    (the template's, and the words they share after it) are in the row once:
+    a token sees only what comes before it, so what they come to is the
+    same for every question. seen, a dict, is given the queries of
     layers 7 and 11 as attention used them ("q7", "q11": [shards, 8, tokens,
     256]), which fit.py weighs a book by"""
     B, K = len(states), len(questions)
     tails = [question_tail(states[0][3], q) for q in questions]
     ns = [nq for _, nq in tails]
-    N, T = sum(ns), max(ns)
-    who = torch.tensor([k for k, n in enumerate(ns) for _ in range(n)], device=DEV)
-    at = torch.tensor([t for n in ns for t in range(n)], device=DEV)
-    flat = who * T + at
-    slot = torch.full((K * T,), N, device=DEV)
-    slot[flat] = torch.arange(N, device=DEV)
-    h = torch.cat([e[0] for e, _ in tails])[None].expand(B, -1, -1)
+    same = shared([opening(q) for q in questions])  # the tokens every question opens with are run once: what they come to depends on the shard alone
+    # each token's question (-1: the opening all share) and its place in the question's tail
+    whose = [-1] * same + [k for k, n in enumerate(ns) for _ in range(same, n)]
+    place = list(range(same)) + [t for n in ns for t in range(same, n)]
+    who, at = torch.tensor(whose, device=DEV), torch.tensor(place, device=DEV)
+    N = len(whose)
+    sees = ((who[None] == who[:, None]) | (who[None] < 0)) & (at[None] <= at[:, None])  # by the row's token, of the column's
+    # the inputs of each token's convolution: the kernel's width of places up to its own in its question's tail,
+    # as places in [the shard's last tokens, the row]: a place before the tail is one of the shard's
+    width = next(l.linear_attn.conv1d.weight.shape[-1] for l in M.model.layers if hasattr(l, "linear_attn"))
+    first = {k: p for p, k in reversed(list(enumerate(whose)))}  # each question's first own token in the row
+    row = lambda k, t: t if t < same else first[k] + t - same
+    back = [[width - 1 + row(k, t - d) if t >= d else width - 1 + t - d for d in range(width - 1, -1, -1)]
+            for k, t in zip(whose, place)]
+    apart = [p for p, b in enumerate(back) if b != list(range(p, p + width))]  # the tokens whose inputs are not the row's before them
+    back, apart = torch.tensor([back[p] for p in apart], dtype=torch.long, device=DEV).view(-1, width), torch.tensor(apart, dtype=torch.long, device=DEV)
+    h = torch.cat([tails[0][0][0, :same]] + [e[0, same:] for e, _ in tails])[None].expand(B, -1, -1)
     caches = [s[1] for s in states]
     lens = torch.tensor([len(s[0]) for s in states], device=DEV)
     top = max(c.layers[SCALED].keys.shape[-2] for c in caches)
@@ -387,7 +424,7 @@ def tail(states, questions, seen=None):
         x = layer.input_layernorm(h)
         rows = [c.layers[li] for c in caches]
         if hasattr(layer, "linear_attn"):
-            y = linear(layer.linear_attn, x, rows, K, T, flat, slot)
+            y = linear(layer.linear_attn, x, rows, sees, apart, back)
         else:
             # Qwen3_5Attention.forward, the shard's keys and values read from its state
             attn = layer.self_attn
@@ -402,7 +439,7 @@ def tail(states, questions, seen=None):
             if li == SCALED:
                 break
             far = 0 if li == ALONE else top  # layer 3's tokens see their question alone
-            w = weights(q, held(rows, "keys", far, k), far, lens, who, at, attn.scaling).to(x.dtype)
+            w = weights(q, held(rows, "keys", far, k), far, lens, sees, attn.scaling).to(x.dtype)
             y = w @ held(rows, "values", far, attn.v_proj(x).view(B, N, G, -1).transpose(1, 2))
             y = y.view(B, G, -1, N, attn.head_dim).permute(0, 3, 1, 2, 4).reshape(B, N, -1)  # [shards, tokens, heads x 256]
             y = attn.o_proj(y * torch.sigmoid(gate.reshape(B, N, -1)))
@@ -412,11 +449,11 @@ def tail(states, questions, seen=None):
     each = q.shape[2]
     assert [hd // each for hd in HEADS] == list(range(G)), "one read head in each key-value group"
     q = torch.stack([q[:, g, hd % each] for g, hd in enumerate(HEADS)], 1)[:, :, None]
-    w = weights(q, held(rows, "keys", top, k), top, lens, who, at, layer.self_attn.scaling)[..., :top]  # [shards, groups, tokens, top]
+    w = weights(q, held(rows, "keys", top, k), top, lens, sees, layer.self_attn.scaling)[..., :top]  # [shards, groups, tokens, top]
     # the mean over each question's own tokens but the first two, the heads summed
     share = torch.zeros((K, N), device=DEV)
     for kk, n in enumerate(ns):
-        share[kk, (who == kk) & (at >= 2)] = 1.0 / max(n - 2, 1)
+        share[kk, ((who == kk) | (who < 0)) & (at >= 2)] = 1.0 / max(n - 2, 1)
     mass = share @ w.sum(1)  # [shards, questions, top]
     cum = torch.nn.functional.pad(mass.cumsum(-1), (1, 0))
     most = max(len(s[2]) for s in states)
