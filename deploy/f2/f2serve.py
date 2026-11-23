@@ -142,10 +142,17 @@ host allocator keeps every freed pinned block, so a pinned RAM tier grows
 far past RAM_GB. At most SAVES new states wait for the disk writer; a prefill
 past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
 
-Setup: a Python 3.12 venv with requirements.txt, and the weights:
+Setup: this directory is a uv project (pyproject.toml, uv.lock). With the
+CUDA 12 toolkit's bin first on PATH,
+  UV_PROJECT_ENVIRONMENT=<venv> uv sync --no-editable
+makes the venv and builds into it f2pass, the tail pass in C++ and CUDA
+(native/, meson.build); run it again after a change under native/. Without
+the toolkit, `uv sync --no-install-project` makes the venv alone and the
+passes are PyTorch's (model.py says how the two differ; F2_NATIVE=0 asks for
+PyTorch's). The weights:
   huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
-Run: EPISTEME_HOME=... python f2serve.py, then point config.json's pool at
-http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
+Run: EPISTEME_HOME=... <venv>/bin/python f2serve.py, then point config.json's
+pool at http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 Once the store has shards, EPISTEME_HOME=... python fit.py (reader stopped,
 a few minutes) makes the book; start the reader again after it.
 No state is removed here: EPISTEME_HOME=... python prune.py removes those
@@ -162,7 +169,7 @@ the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt), F2_NATIVE (1).
 """
 import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
@@ -690,10 +697,10 @@ CODE = hashlib.sha1(b"".join(open(os.path.join(HERE, f), "rb").read() for f in (
 
 def made_by():
     """what a kept score depends on besides the shard's text and the
-    question: the model, the nulls, and this reader's code as it was read
-    when the process began (a change to how a score is made must not find
-    the scores the old code made)"""
-    return [model.VERSION, WORDNULLS, NULL, CODE]
+    question: the model, the nulls, this reader's code as it was read when
+    the process began, and what runs its tail passes (a change to how a
+    score is made must not find the scores the old code made)"""
+    return [model.VERSION, WORDNULLS, NULL, CODE, model.by()]
 
 
 def keep(path):
@@ -1100,7 +1107,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(200, {"gpu_states": len(STATES.gpu), "gpu_gb": STATES.gpu_b / 1e9,
                             "ram_states": len(STATES.ram), "ram_gb": STATES.ram_b / 1e9,
                             "gpu_held_gb": torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
-                            "loads": dict(STATES.n), **rss()})
+                            "loads": dict(STATES.n), "passes": model.by(), **rss()})
         else:
             self.send(404, {"error": "not found"})
 
@@ -1163,5 +1170,5 @@ if __name__ == "__main__":
         threading.Thread(target=rewarming, args=(SCORES_PATH,), daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores" % (PORT, RAM_BYTES / 1e9, had), flush=True)
+    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores, tail passes by %s" % (PORT, RAM_BYTES / 1e9, had, model.by()), flush=True)
     Server(("127.0.0.1", PORT), Handler).serve_forever()

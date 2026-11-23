@@ -1,0 +1,32 @@
+# The F2 reader as a uv project: `uv sync --no-editable` here makes the
+# environment the reader runs in (uv.lock) and builds its compiled tail pass
+# (meson.build) into it; f2serve.py's header says the rest.
+[project]
+name = "episteme-f2"
+version = "0.1.0"
+description = "episteme's F2 reader: BM25 fused with attention read out of Qwen3.5-0.8B"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "accelerate==1.15.0",
+    "flash-linear-attention==0.6.0",
+    "safetensors==0.8.0",
+    "torch==2.6.0+cu124",
+    "transformers==5.22.1",
+    "triton==3.2.0",
+]
+
+[build-system]
+requires = ["meson-python>=0.17", "meson>=1.5", "ninja"]
+build-backend = "mesonpy"
+
+[tool.uv]
+# the package is rebuilt when what it is built from changes
+cache-keys = [{ file = "pyproject.toml" }, { file = "meson.build" }, { file = "native/*" }]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
