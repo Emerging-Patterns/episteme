@@ -896,7 +896,6 @@ class Run:
                 self.need.setdefault(k, []).append(i)
         try:
             with Turn():
-                self.tokens = model.tokens(q)
                 self.order = sorted(self.need, key=tier)
                 self.ahead = 0  # how far into order states have been staged
                 ASKING[self.serial] = self
@@ -924,23 +923,19 @@ class Run:
     def turn(self):
         """one pass under the GPU lock: this run's next shards, scored for
         its question and for those of the other runs that wait for the same
-        shards (their questions about as long as this one's: the
-        linear-attention layers lay each question in a row as long as the
-        longest). The pass holds up to PASS tokens of questions' tails over
-        all its shards and questions, and at most BATCH shards; each run it
-        serves is given its scores as if it had scored the shard itself"""
+        shards. The pass holds up to PASS tokens of questions' tails over all
+        its shards and questions (model.together: what the questions all open
+        with counted once), and at most BATCH shards; each run it serves is
+        given its scores as if it had scored the shard itself"""
         mine = (k for k in self.order if k in self.need)
         first = next(mine)
-        runs, qs, held = [self], [self.q], self.tokens
+        runs, qs = [self], [self.q]
         for r in ASKING.values():
-            more = 0 if r.q in qs else r.tokens
-            if (r is not self and first in r.need and r.tokens <= 1.5 * self.tokens + 8 and self.tokens <= 1.5 * r.tokens + 8
-                    and held + more <= PASS):
+            if r is not self and first in r.need and (r.q in qs or model.together(qs + [r.q]) <= PASS):
                 runs.append(r)
-                held += more
-                if more:
+                if r.q not in qs:
                     qs.append(r.q)
-        room = max(1, min(BATCH, PASS // held))
+        room = max(1, min(BATCH, PASS // model.together(qs)))
         keys = [first] + list(itertools.islice((k for k in mine if all(k in r.need for r in runs)), room - 1))
         among = frozenset(ASKING)
         later = frozenset().union(*(r.need.keys() for r in ASKING.values()))  # what a run being scored still reads, this pass's shards among them
