@@ -23,9 +23,10 @@ A state is kept packed (pack) and read unpacked (unpack). With no book
 (F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
 values and layer 11's keys as int8, a byte a channel. With a book the three
 are coded together, a few bits a channel (joint.py), and unpacked on the GPU
-into that same int8 layout, so a tail pass reads a state the same way
-either way; the scores are always those of the unpacked state, also for the
-question that prefills it."""
+into that same int8 layout when the state is to be kept there, so a tail
+pass reads a kept state the same way either way; a state scored in passing
+is read as its decoding made it, in half precision. The scores are always
+those of the unpacked state, also for the question that prefills it."""
 import bisect, copy, functools, os, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
@@ -178,11 +179,34 @@ def pack(cache):
     return cache
 
 
+def unpacked(cache):
+    """the bytes a state's cache takes unpacked to keep (unpack), said from
+    the packed cache without unpacking it: what a tier asks before it
+    decides whether the state is kept"""
+    if not joined(cache):
+        return sum(v.numel() * v.element_size() for layer in cache.layers for x in vars(layer).values()
+                   for v in (x.values() if isinstance(x, dict) else (x,)) if torch.is_tensor(v))
+    size = cache.layers[MID].joint.shape[0] * (joint.WIDE + 8) + 4096  # three int8 tensors, a scale a token, two a channel
+    for layer in cache.layers:
+        for name, x in vars(layer).items():
+            for i, v in (x.items() if isinstance(x, dict) else ((None, x),)):
+                if not torch.is_tensor(v) or name.startswith("joint") or name in ("low_right", "low_rest", "low_scale"):
+                    continue
+                if name == "low_left":  # the matrices it and low_right lift to, in bf16
+                    size += v.numel() // v.shape[-1] * layer.low_right[i].shape[-1] * 2
+                else:
+                    size += v.numel() * v.element_size()
+    return size
+
+
 @torch.no_grad()
-def unpack(state):
+def unpack(state, kept=True):
     """a state as a tail pass reads it, on the GPU: a state whose keys and
-    values are coded together gets them back as int8 (a copy; the packed
-    state is left as it is), any other is returned as it is"""
+    values are coded together gets them back (a copy; the packed state is
+    left as it is), any other is returned as it is. A state to be kept gets
+    them as int8, the layout the GPU's tier holds; one scored in passing
+    (not kept) gets them as the decoding made them, in half precision, since
+    the pass that follows would only turn the int8 back into floats"""
     if not joined(state[1]):
         return state
     c = copy.copy(state[1])
@@ -190,9 +214,12 @@ def unpack(state):
     mid, top = c.layers[MID], c.layers[SCALED]
     y = BOOK.decode(mid.joint, mid.joint_at, mid.joint_exact)
     k7, v7, k11 = joint.tensors(y, mid.joint_rms.to(y.dtype), *(x.to(y.dtype) for x in angles(y.shape[0])))
-    int8(mid, "keys", k7, -2)
-    int8(mid, "values", v7, -1)
-    int8(top, "keys", k11, -2)
+    if kept:
+        int8(mid, "keys", k7, -2)
+        int8(mid, "values", v7, -1)
+        int8(top, "keys", k11, -2)
+    else:
+        mid.keys, mid.values, top.keys = k7[None], v7[None], k11[None]
     for name in ("joint", "joint_at", "joint_exact", "joint_rms"):
         delattr(mid, name)
     made = {id(mid): {"keys", "values", "keys_scale", "values_scale"}, id(top): {"keys", "keys_scale"}}
