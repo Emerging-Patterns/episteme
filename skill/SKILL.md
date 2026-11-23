@@ -20,7 +20,7 @@ Every record has an author, shown last in an excerpt's header, as its source wri
 ## Asking
 
 ```
-episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>] [--author <names>] "<question>"
+episteme ask --filter <sources> [--since <YYYY-MM-DD | YYYY-MM-DDTHH:MM:SS.mmmZ>] [--author <names>] [--depth <tokens>] "<question>"
 ```
 
 - **Always pass a narrow `--filter`.** It takes exact sources and prefixes ending in `/`, comma-separated: `--filter book:<corpus>/`, `--filter <kind>:<name>,<kind>:<prefix>/`. A missing filter is refused, and so is one the setup refuses as too wide (the refusal says what to name instead).
@@ -46,7 +46,7 @@ Excerpts come in record order, not by relevance, so read the whole result before
 
 Each thing is said once. A line `## <source>` names the source of the excerpts under it, until the next such line. Each excerpt is a header line `### <record id> | <ts> | <author>`, then one line `#<n>: <text>` per paragraph: a paragraph's citation is its header's record id and its own number, `<record id>#<n>`.
 
-**What is printed is the best ranked, not all that was found.** When the readers named more than fits, the excerpts end with a line naming a directory under `$EPISTEME_HOME/runs/<time>/` that holds all of it: `page-2.md`, `page-3.md` and on, the next best after what was printed, in its format, each about as much again and best first; one `<source>.md` per source, in time order, made for searching (every header names its source and every paragraph line starts with its whole citation, `<record id>#<n>:`); and `INDEX.md` listing them. When the printed excerpts do not answer the question, or it asks for everything on a subject, read the next page before asking again, or search the source files for the names and terms you need and read around the hits. All of it is several times what was printed, so do not read it whole. `episteme show runs/<time>/<file>` (the `show` tool with that as its `id`) prints one of those files, for when the directory itself cannot be read.
+**What is printed is the best ranked, not all that was found.** When the readers named more than fits, the excerpts end with a line naming a directory under `$EPISTEME_HOME/runs/<time>/` that holds all of it: `page-2.md`, `page-3.md` and on, the next best after what was printed, in its format, each about as much again and best first; one `<source>.md` per source, in time order, made for searching (every header names its source and every paragraph line starts with its whole citation, `<record id>#<n>:`); and `INDEX.md` listing them. When the printed excerpts do not answer the question, or it asks for everything on a subject, read the next page before asking again, or search the source files for the names and terms you need and read around the hits. All of it is several times what was printed, so do not read it whole. `episteme show runs/<time>/<file>` (the `show` tool with that as its `id`) prints one of those files, for when the directory itself cannot be read. A script or hook that will only ever use what is printed passes `--depth <tokens>` with the print budget (4,000 unless the store's `config.json` says otherwise): the run is then sifted no deeper, no files are written, and a question over a large source answers about a second sooner. Leave it out when you may want the next page.
 
 - **Cite every claim** as `<record id>#<n>`. Make no claim the excerpts do not hold.
 - **Later excerpts are the current state.** When two disagree, the later one is what holds now; say what changed.

@@ -470,7 +470,8 @@ def ask.at(got: Maybe<&2, Shake.Matched>) -> IO(Unit):
         refs : List<&2, F.Refusal> <- St.Store.refusals()
         code : U32 <- A.Ask.run(refs, F.Filter.parse(Shake.get_all(m, "filter")),
           Shake.get(m, "since"), F.Filter.who(Shake.get(m, "author")),
-          Maybe.default(&2, String, Shake.get(m, "question"), ""), Shake.on(m, "json"))
+          Maybe.default(&2, String, Shake.get(m, "question"), ""), Shake.on(m, "json"),
+          Shake.get(m, "depth"))
         IO.exit(code)
 
 # serve on the port when it read, else stop with exit 2

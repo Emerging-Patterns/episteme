@@ -53,6 +53,7 @@ import ./laws/ChatSourceDirName.bend as ChatSourceDirName
 import ./laws/CliNamesItsCommands.bend as CliNamesItsCommands
 import ./laws/CoverageAddsOverExcerpts.bend as CoverageAddsOverExcerpts
 import ./laws/CutReplyFails.bend as CutReplyFails
+import ./laws/DepthLimitsARankedRun.bend as DepthLimitsARankedRun
 import ./laws/EmptyAnswerIsOk.bend as EmptyAnswerIsOk
 import ./laws/EmptyIdLineIsNoRecord.bend as EmptyIdLineIsNoRecord
 import ./laws/EmptyParasLineIsNoRecord.bend as EmptyParasLineIsNoRecord

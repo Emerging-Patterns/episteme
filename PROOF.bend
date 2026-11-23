@@ -13,6 +13,7 @@ import ./proofs/ChatSourceDirName.bend as PChatSourceDirName
 import ./proofs/CliNamesItsCommands.bend as PCliNamesItsCommands
 import ./proofs/CoverageAddsOverExcerpts.bend as PCoverageAddsOverExcerpts
 import ./proofs/CutReplyFails.bend as PCutReplyFails
+import ./proofs/DepthLimitsARankedRun.bend as PDepthLimitsARankedRun
 import ./proofs/EmptyAnswerIsOk.bend as PEmptyAnswerIsOk
 import ./proofs/EmptyIdLineIsNoRecord.bend as PEmptyIdLineIsNoRecord
 import ./proofs/EmptyParasLineIsNoRecord.bend as PEmptyParasLineIsNoRecord
