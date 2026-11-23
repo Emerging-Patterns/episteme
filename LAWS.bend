@@ -85,6 +85,7 @@ import ./laws/Non200Fails.bend as Non200Fails
 import ./laws/NonJsonReplyFails.bend as NonJsonReplyFails
 import ./laws/NoParasLineIsNoRecord.bend as NoParasLineIsNoRecord
 import ./laws/NoSinceChangesNothing.bend as NoSinceChangesNothing
+import ./laws/NoticeAnswerTellsReads.bend as NoticeAnswerTellsReads
 import ./laws/NumberIdsFail.bend as NumberIdsFail
 import ./laws/OnlyTheLastShardIsOpen.bend as OnlyTheLastShardIsOpen
 import ./laws/OrderedTakesFirstRead.bend as OrderedTakesFirstRead

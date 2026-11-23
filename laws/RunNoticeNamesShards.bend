@@ -10,11 +10,12 @@
 # knows the run's whole
 # shard set and fills one budget for it, rather than one per source, and
 # from the named authors' paragraphs alone when the question names any. The
-# answer says only whether the reader ranked the run: one that did is then
-# asked for each shard by name (laws/RankedReadNamesShard.bend), and a reader
-# without that endpoint (llama-server answers 404) reads the run exactly as
-# before. Every label still comes from a read of its own shard
-# (laws/RequestAdmitsOnlyLabels.bend).
+# answer says whether the reader ranked the run, and may tell the run's reads
+# with it (laws/NoticeAnswerTellsReads.bend): one that ranked and told none is
+# then asked for each shard by name (laws/RankedReadNamesShard.bend), and a
+# reader without that endpoint (llama-server answers 404) reads the run
+# exactly as before. Every label still comes from a read of its own shard,
+# told or asked for (laws/RequestAdmitsOnlyLabels.bend).
 import Base
 import ../src/read.bend as Rd
 import ezjson@1.5.0.0/main.bend as Json

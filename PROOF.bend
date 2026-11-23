@@ -45,6 +45,7 @@ import ./proofs/Non200Fails.bend as PNon200Fails
 import ./proofs/NonJsonReplyFails.bend as PNonJsonReplyFails
 import ./proofs/NoParasLineIsNoRecord.bend as PNoParasLineIsNoRecord
 import ./proofs/NoSinceChangesNothing.bend as PNoSinceChangesNothing
+import ./proofs/NoticeAnswerTellsReads.bend as PNoticeAnswerTellsReads
 import ./proofs/NumberIdsFail.bend as PNumberIdsFail
 import ./proofs/OnlyTheLastShardIsOpen.bend as POnlyTheLastShardIsOpen
 import ./proofs/OrderedTakesFirstRead.bend as POrderedTakesFirstRead

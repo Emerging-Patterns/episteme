@@ -8,11 +8,14 @@ ranks every paragraph of the run's shards together and takes them best
 first until BUDGET tokens (characters / 2.55), and answers "ranked": true
 when its store held every named shard, with "states", how many of the
 run's shard states it found on the GPU, in RAM, on disk, or had to prefill,
-and how many it did not need ("kept"). episteme then reads each shard by
-name, POST /v1/episteme/read {"question", "source", "n"}, without its text
-(laws/RankedReadNamesShard.bend), and each read answers the shard's share,
-in the chat completion's shape, {"ids": [...], "ranks": [...]}: beside each
-label its place among those the run took, 1 the best. episteme prints the
+and how many it did not need ("kept"), and with "reads", every shard's
+share of the run in the notice's order, each the string a read's reply
+holds: {"ids": [...], "ranks": [...]}, beside each label its place among
+those the run took, 1 the best. episteme takes those and asks for no shard
+(laws/NoticeAnswerTellsReads.bend); one that does not know "reads" reads
+each shard by name, POST /v1/episteme/read {"question", "source", "n"},
+without its text (laws/RankedReadNamesShard.bend), and each read answers
+the same share in the chat completion's shape. episteme prints the
 best ranked that fit its own budget (config.json's budget_tokens) and keeps
 all of them in run files (laws/BestRankedArePrinted.bend), so BUDGET is how
 deep a question can be sifted, not how much it prints. A shard read with no
@@ -1024,8 +1027,8 @@ RUNS = collections.OrderedDict()  # question -> ({shard key: (label number, rank
 
 def notice(question, names, who=()):
     """rank the run's shards, for the authors in who when any are named;
-    answers how many of the names the store holds and where the run found
-    their states"""
+    answers how many of the names the store holds, where the run found
+    their states, and each held shard's read (told), in the names' order"""
     with META:
         found = [((nm["source"], int(nm["n"])), STORE.shard(nm["source"], int(nm["n"]))) for nm in names]
     found = [(nm, s) for nm, s in found if s]
@@ -1036,7 +1039,12 @@ def notice(question, names, who=()):
         RUNS[question] = (picks, {nm: key_of(s) for nm, s in found})
         while len(RUNS) > 64:
             RUNS.popitem(last=False)
-    return len(shards), dict(run.came)
+    return len(shards), dict(run.came), [told(picks[key_of(s)]) for _, s in found]
+
+
+def told(labels):
+    """a shard's labels and their ranks as a read's reply holds them"""
+    return json.dumps({"ids": ["p%d" % n for n, _ in labels], "ranks": [r for _, r in labels]})
 
 
 def answer(text, question):
@@ -1092,9 +1100,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/v1/episteme/run":
                 req, t = self.body(), time.time()
-                n, came = notice(req["question"], req["shards"], frozenset(req.get("authors") or ()))
+                n, came, reads = notice(req["question"], req["shards"], frozenset(req.get("authors") or ()))
+                ranked = n > 0 and n == len(req["shards"])
                 return self.send(200, {"shards": n, "ms": round((time.time() - t) * 1000), "states": came,
-                                       "ranked": n > 0 and n == len(req["shards"])})
+                                       "ranked": ranked, **({"reads": reads} if ranked else {})})
             if self.path == "/v1/episteme/read":
                 req, t = self.body(), time.time()
                 labels = answer_named(req["source"], int(req["n"]), req["question"])
@@ -1112,8 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(500, {"error": repr(e)[:300]})
         self.send(200, {"object": "chat.completion", "model": "f2",
                         "choices": [{"index": 0, "finish_reason": "stop", "message": {
-                            "role": "assistant", "content": json.dumps({
-                                "ids": ["p%d" % n for n, _ in labels], "ranks": [r for _, r in labels]})}}],
+                            "role": "assistant", "content": told(labels)}}],
                         "timings": {"prompt_n": 0, "prompt_ms": ms, "cache_n": 0, "predicted_ms": 0}})
 
     def log_message(self, fmt, *args):

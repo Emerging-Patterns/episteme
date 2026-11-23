@@ -1,8 +1,20 @@
 """A reader that ranks a run, for tests/serve.sh: it answers /health, says
 "ranked" to the run notice, and names p1 and p2 of every shard it is read
-by name, p2 of shard n ranked 2n - 1 and p1 ranked 2n. usage: ranker.py <port>"""
+by name, p2 of shard n ranked 2n - 1 and p1 ranked 2n. With "tell" it tells
+those reads in its answer to the notice instead, one for each shard the
+notice names, and answers a read with 500; GET /asked says how many reads
+it was asked for. usage: ranker.py <port> [tell]"""
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+TELL = sys.argv[2:] == ["tell"]
+ASKED = [0]  # how many reads were asked for
+
+
+def answer(n):
+    """what the read of the shard numbered n holds"""
+    return {"ids": ["p1", "p2"], "ranks": [2 * n, 2 * n - 1]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -17,17 +29,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/asked":
+            return self.send(200, {"reads": ASKED[0]})
         self.send(200 if self.path == "/health" else 404, {"status": "ok"})
 
     def do_POST(self):
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         if self.path == "/v1/episteme/run":
+            if TELL:
+                return self.send(200, {"ranked": True, "reads": [json.dumps(answer(int(sh["n"]))) for sh in req["shards"]]})
             return self.send(200, {"ranked": True})
         if self.path != "/v1/episteme/read":
             return self.send(404, {"error": "not found"})
-        n = int(req["n"])
-        answer = {"ids": ["p1", "p2"], "ranks": [2 * n, 2 * n - 1]}
-        self.send(200, {"choices": [{"message": {"role": "assistant", "content": json.dumps(answer)}}]})
+        ASKED[0] += 1
+        if TELL:
+            return self.send(500, {"error": "the reads were told"})
+        self.send(200, {"choices": [{"message": {"role": "assistant", "content": json.dumps(answer(int(req["n"])))}}]})
 
     def log_message(self, fmt, *args):
         pass

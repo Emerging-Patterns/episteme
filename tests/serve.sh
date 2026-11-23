@@ -5,8 +5,9 @@
 # as an array read alike, and a pool with no healthy instance answered as a
 # tool error while the server keeps serving; then, with a reader that ranks
 # the run (tests/fixtures/ranker.py), the best ranked printed and all of it
-# kept in run files, by `ask` and by the tool, and a paragraph that holds the
-# question passed over. EPISTEME names the binary
+# kept in run files, by `ask` and by the tool, a paragraph that holds the
+# question passed over, and a reader that tells the run's reads in its answer
+# to the notice asked for none and printed as one asked for each. EPISTEME names the binary
 # (default bin/episteme); python3 is the MCP client and the ranking reader.
 set -euo pipefail
 
@@ -15,7 +16,8 @@ bin=${EPISTEME:-$here/../bin/episteme}
 work=$(mktemp -d)
 pid=
 rpid=
-trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; [ -n "$rpid" ] && kill "$rpid" 2>/dev/null; rm -rf "$work"' EXIT
+tpid=
+trap '[ -n "$pid" ] && kill "$pid" 2>/dev/null; [ -n "$rpid" ] && kill "$rpid" 2>/dev/null; [ -n "$tpid" ] && kill "$tpid" 2>/dev/null; rm -rf "$work"' EXIT
 
 export EPISTEME_HOME=$work/home
 mkdir -p "$EPISTEME_HOME"
@@ -158,5 +160,24 @@ grep -q 'seven gulls' "$work/out.txt" && fail "a paragraph that holds the questi
 "$bin" ask --filter book:tiny/ "lantern keeper counted seven gulls before noon" > "$work/out.txt" 2> "$work/err.txt" \
   || fail "ask of seven words a paragraph holds: $(cat "$work/err.txt")"
 grep -q 'seven gulls' "$work/out.txt" || fail "a paragraph that holds a phrase of seven words is not printed: $(head -c 600 "$work/out.txt")"
+
+# a reader that tells the run's reads in its answer to the notice is asked
+# for no shard, and the run prints what the same reads asked one by one do
+"$bin" ask --filter book:tiny/ "what" > "$work/asked.txt" 2> "$work/err.txt" || fail "ask of the ranking reader, again: $(cat "$work/err.txt")"
+tport=${TELLER_PORT:-18133}
+python3 "$here/fixtures/ranker.py" "$tport" tell &
+tpid=$!
+for _ in $(seq 100); do
+  python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$tport/health', timeout=1)" 2> /dev/null && break
+  sleep 0.1
+done
+sed -i "s/127.0.0.1:$rport/127.0.0.1:$tport/" "$EPISTEME_HOME/config.json"
+"$bin" ask --filter book:tiny/ "what" > "$work/told.txt" 2> "$work/err.txt" || fail "ask of the telling reader: $(cat "$work/err.txt")"
+asked=$(python3 -c "import json, urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:$tport/asked', timeout=5))['reads'])")
+[ "$asked" = 0 ] || fail "a reader that told its reads was asked for $asked"
+grep -q "^shards: $shards read, 0 failed$" "$work/told.txt" || fail "the told run's footer: $(tail -n 4 "$work/told.txt")"
+grep -v '^wall time: ' "$work/asked.txt" > "$work/asked.cut"
+grep -v '^wall time: ' "$work/told.txt" > "$work/told.cut"
+cmp -s "$work/asked.cut" "$work/told.cut" || fail "told reads print otherwise than asked ones: $(diff "$work/asked.cut" "$work/told.cut" | head -n 6)"
 
 echo "serve: ok"
