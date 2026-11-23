@@ -30,7 +30,7 @@ typedef struct F2 F2;
 
 /* the layout of F2State and the meaning of the calls below: a caller built
    for another number must not call */
-#define F2_ABI 2
+#define F2_ABI 3
 int f2_abi(void);
 
 /* the weights of layers 0..11 read from a safetensors file onto the device */
@@ -86,6 +86,22 @@ int f2_book(F2 *, int coefficients, int bytes, const long *lo, const short *shif
 /* a packed state unpacked; done when it returns (the caller may drop the
    packed state). Returns 0, or -1 with the reason on stderr */
 int f2_unpack(F2 *, const F2Packed *);
+
+/* A shard read for the first time: its prompt's tokens up to the question
+   run through the layers, and what a state is made of written into memory
+   the caller holds: layer 7's keys and values and layer 11's keys (bf16
+   [tokens][2][256], a token's two heads side by side), and each
+   linear-attention layer's convolution states (bf16 [6144][4]: its last
+   four inputs) and recurrent states (fp32 [16][128][128]) after the last
+   token. Returns 0, or -1 with the reason on stderr */
+typedef struct {
+    int tokens;
+    const int *ids;
+    void *k7, *v7, *k11;
+    void *conv[12];
+    float *rec[12];
+} F2Fill;
+int f2_prefill(F2 *, const F2Fill *);
 
 /* the queries of the last pass as attention used them, for the rows it had
    (shards by tokens, a shard's tokens together): layer 7's, bf16 [rows][8]

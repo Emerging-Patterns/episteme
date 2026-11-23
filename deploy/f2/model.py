@@ -3,6 +3,12 @@ query scale doubled (its q_norm, stored as 1 + w, becomes 2 (1 + w) - 1).
 Layer 11 is the last and only its attention weights are read, so it keeps
 no values and computes no output or MLP.
 
+The model is run by f2pass, a library of its own kernels in C++ and CUDA
+(native/f2pass.cu, built into the environment by this directory's
+meson.build), which reads the weights from the model's safetensors file:
+there is no other copy of the model here. PyTorch holds the memory a state
+lies in and packs a new state (pack, joint.py).
+
 A shard's state is the model's cache after the prompt up to the question,
 less the keys and values of layer 3: of the three full-attention layers (3,
 7 and 11) the question's tokens look back at the shard in layers 7 and 11
@@ -17,11 +23,8 @@ several questions, laid end to end, go through the layers once a shard in
 one pass over several shards, each token reading its shard's state in
 place, so a shard's keys and values are held once for all the questions
 asked of it, nothing of a state is copied for a question or written back,
-and no question is padded to another's length. The pass is f2pass's (tail):
-a library of its own kernels in C++ and CUDA (native/f2pass.cu, built into
-the environment by this directory's meson.build), which reads the states
-where these tensors lie on the device. PyTorch here prefills a shard
-(the model's own forward) and holds the memory.
+and no question is padded to another's length. f2pass reads the states
+where these tensors lie on the device (tail).
 
 A state is kept packed (pack) and read unpacked (unpack). With no book
 (F2_BOOK, made by fit.py) the two are the same thing: layer 7's keys and
@@ -34,16 +37,15 @@ those of the unpacked state, also for the question that prefills it.
 
 The unpacking is f2pass's too, and gives the bits joint.py's own decoding
 gives (its arithmetic in the same precision and order)."""
-import bisect, copy, ctypes, functools, hashlib, os, sys, torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
+import bisect, copy, ctypes, functools, hashlib, json, os, struct, sys, torch
+from tokenizers import Tokenizer
 import joint
 import store
 from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
 import f2pass
 
-if f2pass.ABI != 2:  # the package in the environment was built from another version of native/
+if f2pass.ABI != 3:  # the package in the environment was built from another version of native/
     raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = 12  # layers 0..11
@@ -51,60 +53,15 @@ SCALED = 11  # the layer whose query scale is doubled
 ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
 MID = 7  # the full-attention layer whose keys and values a state holds
 HEADS = (3, 4)  # heads of layer 11 that are read
-CHUNK = 2048  # prefill chunk, in tokens
 DEV = "cuda"  # the passes are CUDA kernels: there is no reader on a host alone
 # a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
 BOOK = None if BOOK_ID is None else torch.load(BOOK_PATH, weights_only=True)
 
-tok = AutoTokenizer.from_pretrained(DIR)
+tok = Tokenizer.from_file(os.path.join(DIR, "tokenizer.json"))
+WEIGHTS = next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors"))
 
 
-class Zero(torch.nn.Module):
-    """layer 11's MLP: its output feeds nothing that is read"""
-
-    def forward(self, x):
-        return torch.zeros_like(x)
-
-
-def last(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
-    """layer 11's attention while a shard is prefilled: its keys go to the
-    cache with no values, and the output is zeros, since no layer follows
-    and the logits are never read (a tail's weights are made by tail)"""
-    shape = (*hidden_states.shape[:-1], -1, self.head_dim)
-    key = self.k_norm(self.k_proj(hidden_states).view(shape)).transpose(1, 2)
-    key = apply_rotary_pos_emb(key, key, *position_embeddings)[1]
-    if past_key_values is not None:
-        past_key_values.update(key, key[..., :0], self.layer_idx)
-    return torch.zeros_like(hidden_states), None
-
-
-def load():
-    """layers 0..11 on the GPU, the embedding table on the CPU, no LM head"""
-    m = AutoModelForCausalLM.from_pretrained(DIR, dtype=torch.bfloat16).eval()
-    cfg = m.config.text_config if hasattr(m.config, "text_config") else m.config
-    m.model.layers = m.model.layers[:LAYERS]
-    cfg.layer_types = cfg.layer_types[:LAYERS]
-    cfg.num_hidden_layers = LAYERS
-    m.lm_head = torch.nn.Identity()
-    emb = m.model.embed_tokens
-    m.model.embed_tokens = None
-    m.to(DEV)
-    m.model.embed_tokens = emb
-    emb.register_forward_hook(lambda mod, inp, out: out.to(DEV))
-    orig = emb.forward
-    emb.forward = lambda ids: orig(ids.cpu())
-    top = m.model.layers[SCALED]
-    top.self_attn.forward = last.__get__(top.self_attn)
-    top.mlp = Zero()
-    w = top.self_attn.q_norm.weight
-    with torch.no_grad():
-        w.copy_((1 + w.float()) * 2.0 - 1)
-    full = [i for i, t in enumerate(cfg.layer_types) if t == "full_attention"]
-    return m, full.index(SCALED)
-
-
-M, AT = load()
-LIB = f2pass.Pass(next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors")))  # the weights again, as f2pass lays them
+LIB = f2pass.Pass(WEIGHTS)  # the weights on the device, as f2pass lays them
 TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
 if BOOK is not None:
     BOOK = joint.Book(BOOK, DEV)
@@ -115,22 +72,37 @@ if BOOK is not None:
         raise RuntimeError("the book at %s is not one f2pass unpacks states of (recurrent states as a rank and four bits)" % BOOK_PATH)
 
 
+def weight(name):
+    """a tensor of the model's weights file by its name there, on the host
+    (bf16 or fp32, as it is kept): the safetensors layout, a header of JSON
+    that says each tensor's type, shape and place"""
+    with open(WEIGHTS, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        at = json.loads(f.read(n))[name]
+        f.seek(8 + n + at["data_offsets"][0])
+        raw = bytearray(f.read(at["data_offsets"][1] - at["data_offsets"][0]))
+    return torch.frombuffer(raw, dtype={"BF16": torch.bfloat16, "F32": torch.float32}[at["dtype"]]).view(at["shape"])
+
+
 def template(text):
-    """the chat-templated prompt for a shard, split before the question"""
-    s = tok.apply_chat_template(store.messages(text, "QQQ"), tokenize=False,
-                                add_generation_prompt=True, enable_thinking=False)
-    cut = s.rindex("<|im_start|>user\nQuestion: QQQ")
-    return s[:cut], s[cut:]
+    """the prompt for a shard as the model's chat template lays it (ChatML,
+    each message's content trimmed, the reply opened with an empty thinking
+    block), split before the question"""
+    said = ["<|im_start|>%s\n%s<|im_end|>\n" % (m["role"], m["content"].strip()) for m in store.messages(text, "QQQ")]
+    return "".join(said[:-1]), said[-1] + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
 
 ANGLES = [None]  # the cosines and sines made so far, for the longest shard seen
 
 
 def angles(n):
-    """the cosines and sines of the rotary angles at positions 0..n-1"""
+    """the cosines and sines of the rotary angles at positions 0..n-1,
+    [n, 64] floats: 32 frequencies, 10^7 to the power -j/32, said twice (a
+    key's first 32 channels turn against its next 32)"""
     if ANGLES[0] is None or ANGLES[0][0].shape[0] < n:
-        cos, sin = M.model.rotary_emb(torch.zeros(1, device=DEV), torch.arange(max(n, 32768), device=DEV)[None])
-        ANGLES[0] = (cos[0].float(), sin[0].float())
+        inv = 1.0 / (10000000.0 ** (torch.arange(0, 64, 2, dtype=torch.float) / 64))
+        at = torch.arange(max(n, 32768), device=DEV)[:, None].float() * inv.to(DEV)
+        ANGLES[0] = (torch.cat((at.cos(), at.cos()), -1), torch.cat((at.sin(), at.sin()), -1))
     return ANGLES[0][0][:n], ANGLES[0][1][:n]
 
 
@@ -332,19 +304,42 @@ def unpacking(state, kept):
     return (state[0], c) + tuple(state[2:])
 
 
-@torch.no_grad()
 def prefill(shard, raw=False):
     """a shard's state, packed: (prompt ids, cache, paragraph token spans,
-    question template); raw leaves the cache as the model made it"""
+    question template); raw leaves the cache as the model made it. The
+    prompt up to the question runs through the layers in f2pass, which
+    writes what a state is made of into tensors made here: layer 7's keys
+    and values and layer 11's keys (bf16, of every token), and each
+    linear-attention layer's convolution states (its last four inputs) and
+    recurrent states (fp32) after the last token. The cache is a Bag whose
+    layers are Bags: an attention layer's holds keys and values ([1, 2
+    heads, tokens, 256]; none of layer 3, which no tail reads, and no
+    values of layer 11), a linear-attention layer's conv_states and
+    recurrent_states, each a dict of one tensor"""
     head, tail = template(shard["text"])
-    enc = tok(head, add_special_tokens=False, return_offsets_mapping=True)
-    ids = enc["input_ids"]
-    cache = None
-    for i in range(0, len(ids), CHUNK):
-        out = M(input_ids=torch.tensor([ids[i:i + CHUNK]], device=DEV), past_key_values=cache,
-                use_cache=True, logits_to_keep=1)
-        cache = out.past_key_values
-    starts = [o[0] for o in enc["offset_mapping"]]
+    enc = tok.encode(head, add_special_tokens=False)
+    ids, T = enc.ids, len(enc.ids)
+    lin = [li for li in range(LAYERS) if li % 4 != 3]
+    k7, v7, k11 = (torch.empty((T, 2, 256), dtype=torch.bfloat16, device=DEV) for _ in range(3))
+    conv = torch.empty((len(lin), 1, 6144, 4), dtype=torch.bfloat16, device=DEV)
+    rec = torch.empty((len(lin), 1, 16, 128, 128), dtype=torch.float32, device=DEV)
+    f = f2pass.Fill()
+    f.tokens, f.ids = T, (ctypes.c_int * T)(*ids)
+    f.k7, f.v7, f.k11 = k7.data_ptr(), v7.data_ptr(), k11.data_ptr()
+    for at, li in enumerate(lin):
+        f.conv[li], f.rec[li] = conv[at].data_ptr(), rec[at].data_ptr()
+    if torch.cuda.current_stream() != torch.cuda.default_stream():
+        torch.cuda.current_stream().synchronize()
+    again(lambda: LIB.prefill(f))
+    cache = store.Bag()
+    cache.layers = [store.Bag() for _ in range(LAYERS)]
+    none = torch.empty((1, 2, 0, 256), dtype=torch.bfloat16, device=DEV)
+    for at, li in enumerate(lin):
+        cache.layers[li].conv_states, cache.layers[li].recurrent_states = {0: conv[at]}, {0: rec[at]}
+    cache.layers[ALONE].keys, cache.layers[ALONE].values = none, none.clone()
+    cache.layers[MID].keys, cache.layers[MID].values = k7.transpose(0, 1)[None], v7.transpose(0, 1)[None]
+    cache.layers[SCALED].keys, cache.layers[SCALED].values = k11.transpose(0, 1)[None], torch.empty((1, 2, T, 0), dtype=torch.bfloat16, device=DEV)
+    starts = [o[0] for o in enc.offsets]
     base = head.index(shard["text"].strip())
     spans = []
     for a, b, _ in shard["spans"]:
@@ -358,7 +353,7 @@ def prefill(shard, raw=False):
 def opening(question):
     """the tokens of a question's tail a pass runs (question_tail): the
     template's up to the question, then the question's"""
-    return tuple(tok("<|im_start|>user\nQuestion: " + question, add_special_tokens=False)["input_ids"])
+    return tuple(tok.encode("<|im_start|>user\nQuestion: " + question, add_special_tokens=False).ids)
 
 
 def tokens(question):

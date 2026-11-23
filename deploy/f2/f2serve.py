@@ -145,10 +145,12 @@ past that waits for a slot, so the queue cannot hold states RAM_GB evicted.
 Setup: this directory is a uv project (pyproject.toml, uv.lock). With the
 CUDA 12 toolkit's bin first on PATH,
   UV_PROJECT_ENVIRONMENT=<venv> uv sync --no-editable
-makes the venv and builds into it f2pass, the tail pass and the unpacking of
-states in C++ and CUDA (native/, meson.build); run it again after a change
-under native/. The weights:
-  huggingface-cli download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
+makes the venv (PyTorch, which holds and packs the states, and the tokenizer)
+and builds into it f2pass, which runs the model: the reading of a new shard,
+the tail pass and the unpacking of states, in C++ and CUDA (native/,
+meson.build); run it again after a change under native/. The weights:
+  uvx --from huggingface_hub hf download Qwen/Qwen3.5-0.8B --local-dir $EPISTEME_HOME/f2/qwen08
+(of which the reader reads the safetensors file and tokenizer.json).
 Run: EPISTEME_HOME=... <venv>/bin/python f2serve.py, then point config.json's
 pool at http://127.0.0.1:<PORT>. One CUDA GPU with about 10 GB at the defaults.
 Once the store has shards, EPISTEME_HOME=... python fit.py (reader stopped,
@@ -169,7 +171,7 @@ env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.pt), F2_BOOK ($EPISTEME_HOME/f2/book.pt).
 """
-import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, sys, threading, time, traceback
+import collections, copy, ctypes, difflib, hashlib, itertools, json, math, os, pickle, random, re, signal, sys, threading, time, traceback, types, warnings
 from multiprocessing.pool import ThreadPool
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -180,6 +182,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # blocks nothing uses.
 # Expandable segments hand a freed block's pages to the next size.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+warnings.filterwarnings("ignore", message="Failed to initialize NumPy")  # PyTorch is used here without it
 import torch
 import store
 import names
@@ -427,6 +430,19 @@ def kept(path):
         return False
 
 
+class Unpickler(pickle.Unpickler):
+    """a state file's objects: a cache and its layers kept by a reader that
+    ran the model through the transformers library are of that library's
+    classes, and are read as Bags, which is all this reader makes of them"""
+
+    def find_class(self, module, name):
+        return store.Bag if module.split(".")[0] == "transformers" else super().find_class(module, name)
+
+
+PICKLE = types.ModuleType("f2pickle")  # pickle, but for the class its loader reads with
+vars(PICKLE).update(vars(pickle), Unpickler=Unpickler)
+
+
 class States:
     """shard states and their "N/A" scores: GPU, then host RAM, then disk"""
 
@@ -511,7 +527,7 @@ class States:
         """k's state and its "N/A" score from disk; the one kept before
         there was a book when there is no other"""
         path = self.path(k)
-        return torch.load(path if kept(path) else self.plain_path(k), weights_only=False, map_location="cpu")
+        return torch.load(path if kept(path) else self.plain_path(k), weights_only=False, map_location="cpu", pickle_module=PICKLE)
 
     def lift(self, state):
         """a copy of a state on the GPU and the event that says it has

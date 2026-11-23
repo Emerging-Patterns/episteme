@@ -118,7 +118,7 @@ with torch.no_grad():
             print(i, corpus, len(ids), flush=True)
 mean /= n
 cov = (S / n - torch.outer(mean, mean)).cpu()
-o = model.M.model.layers[model.MID].self_attn.o_proj.weight.float()  # [hidden, 8 heads x 256]
+o = model.weight("model.language_model.layers.%d.self_attn.o_proj.weight" % model.MID).float().to(dev)  # [hidden, 8 heads x 256]
 metrics = []
 for tensor, h in joint.BLOCKS:
     if tensor == "v7":
