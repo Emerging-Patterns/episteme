@@ -26,13 +26,25 @@ are coded together, a few bits a channel (joint.py), and unpacked on the GPU
 into that same int8 layout when the state is to be kept there, so a tail
 pass reads a kept state the same way either way; a state scored in passing
 is read as its decoding made it, in half precision. The scores are always
-those of the unpacked state, also for the question that prefills it."""
-import bisect, copy, functools, os, torch
+those of the unpacked state, also for the question that prefills it.
+
+The pass itself is run by f2pass when that package is installed (the same
+pass written in C++ and CUDA, native/f2pass.cu: built by this directory's
+meson.build), and by the PyTorch calls below (torch_tail) when it is not,
+when F2_NATIVE is 0, or when a pass is one f2pass does not take. The two
+differ as the PyTorch pass differs from itself between two shapes of pass
+(bf16 sums in another order)."""
+import bisect, copy, ctypes, functools, hashlib, os, sys, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
 import joint
 import store
 from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
+
+try:
+    import f2pass
+except (ImportError, OSError, AssertionError):  # not installed, or its library does not load
+    f2pass = None
 
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
@@ -432,10 +444,113 @@ def weights(q, keys, top, lens, seen, scaling):
     return torch.softmax(w, -1, dtype=torch.float32)
 
 
-@torch.no_grad()
+NATIVE = [None]  # f2pass's handle, opened at the first pass; False when its pass is not to be used
+
+
+def native():
+    """f2pass's handle with the model's weights on the device, or False"""
+    if NATIVE[0] is None:
+        NATIVE[0] = False
+        if f2pass is not None and DEV == "cuda" and os.environ.get("F2_NATIVE", "1") != "0" and getattr(f2pass, "ABI", None) == 1:
+            NATIVE[0] = f2pass.Pass(next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors")))
+    return NATIVE[0]
+
+
+def by():
+    """what runs the tail passes: "PyTorch", or f2pass with the first
+    twelve hex digits of its library's SHA-1"""
+    if not native():
+        return "PyTorch"
+    return "f2pass " + hashlib.sha1(open(f2pass.LIB._name, "rb").read()).hexdigest()[:12]
+
+
+def heads(x):
+    """a tensor [1, 2, tokens, 256] as f2pass reads it: a pointer a
+    key-value head and the bytes from a token's row to the next"""
+    size, base = x.element_size(), x.data_ptr()
+    return (ctypes.c_void_p * 2)(base, base + x.stride(1) * size), x.stride(2) * size
+
+
+def lying(state):
+    """a state as f2pass reads it where it lies (f2pass.State, and what must
+    be held while it is read), or None for a state it does not take: one
+    whose keys and values are neither a kept state's int8 nor the halves of
+    a state scored in passing"""
+    ids, cache, spans = state[0], state[1], state[2]
+    mid, top = cache.layers[MID], cache.layers[SCALED]
+    kind = {torch.int8: f2pass.INT8, torch.float16: f2pass.HALF}.get(mid.keys.dtype)
+    held = (mid.keys, mid.values, top.keys)
+    if kind is None or any(x.dtype != mid.keys.dtype or x.dim() != 4 or x.shape[-2] != len(ids) or x.stride(3) != 1 for x in held):
+        return None
+    s = f2pass.State()
+    s.len, s.kind = len(ids), kind
+    (s.k7, s.k7_step), (s.v7, s.v7_step), (s.k11, s.k11_step) = map(heads, held)
+    if kind == f2pass.INT8:
+        for name, sc, wide in (("k7_scale", mid.keys_scale, 256), ("v7_scale", mid.values_scale, s.len), ("k11_scale", top.keys_scale, 256)):
+            if sc.dtype != torch.float32 or not sc.is_contiguous() or sc.numel() != 2 * wide:
+                return None
+            setattr(s, name, (ctypes.c_void_p * 2)(sc.data_ptr(), sc.data_ptr() + wide * 4))
+    for li, layer in enumerate(cache.layers):
+        if hasattr(layer, "conv_states"):
+            conv = next(v for v in layer.conv_states.values() if torch.is_tensor(v))
+            rec = next(v for v in layer.recurrent_states.values() if torch.is_tensor(v))
+            if conv.dtype != torch.bfloat16 or rec.dtype != torch.bfloat16 or not conv.is_contiguous() or not rec.is_contiguous():
+                return None
+            s.conv[li], s.rec[li], s.conv_len = conv.data_ptr(), rec.data_ptr(), conv.shape[-1]
+    flat = (ctypes.c_int * (2 * len(spans)))(*[x for sp in spans for x in sp])
+    s.spans, s.span = len(spans), flat
+    return s, flat
+
+
+def row(questions):
+    """the row of tail tokens several questions make, as a pass lays it:
+    the tokens, each one's question (-1: the opening all share) and its
+    place in its question's tail, how many tokens all open with, and each
+    question's tail tokens"""
+    tails = [opening(q) for q in questions]
+    same = shared(tails)
+    ids = list(tails[0][:same]) + [t for ids in tails for t in ids[same:]]
+    who = [-1] * same + [k for k, ids in enumerate(tails) for _ in ids[same:]]
+    at = list(range(same)) + [t for ids in tails for t in range(same, len(ids))]
+    return ids, who, at, same, [len(t) for t in tails]
+
+
 def tail(states, questions, seen=None):
     """scores(state, question) for every one of several shards and several
-    questions in one pass, [shard][question]. The questions' tails are laid
+    questions in one pass, [shard][question]: by f2pass when it is there and
+    takes the pass (its states' layouts, at most its count of tokens, no
+    queries asked for), else by torch_tail; so is a pass f2pass fails at"""
+    lib = native() if seen is None else False
+    if lib:
+        ids, who, at, same, lens = row(questions)
+        there = [lying(s) for s in states] if len(ids) <= f2pass.TOKENS else [None]
+        if all(there):
+            most = max(len(s[2]) for s in states)
+            # the library's kernels go on the device's default stream, where PyTorch's own are queued unless a
+            # thread chose another: what such a thread has queued for these states is waited for first
+            if torch.cuda.current_stream() != torch.cuda.default_stream():
+                torch.cuda.current_stream().synchronize()
+            out = None
+            for again in (True, False):
+                try:
+                    out = lib.tail([s for s, _ in there], ids, who, at, same, lens, most)
+                    break
+                except RuntimeError as e:
+                    # its buffers are its own, not PyTorch's: tried once more with what PyTorch holds unused handed
+                    # back to the device, and then the pass is run by PyTorch, and the log says so
+                    if again:
+                        torch.cuda.empty_cache()
+                    else:
+                        print("f2: %s; this pass by PyTorch" % e, file=sys.stderr, flush=True)
+            if out is not None:
+                res = torch.frombuffer(out, dtype=torch.float32).view(len(states), len(questions), most)
+                return [[res[b, k, :len(s[2])].clone() for k in range(len(questions))] for b, s in enumerate(states)]
+    return torch_tail(states, questions, seen)
+
+
+@torch.no_grad()
+def torch_tail(states, questions, seen=None):
+    """tail by PyTorch calls. The questions' tails are laid
     end to end, and that row of tokens runs through the layers once a shard,
     each token reading its shard's state where the stock forward would read
     a cache, and of the tokens only those of its own question up to itself.
