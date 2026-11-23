@@ -103,10 +103,15 @@ def template(text):
     return s[:cut], s[cut:]
 
 
+ANGLES = [None]  # the cosines and sines made so far, for the longest shard seen
+
+
 def angles(n):
     """the cosines and sines of the rotary angles at positions 0..n-1"""
-    cos, sin = M.model.rotary_emb(torch.zeros(1, device=DEV), torch.arange(n, device=DEV)[None])
-    return cos[0].float(), sin[0].float()
+    if ANGLES[0] is None or ANGLES[0][0].shape[0] < n:
+        cos, sin = M.model.rotary_emb(torch.zeros(1, device=DEV), torch.arange(max(n, 32768), device=DEV)[None])
+        ANGLES[0] = (cos[0].float(), sin[0].float())
+    return ANGLES[0][0][:n], ANGLES[0][1][:n]
 
 
 def floats(layer, name):
@@ -120,9 +125,10 @@ def int8(layer, name, x, dim):
     """x [2, tokens, 256] put on the layer as int8 with one scale per
     channel over the tokens (dim -2, keys) or per token (dim -1, values:
     KIVI, 2402.02750)"""
-    sc = x.abs().amax(dim, keepdim=True).clamp(min=1e-8) / 127
+    lo, hi = torch.aminmax(x, dim=dim, keepdim=True)
+    sc = torch.maximum(-lo, hi).clamp(min=max(1e-8, torch.finfo(x.dtype).tiny)) / 127
     setattr(layer, name, (x / sc).round().to(torch.int8)[None])
-    setattr(layer, name + "_scale", sc[None])
+    setattr(layer, name + "_scale", sc.float()[None])
 
 
 def joined(cache):
@@ -181,8 +187,8 @@ def unpack(state):
     c = copy.copy(state[1])
     c.layers = [copy.copy(layer) for layer in state[1].layers]
     mid, top = c.layers[MID], c.layers[SCALED]
-    cos, sin = angles(mid.joint.shape[0])
-    k7, v7, k11 = joint.tensors(BOOK.decode(mid.joint, mid.joint_at, mid.joint_exact), mid.joint_rms.float(), cos, sin)
+    y = BOOK.decode(mid.joint, mid.joint_at, mid.joint_exact)
+    k7, v7, k11 = joint.tensors(y, mid.joint_rms.to(y.dtype), *(x.to(y.dtype) for x in angles(y.shape[0])))
     int8(mid, "keys", k7, -2)
     int8(mid, "values", v7, -1)
     int8(top, "keys", k11, -2)
