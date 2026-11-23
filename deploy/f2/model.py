@@ -43,6 +43,9 @@ from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
 import f2pass
 
+if f2pass.ABI != 2:  # the package in the environment was built from another version of native/
+    raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
+
 LAYERS = 12  # layers 0..11
 SCALED = 11  # the layer whose query scale is doubled
 ALONE = 3  # the full-attention layer in which a question's tokens see the question alone
@@ -101,8 +104,6 @@ def load():
 
 
 M, AT = load()
-if f2pass.ABI != 2:  # the package in the environment was built from another version of native/
-    raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 LIB = f2pass.Pass(next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors")))  # the weights again, as f2pass lays them
 TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
 if BOOK is not None:
