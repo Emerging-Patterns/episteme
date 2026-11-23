@@ -147,11 +147,13 @@ __global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const f
    (src [tokens][4]: 0..2 the shard's last three, 3 + i the row's token i),
    its activation, queries and keys over their lengths (X [shard, head][2 x
    tokens][128]: the keys' rows, then the queries', in half precision), beta
-   and the decay.
+   and the decay. A prefill takes queries and keys as floats (qf, kf, no X),
+   and its arrays hold NP tokens a head (the shard's, padded to whole
+   chunks); a pass's hold its N.
    lin holds the input projection of every shard's rows (each) or, in layer
    0, where the rows are the embeddings whatever the shard, of the row once */
 __global__ void conv_k(const bf16 *lin, int each, const bf16 *const *conv, int clen, const bf16 *w, const int *src, int N,
-                       const float *negA, const float *dtb, __half *X, float *v, float *beta, float *g) {
+                       const float *negA, const float *dtb, __half *X, float *qf, float *kf, float *v, float *beta, float *g, int NP) {
     __shared__ float sh[4];
     size_t r = blockIdx.x / LH;
     int hd = blockIdx.x % LH, i = threadIdx.x;
@@ -172,12 +174,19 @@ __global__ void conv_k(const bf16 *lin, int each, const bf16 *const *conv, int c
         val[part] = rbf(m * sigm(m));
     }
     float sq = bsum(val[0] * val[0], sh), sk = bsum(val[1] * val[1], sh);
-    size_t bh2 = (b * LH + hd) * 2 * N;
-    X[(bh2 + n) * LD + i] = __float2half(val[1] * rsqrtf(sk + EPS));
-    X[(bh2 + N + n) * LD + i] = __float2half(val[0] * rsqrtf(sq + EPS) * 0.08838834764831845f);  // 128 ** -0.5
-    v[((b * LH + hd) * N + n) * LD + i] = val[2];
+    float kn = val[1] * rsqrtf(sk + EPS), qn = val[0] * rsqrtf(sq + EPS) * 0.08838834764831845f;  // 128 ** -0.5
+    size_t at = ((b * LH + hd) * NP + n) * LD + i;
+    if (X) {
+        size_t bh2 = (b * LH + hd) * 2 * N;
+        X[(bh2 + n) * LD + i] = __float2half(kn);
+        X[(bh2 + N + n) * LD + i] = __float2half(qn);
+    } else {
+        qf[at] = qn;
+        kf[at] = kn;
+    }
+    v[at] = val[2];
     if (i == 0) {
-        size_t bh = (b * LH + hd) * N + n;
+        size_t bh = (b * LH + hd) * NP + n;
         beta[bh] = rbf(sigm(bf2f(lin[(lb + n) * LIN + LQKV + LH * LD + hd])));
         float a = bf2f(lin[(lb + n) * LIN + LQKV + LH * LD + LH + hd]) + dtb[hd];
         g[bh] = negA[hd] * (a > 20.f ? a : log1pf(expf(a)));
@@ -495,6 +504,145 @@ __global__ void span_k(const float *mass, int TM, const int *span, const int *le
     out[i] = acc;
 }
 
+// ---------------------------------------------------------------- reading a shard for the first time
+
+#define CH 64  // the delta rule's chunk when a shard is read: as the model's own forward takes it
+
+/* each token's decay summed from its chunk's first token on, a thread a (head, chunk) */
+__global__ void pcum_k(const float *g, float *cum, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float acc = 0;
+    for (int t = 0; t < CH; t++) cum[i * CH + t] = acc += g[i * CH + t];
+}
+
+/* the two triangles of every chunk, made of the products where they lie:
+   U [t][s] a token's key (times beta) with an earlier token's key, I [t][s]
+   its query with a key up to its own, each decayed from that token to this
+   one. A thread a (head, chunk, token, token) */
+__global__ void ptri_k(float *U, float *I, const float *beta, const float *cum, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t hc = i / (CH * CH);
+    int t = i / CH % CH, s = i % CH;
+    if (s > t) {  // a later token: none of it (I is multiplied whole)
+        I[i] = 0;
+        return;
+    }
+    float e = expf(cum[hc * CH + t] - cum[hc * CH + s]);
+    U[i] *= beta[hc * CH + t] * e;
+    I[i] *= e;
+}
+
+/* a chunk's unit triangular system solved for its two right sides, a block
+   a (head, chunk), a thread a column: what each token would write were the
+   state empty (from its value times beta, written where the value was), and
+   its key as the state at the chunk's start is read by it (kc, from its key
+   times beta, decayed from the chunk's start) */
+__global__ void psolve_k(const float *U, const float *k, float *v, const float *beta, const float *cum, float *kc) {
+    size_t hc = blockIdx.x;
+    int j = threadIdx.x;
+    const float *u = U + hc * CH * CH;
+    float a[CH], b[CH];
+    for (int t = 0; t < CH; t++) {
+        size_t at = (hc * CH + t) * LD + j;
+        float be = beta[hc * CH + t], x = v[at] * be, y = k[at] * be * expf(cum[hc * CH + t]);
+        for (int s = 0; s < t; s++) {
+            x -= u[t * CH + s] * a[s];
+            y -= u[t * CH + s] * b[s];
+        }
+        v[at] = a[t] = x;
+        kc[at] = b[t] = y;
+    }
+}
+
+/* queries decayed from their chunk's start and keys decayed to its end, where they lie: a thread a (head, token, channel) */
+__global__ void pdecay_k(float *q, float *k, const float *cum, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    size_t ht = i / LD, hc = ht / CH;
+    q[i] *= expf(cum[ht]);
+    k[i] *= expf(cum[hc * CH + CH - 1] - cum[ht]);
+}
+
+/* a chunk's step between its products: what its tokens write, less what
+   the state at the chunk's start already says of their keys (nv, where it
+   lies), and the state decayed over the chunk. A thread an entry of either */
+__global__ void pstep_k(float *nv, const float *said, float *S, const float *cum, int chunk, int TP) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t a = (size_t)LH * CH * LD, b = (size_t)LH * LD * LD;
+    if (i < a) {
+        size_t h = i / (CH * LD), e = i % (CH * LD);
+        nv[(h * TP + (size_t)chunk * CH) * LD + e] -= said[i];
+    } else if (i < a + b) {
+        i -= a;
+        S[i] *= expf(cum[(i / (LD * LD)) * TP + (size_t)chunk * CH + CH - 1]);
+    }
+}
+
+/* gate_k for a shard's own tokens: the delta rule's output lies a head after another */
+__global__ void pgate_k(const float *out, int TP, const bf16 *lin, const float *w, bf16 *y) {
+    __shared__ float sh[4];
+    size_t r = blockIdx.x / LH;
+    int hd = blockIdx.x % LH, j = threadIdx.x;
+    float o = out[((size_t)hd * TP + r) * LD + j];
+    float ss = bsum(o * o, sh);
+    float hs = rbf(o * rsqrtf(ss * (1.f / LD) + EPS));
+    float z = bf2f(lin[r * LIN + LQKV + hd * LD + j]);
+    y[r * (LH * LD) + hd * LD + j] = f2bf(rbf(w[j] * hs) * (z * sigm(z)));
+}
+
+/* a linear-attention layer's last KS inputs of its convolution (what follows the shard reads them): [6144][KS], zeros before the first token */
+__global__ void ptaps_k(const bf16 *lin, int T, bf16 *conv) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= LQKV * KS) return;
+    int c = i / KS, t = T - KS + i % KS;
+    conv[i] = t < 0 ? 0 : lin[(size_t)t * LIN + c];
+}
+
+/* the queries of a run of tokens as the product with the keys takes them: a
+   head of the group after another, times the scaling. A thread a number */
+__global__ void prows_k(const bf16 *Qp, int g, int r0, int rows, float scaling, bf16 *Qr) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int each = NQ / NG;
+    if (i >= (size_t)each * rows * HD) return;
+    int e = i / ((size_t)rows * HD), n = i / HD % rows, c = i % HD;
+    Qr[i] = f2bf(bf2f(Qp[(((size_t)r0 + n) * NQ + g * each + e) * HD + c]) * scaling);
+}
+
+/* the softmax of a token over the tokens up to itself, a block a query row:
+   the weights written where the logits were (Lb [rows][keys]), none on a
+   later token */
+__global__ void causal_k(bf16 *Lb, int keys, int r0, int rows) {
+    __shared__ float sh[8];
+    bf16 *lb = Lb + (size_t)blockIdx.x * keys;
+    int c = threadIdx.x, own = r0 + blockIdx.x % rows + 1;  // the tokens it sees
+    float m = -INFINITY;
+    for (int i = c; i < own; i += HD) m = fmaxf(m, bf2f(lb[i]));
+    m = bmax(m, sh);
+    float sum = 0;
+    for (int i = c; i < own; i += HD) sum += expf(bf2f(lb[i]) - m);
+    float inv = 1.f / bsum(sum, sh);
+    for (int i = c; i < keys; i += HD) lb[i] = i < own ? f2bf(expf(bf2f(lb[i]) - m) * inv) : 0;
+}
+
+/* an attention layer's output for a run of tokens through the gate, a thread a number */
+__global__ void pcomb_k(const bf16 *Ya, const bf16 *lin, int LW, int g, int r0, int rows, bf16 *y) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    const int each = NQ / NG;
+    if (i >= (size_t)each * rows * HD) return;
+    int e = i / ((size_t)rows * HD), n = i / HD % rows, c = i % HD, hd = g * each + e;
+    size_t r = (size_t)r0 + n;
+    y[r * (NQ * HD) + hd * HD + c] = f2bf(bf2f(Ya[i]) * rbf(sigm(bf2f(lin[r * LW + hd * 2 * HD + HD + c]))));
+}
+
+/* columns of every row copied out a token after another: wide numbers from column col of lin's rows */
+__global__ void pcols_k(const bf16 *lin, int LW, int col, int wide, bf16 *out, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    out[i] = lin[(i / wide) * LW + col + i % wide];
+}
+
 // ---------------------------------------------------------------- unpacking a coded state
 
 struct Bin {  // where a coefficient's bin lies in a token's bytes, and half its step
@@ -692,10 +840,11 @@ struct Buf {
     size_t cap = 0;
 };
 
-enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_COUNT };
+enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_FDENSE, P_FDELTA, P_FATT, P_FREST, P_COUNT };
 static const char *PNAMES[P_COUNT] = {"setup", "norm", "dense", "conv", "delta: decay, state", "delta: products", "delta: solve", "gate", "swiglu", "qk", "alone", "cast",
                                       "attention products", "softmax", "combine", "readout", "out", "unpack: coefficients",
-                                      "unpack: product", "unpack: rows", "unpack: int8", "unpack: recurrent states"};
+                                      "unpack: product", "unpack: rows", "unpack: int8", "unpack: recurrent states", "prefill: dense",
+                                      "prefill: delta rule", "prefill: attention", "prefill: the rest"};
 
 struct F2 {
     File file;
@@ -1024,8 +1173,8 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
             const int own = li > 0;  // layer 0 reads the embeddings: its input projection is one for all shards
             if (!dense(c, L.Win, LIN, HID, x, own ? R : N, lin)) return false;
             lap(c, P_GEMM);
-            conv_k<<<R * LH, LD>>>(lin, own, PT(const bf16 *const *, li), st[0].conv_len, L.convw, d_src, N, L.negA, L.dtb, X, (float *)c->v.p,
-                                   (float *)c->beta.p, (float *)c->g.p);
+            conv_k<<<R * LH, LD>>>(lin, own, PT(const bf16 *const *, li), st[0].conv_len, L.convw, d_src, N, L.negA, L.dtb, X, nullptr, nullptr,
+                                   (float *)c->v.p, (float *)c->beta.p, (float *)c->g.p, N);
             lap(c, P_CONV);
             cum_k<<<(BH + 127) / 128, 128>>>((float *)c->g.p, N, same, d_start, (float *)c->cum.p, BH);
             state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, LAYERS + li), S, (size_t)BH * LD * LD);
@@ -1222,6 +1371,158 @@ static bool unpack(F2 *c, const F2Packed *p) {
 int f2_unpack(F2 *c, const F2Packed *p) {
     std::lock_guard<std::mutex> lock(c->one);
     return unpack(c, p) ? 0 : -1;
+}
+
+/* device memory held for one call */
+struct Held {
+    std::vector<void *> all;
+    ~Held() {
+        for (void *p : all) cudaFree(p);
+    }
+    void *get(size_t bytes, bool zero = false) {
+        void *p = nullptr;
+        if (cudaMalloc(&p, bytes ? bytes : 8) != cudaSuccess) return nullptr;
+        all.push_back(p);
+        if (zero) cudaMemsetAsync(p, 0, bytes);
+        return p;
+    }
+};
+
+#define RUN 1024  // the tokens of a shard whose attention over the shard is worked out together
+
+/* A shard's prompt run through the layers, the whole of it a layer at a
+   time (the model's own forward takes it in runs of tokens with a cache
+   between; what a token comes to is the same, since it sees only what is
+   before it). Its memory is the call's own and is given back at its end */
+static bool prefill(F2 *c, const F2Fill *f) {
+    const int T = f->tokens, TP = (T + CH - 1) / CH * CH, NC = TP / CH, each = NQ / NG;
+    if (T < 1) return fail("a shard of no tokens", T);
+    cudaGetLastError();
+    c->mark = now();
+    Held m;
+    const size_t HT = (size_t)LH * TP;
+    // the row's shape: the embeddings, the rotary angles of places 0.., each token's convolution inputs
+    std::vector<bf16> emb((size_t)T * HID);
+    std::vector<float> fl((size_t)T * 64);
+    std::vector<int> src((size_t)T * KS);
+    for (int t = 0; t < T; t++) {
+        memcpy(&emb[(size_t)t * HID], c->embed + (size_t)f->ids[t] * HID, HID * 2);
+        for (int j = 0; j < 32; j++) {
+            float ang = (float)t * c->invf[j];
+            fl[(size_t)t * 32 + j] = rbf(cosf(ang));
+            fl[((size_t)T + t) * 32 + j] = rbf(sinf(ang));
+        }
+        for (int j = 0; j < KS; j++) src[(size_t)t * KS + j] = t + j;  // KS - 1 + (t - (KS - 1) + j): below KS - 1, before the shard
+    }
+    bf16 *d_emb = (bf16 *)m.get(emb.size() * 2), *zeros = (bf16 *)m.get((size_t)LQKV * (KS - 1) * 2, true);
+    float *d_cs = (float *)m.get(fl.size() * 4);
+    int *d_src = (int *)m.get(src.size() * 4);
+    const bf16 **tab = (const bf16 **)m.get(8);
+    bf16 *h = (bf16 *)m.get((size_t)T * HID * 2), *x = (bf16 *)m.get((size_t)T * HID * 2), *o = (bf16 *)m.get((size_t)T * HID * 2),
+         *lin = (bf16 *)m.get((size_t)T * LIN * 2), *y = (bf16 *)m.get((size_t)T * 2048 * 2), *act = (bf16 *)m.get((size_t)T * MLP * 2);
+    float *q = (float *)m.get(HT * LD * 4, true), *k = (float *)m.get(HT * LD * 4, true), *v = (float *)m.get(HT * LD * 4, true),
+          *kc = (float *)m.get(HT * LD * 4), *out = (float *)m.get(HT * LD * 4), *nv = v /* a token's write, where its value was */,
+          *beta = (float *)m.get(HT * 4, true), *g = (float *)m.get(HT * 4, true), *cum = (float *)m.get(HT * 4),
+          *U = (float *)m.get(HT * CH * 4), *I = (float *)m.get(HT * CH * 4), *S = (float *)m.get((size_t)LH * LD * LD * 4),
+          *said = (float *)m.get((size_t)LH * CH * LD * 4);
+    bf16 *Qp = (bf16 *)m.get((size_t)T * NQ * HD * 2), *Ko = (bf16 *)m.get((size_t)T * NG * HD * 2), *Qr = (bf16 *)m.get((size_t)each * RUN * HD * 2),
+         *Lb = (bf16 *)m.get((size_t)each * RUN * T * 2), *Ya = (bf16 *)m.get((size_t)each * RUN * HD * 2);
+    if (!d_emb || !zeros || !d_cs || !d_src || !tab || !h || !x || !o || !lin || !y || !act || !q || !k || !v || !kc || !out || !beta || !g ||
+        !cum || !U || !I || !S || !said || !Qp || !Ko || !Qr || !Lb || !Ya)
+        return fail("out of memory for a prefill", T);
+    CU(cudaMemcpy(d_emb, emb.data(), emb.size() * 2, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(d_cs, fl.data(), fl.size() * 4, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(d_src, src.data(), src.size() * 4, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(tab, &zeros, 8, cudaMemcpyHostToDevice));
+    const float *d_sn = d_cs + (size_t)T * 32;
+    const float one = 1, zero = 0, scaling = 0.0625f;
+    const bf16 *add = nullptr;
+    lap(c, P_FREST);
+    for (int li = 0; li < LAYERS; li++) {
+        Layer &L = c->layer[li];
+        norm_k<<<T, 256>>>(h, add, li == 0 ? d_emb : nullptr, T, L.n1, x);
+        lap(c, P_FREST);
+        if (L.linear) {
+            if (!dense(c, L.Win, LIN, HID, x, T, lin)) return false;
+            lap(c, P_FDENSE);
+            ptaps_k<<<(LQKV * KS + 255) / 256, 256>>>(lin, T, (bf16 *)f->conv[li]);
+            conv_k<<<(size_t)T * LH, LD>>>(lin, 1, tab, KS - 1, L.convw, d_src, T, L.negA, L.dtb, nullptr, q, k, v, beta, g, TP);
+            lap(c, P_FREST);
+            // every chunk's own part: the decays, the two triangles, the system solved
+            pcum_k<<<(LH * NC + 255) / 256, 256>>>(g, cum, (size_t)LH * NC);
+            BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, CH, CH, LD, &one, k, LD, CH * LD, k, LD, CH * LD, &zero, U, CH, CH * CH, LH * NC));
+            BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, CH, CH, LD, &one, k, LD, CH * LD, q, LD, CH * LD, &zero, I, CH, CH * CH, LH * NC));
+            ptri_k<<<(HT * CH + 255) / 256, 256>>>(U, I, beta, cum, HT * CH);
+            psolve_k<<<LH * NC, LD>>>(U, k, v, beta, cum, kc);
+            pdecay_k<<<(HT * LD + 255) / 256, 256>>>(q, k, cum, HT * LD);
+            CU(cudaMemsetAsync(S, 0, (size_t)LH * LD * LD * 4));
+            // the chunks in turn, each from the state the one before left
+            for (int ch = 0; ch < NC; ch++) {
+                const size_t at = (size_t)ch * CH * LD;
+                BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, LD, CH, LD, &one, S, LD, LD * LD, kc + at, LD, (long long)TP * LD, &zero,
+                                             said, LD, CH * LD, LH));
+                BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, LD, CH, LD, &one, S, LD, LD * LD, q + at, LD, (long long)TP * LD, &zero,
+                                             out + at, LD, (long long)TP * LD, LH));
+                pstep_k<<<((size_t)LH * CH * LD + (size_t)LH * LD * LD + 255) / 256, 256>>>(nv, said, S, cum, ch, TP);
+                BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, LD, CH, CH, &one, nv + at, LD, (long long)TP * LD, I + (size_t)ch * CH * CH,
+                                             CH, (long long)NC * CH * CH, &one, out + at, LD, (long long)TP * LD, LH));
+                BL(cublasSgemmStridedBatched(c->cb, CUBLAS_OP_N, CUBLAS_OP_T, LD, LD, CH, &one, nv + at, LD, (long long)TP * LD, k + at, LD,
+                                             (long long)TP * LD, &one, S, LD, LD * LD, LH));
+            }
+            CU(cudaMemcpyAsync(f->rec[li], S, (size_t)LH * LD * LD * 4, cudaMemcpyDeviceToDevice));
+            lap(c, P_FDELTA);
+            pgate_k<<<(size_t)T * LH, LD>>>(out, TP, lin, L.gw, y);
+            lap(c, P_FREST);
+            if (!dense(c, L.Wout, HID, LH * LD, y, T, o)) return false;
+            lap(c, P_FDENSE);
+        } else if (li != TOP) {
+            const int LW = NQ * 2 * HD + 2 * NG * HD, vcol = NQ * 2 * HD + NG * HD;
+            if (!dense(c, L.Win, LW, HID, x, T, lin)) return false;
+            lap(c, P_FDENSE);
+            qk_k<<<(size_t)T * (NQ + NG), HD>>>(lin, LW, T, NQ, 2 * HD, NQ * 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, Ko, nullptr, nullptr);
+            for (int gq = 0; gq < NG; gq++)
+                for (int r0 = 0; r0 < T; r0 += RUN) {
+                    const int rows = T - r0 < RUN ? T - r0 : RUN, keys = r0 + rows, qr = each * rows;
+                    prows_k<<<((size_t)qr * HD + 255) / 256, 256>>>(Qp, gq, r0, rows, scaling, Qr);
+                    BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, keys, qr, HD, &one, Ko + gq * HD, CUDA_R_16BF, NG * HD, Qr, CUDA_R_16BF, HD, &zero, Lb,
+                                    CUDA_R_16BF, keys, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+                    causal_k<<<qr, HD>>>(Lb, keys, r0, rows);
+                    BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, HD, qr, keys, &one, lin + vcol + gq * HD, CUDA_R_16BF, LW, Lb, CUDA_R_16BF, keys, &zero,
+                                    Ya, CUDA_R_16BF, HD, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+                    pcomb_k<<<((size_t)qr * HD + 255) / 256, 256>>>(Ya, lin, LW, gq, r0, rows, y);
+                }
+            if (li == MID) {
+                CU(cudaMemcpyAsync(f->k7, Ko, (size_t)T * NG * HD * 2, cudaMemcpyDeviceToDevice));
+                pcols_k<<<((size_t)T * NG * HD + 255) / 256, 256>>>(lin, LW, vcol, NG * HD, (bf16 *)f->v7, (size_t)T * NG * HD);
+            }
+            lap(c, P_FATT);
+            if (!dense(c, L.Wout, HID, NQ * HD, y, T, o)) return false;
+            lap(c, P_FDENSE);
+        } else {
+            // layer 11: its keys alone
+            const int LW = 2 * HD + NG * HD;
+            if (!dense(c, L.Win, LW, HID, x, T, lin)) return false;
+            qk_k<<<(size_t)T * (NG + NG), HD>>>(lin, LW, T, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, (bf16 *)f->k11, nullptr, nullptr);
+            lap(c, P_FDENSE);
+            break;
+        }
+        norm_k<<<T, 256>>>(h, o, nullptr, T, L.n2, x);
+        lap(c, P_FREST);
+        if (!dense(c, L.Wgu, 2 * MLP, HID, x, T, lin)) return false;
+        swiglu_k<<<((size_t)T * MLP + 255) / 256, 256>>>(lin, act, (size_t)T * MLP);
+        if (!dense(c, L.Wd, HID, MLP, act, T, o)) return false;
+        lap(c, P_FDENSE);
+        add = o;
+    }
+    CU(cudaStreamSynchronize(0));
+    CU(cudaGetLastError());
+    lap(c, P_FREST);
+    return true;
+}
+
+int f2_prefill(F2 *c, const F2Fill *f) {
+    std::lock_guard<std::mutex> lock(c->one);
+    return prefill(c, f) ? 0 : -1;
 }
 
 int f2_abi(void) { return F2_ABI; }

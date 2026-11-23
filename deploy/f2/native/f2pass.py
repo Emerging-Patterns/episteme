@@ -9,7 +9,7 @@ file, and the buffers of its passes; its calls take plain ints and ctypes
 arrays, so this module needs no tensor library."""
 import ctypes, os
 
-ABI = 2  # what f2pass.h calls F2_ABI: the layout of State and the calls' meaning
+ABI = 3  # what f2pass.h calls F2_ABI: the layout of State and the calls' meaning
 
 
 class State(ctypes.Structure):
@@ -33,6 +33,13 @@ class Packed(ctypes.Structure):
                 ("rec", ctypes.c_void_p * 12), ("conv_out", ctypes.c_void_p * 12)]
 
 
+class Fill(ctypes.Structure):
+    """F2Fill of f2pass.h"""
+    _fields_ = [("tokens", ctypes.c_int), ("ids", ctypes.POINTER(ctypes.c_int)),
+                ("k7", ctypes.c_void_p), ("v7", ctypes.c_void_p), ("k11", ctypes.c_void_p),
+                ("conv", ctypes.c_void_p * 12), ("rec", ctypes.c_void_p * 12)]
+
+
 INT8, HALF = 0, 1  # State.kind
 TOKENS = 4096  # the most tail tokens a pass may hold (MAXN)
 LIB = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libf2pass.so"))
@@ -44,6 +51,7 @@ LIB.f2_tail.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(State), ct
                         INTS, ctypes.POINTER(ctypes.c_float), ctypes.c_int]
 LIB.f2_book.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int] + [ctypes.c_void_p] * 7 + [ctypes.c_int, ctypes.c_int]
 LIB.f2_unpack.argtypes = [ctypes.c_void_p, ctypes.POINTER(Packed)]
+LIB.f2_prefill.argtypes = [ctypes.c_void_p, ctypes.POINTER(Fill)]
 LIB.f2_queries.restype = ctypes.c_long
 LIB.f2_queries.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
 LIB.f2_stop.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -77,6 +85,12 @@ class Pass:
         if LIB.f2_tail(self.ctx, len(states), arr, len(ids), ints(ids), ints(who), ints(at), same, len(lens), ints(lens), out, most):
             raise RuntimeError("the f2pass tail pass failed (its reason is on stderr)")
         return out
+
+    def prefill(self, fill):
+        """a shard's prompt (Fill: its tokens, and where what a state is made
+        of goes) run through the layers"""
+        if LIB.f2_prefill(self.ctx, ctypes.byref(fill)):
+            raise RuntimeError("the f2pass prefill failed (its reason is on stderr)")
 
     def queries(self, rows):
         """the last pass's queries as attention used them, two buffers of
