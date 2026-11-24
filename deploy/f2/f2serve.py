@@ -845,20 +845,25 @@ class Run:
         finally:
             with Turn():
                 ASKING.pop(self.serial, None)
-                if not ASKING:
-                    STAGED.clear()
+                for k in [k for k in STAGED if not any(k in r.need for r in ASKING.values())]:
+                    del STAGED[k]  # staged for this run alone, and it is done or has failed
         out = array.array("f")
         for i in range(len(self.shards)):
             out.extend(self.got[i])
         return out
 
-    def stage(self):
+    def stage(self, taken=()):
         """up to AHEAD of this run's next states the GPU lacks, staged for
-        it by the reader thread while it works"""
+        it by the reader thread while it works; none of taken, the shards
+        the pass being made has in hand already. A run's place in its order
+        lags while other runs lead the passes they share, and a state scored
+        in passing is never among the GPU's, so a run that leads again would
+        else stage what its pass has just unpacked, for nobody to take"""
         while len(STAGED) < AHEAD and self.ahead < len(self.order):
             k = self.order[self.ahead]
             self.ahead += 1
-            if k in self.need and k not in STAGED and k not in STATES.gpu and (k in STATES.ram or STATES.kept(k)):
+            if (k in self.need and k not in taken and k not in STAGED and k not in STATES.gpu
+                    and (k in STATES.ram or STATES.kept(k))):
                 STAGED[k] = STATES.prefetch(k)
 
     def turn(self):
@@ -880,13 +885,14 @@ class Run:
         keys = [first] + list(itertools.islice((k for k in mine if all(k in r.need for r in runs)), room - 1))
         among = frozenset(ASKING)
         later = frozenset().union(*(r.need.keys() for r in ASKING.values()))  # what a run being scored still reads, this pass's shards among them
-        batch = []
+        batch, taken = [], set()
         for k in keys:
-            self.stage()
+            self.stage(taken)
+            taken.add(k)
             where = k in STATES.gpu and "gpu" or k in STATES.ram and "ram" or STATES.kept(k) and "disk" or "prefill"
             state, null = STATES.get(k, self.shards[self.need[k][0]], later, STAGED.pop(k, None), self.serial, self.pool, among)
             batch.append((k, state, null, where))
-        self.stage()
+        self.stage(taken)
         for (k, _state, null, where), row in zip(batch, model.tail([b[1] for b in batch], qs)):
             for r in runs:
                 for i in r.need.pop(k):
