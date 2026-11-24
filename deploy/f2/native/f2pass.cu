@@ -1863,9 +1863,19 @@ static const int LINEAR[9] = {0, 1, 2, 4, 5, 6, 8, 9, 10};  // the linear-attent
 static size_t pad8(size_t n) { return (n + 7) & ~(size_t)7; }
 
 struct Parts {
-    size_t ids, span, tail, null, joint, at, rows, rms, left[9], right[9], rest[9], scale[9], conv[9];
+    size_t ids, span, tail, null, joint, at, rows, rms, left[9], right[9], scale[9], conv[9], rlen[9], rtab[9], rans;
     size_t k7, v7, k11, k7s, v7s, k11s, rec[9], end;
 };
+
+/* the recurrent rest's code (rANS, a byte at a time): a layer's table is the
+   16 codes' frequencies out of RM (u16 [16]) and then the bytes its rows' codes
+   take (u32); a row's code is its 128 codes, the first first, each byte
+   ahead of the ones decoding reads after it */
+#define RM_BITS 12
+#define RM (1u << RM_BITS)
+#define RL (1u << 23)  // the decoder's state stays at or above this
+#define RTAB 40        // a table's bytes
+#define ROWS (LH * LD)  // a layer's rows
 
 static Parts parts(const F2Head &h) {
     Parts p;
@@ -1882,8 +1892,9 @@ static Parts parts(const F2Head &h) {
         p.joint = take(T * h.bytes), p.at = take((size_t)h.exact * 4), p.rows = take((size_t)h.exact * 1536 * 2), p.rms = take(2 * T * 2);
         for (int l = 0; l < 9; l++) {
             p.left[l] = take((size_t)LH * LD * h.rank), p.right[l] = take((size_t)LH * h.rank * LD + (size_t)LH * h.rank * 4);
-            p.rest[l] = take((size_t)LH * LD * (LD / 2)), p.scale[l] = take((size_t)LH * LD * 2), p.conv[l] = take((size_t)LQKV * h.conv * 2);
+            p.scale[l] = take((size_t)LH * LD * 2), p.conv[l] = take((size_t)LQKV * h.conv * 2), p.rlen[l] = take(ROWS), p.rtab[l] = take(RTAB);
         }
+        p.rans = take(h.rans);
     } else {
         p.k7 = take(T * 512), p.v7 = take(T * 512), p.k11 = take(T * 512);
         p.k7s = take(512 * 4), p.v7s = take(2 * T * 4), p.k11s = take(512 * 4);
@@ -1894,8 +1905,8 @@ static Parts parts(const F2Head &h) {
 }
 
 static bool sound(const F2Head &h) {
-    return !memcmp(h.magic, "F2STATE2", 8) && (h.kind == 0 || h.kind == 1) && h.tokens > 0 && h.spans >= 0 && h.exact >= 0 && h.conv == CW &&
-           h.tail >= 0 && h.null >= 0 && (h.kind == 0 || (h.bytes > 0 && h.rank > 0));
+    return !memcmp(h.magic, "F2STATE3", 8) && (h.kind == 0 || h.kind == 1) && h.tokens > 0 && h.spans >= 0 && h.exact >= 0 && h.conv == CW &&
+           h.tail >= 0 && h.null >= 0 && h.rans >= 0 && (h.kind == 0 || (h.bytes > 0 && h.rank > 0));
 }
 
 long f2_packed_bytes(const F2Head *h) { return sound(*h) ? (long)parts(*h).end : -1; }
@@ -1919,12 +1930,12 @@ static Lay lay(const F2Head &h, bool int8) {
     const size_t T = h.tokens;
     if (int8) l.k7 = take(T * 512), l.v7 = take(T * 512), l.k11 = take(T * 512), l.k7s = take(512 * 4), l.v7s = take(2 * T * 4), l.k11s = take(512 * 4);
     else l.y = take(T * 1536 * 2);
-    if (h.kind == 1) {  // the packed state's recurrent parts and convolution states, copied as they lie there, in one piece
+    if (h.kind == 1) {  // the packed state's recurrent parts and convolution states, copied as they lie there, in one piece; the rests decoded
         const Parts p = parts(h);
-        l.low = take(p.end - p.left[0]);
+        l.low = take(p.rans - p.left[0]);
         for (int i = 0; i < 9; i++)
-            l.left[i] = l.low + p.left[i] - p.left[0], l.right[i] = l.low + p.right[i] - p.left[0], l.rest[i] = l.low + p.rest[i] - p.left[0],
-            l.scale[i] = l.low + p.scale[i] - p.left[0], l.conv[i] = l.low + p.conv[i] - p.left[0];
+            l.left[i] = l.low + p.left[i] - p.left[0], l.right[i] = l.low + p.right[i] - p.left[0], l.scale[i] = l.low + p.scale[i] - p.left[0],
+            l.conv[i] = l.low + p.conv[i] - p.left[0], l.rest[i] = take((size_t)ROWS * (LD / 2));
     } else
         for (int i = 0; i < 9; i++) l.rec[i] = take((size_t)LH * LD * LD * 2), l.conv[i] = take((size_t)LQKV * h.conv * 2);
     l.end = at;
@@ -1932,6 +1943,109 @@ static Lay lay(const F2Head &h, bool int8) {
 }
 
 long f2_unpacked_bytes(const F2Head *h, int keep) { return sound(*h) ? (long)lay(*h, keep || h->kind == 0).end : -1; }
+
+/* where a staged state's rests are and where they go decoded */
+struct Rans {
+    const uint8_t *lens[9], *tab[9], *data;
+    uint8_t *out[9];
+};
+
+/* a head's rows' rests decoded, a block a (layer, head) and a thread a row:
+   where the head's codes start (the layer's after the earlier layers', and
+   its earlier rows' lengths summed), its rows' places by a scan of their
+   lengths, each row's 128 codes in turn into today's form, four bits a
+   code, two a byte, the low half first */
+__global__ void rans_k(Rans a) {
+    __shared__ unsigned sum[LD];
+    __shared__ unsigned short freq[16], cum[17];
+    __shared__ unsigned char sym[RM];
+    __shared__ size_t base;
+    const int L = blockIdx.x / LH, hd = blockIdx.x % LH, t = threadIdx.x;
+    if (t < 16) freq[t] = ((const unsigned short *)a.tab[L])[t];
+    unsigned before = 0;  // the lengths of the layer's rows before this head's, a share a thread
+    for (int r = t; r < hd * LD; r += LD) before += a.lens[L][r];
+    sum[t] = before;
+    __syncthreads();
+    for (int d = LD / 2; d > 0; d >>= 1) {
+        if (t < d) sum[t] += sum[t + d];
+        __syncthreads();
+    }
+    if (t == 0) {
+        size_t b = sum[0];
+        for (int i = 0; i < L; i++) b += *(const uint32_t *)(a.tab[i] + 32);
+        base = b;
+        cum[0] = 0;
+        for (int i = 0; i < 16; i++) cum[i + 1] = cum[i] + freq[i];
+    }
+    __syncthreads();
+    const int row = hd * LD + t;
+    const unsigned len = a.lens[L][row];
+    sum[t] = len;
+    __syncthreads();
+    for (int d = 1; d < LD; d <<= 1) {  // inclusive scan of the head's rows' lengths
+        unsigned x = t >= d ? sum[t - d] : 0;
+        __syncthreads();
+        sum[t] += x;
+        __syncthreads();
+    }
+    for (int slot = t; slot < RM; slot += LD) {
+        int k = 0;
+        while (cum[k + 1] <= slot) k++;
+        sym[slot] = (unsigned char)k;
+    }
+    __syncthreads();
+    const uint8_t *p = a.data + base + sum[t] - len;
+    uint32_t x = (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+    p += 4;
+    uint8_t *o = a.out[L] + (size_t)row * (LD / 2);
+    unsigned lo = 0;
+    for (int j = 0; j < LD; j++) {
+        const unsigned slot = x & (RM - 1), k = sym[slot];
+        x = freq[k] * (x >> RM_BITS) + slot - cum[k];
+        while (x < RL) x = x << 8 | *p++;
+        if (j & 1) o[j >> 1] = (uint8_t)(lo | k << 4);
+        else lo = k;
+    }
+}
+
+/* a layer's rests coded (on the host): rest [ROWS][LD / 2] in today's form;
+   the table (RTAB bytes), each row's length and the rows' codes one after
+   another to out. The frequencies are the codes' counts scaled to RM, every
+   code that occurs at least 1 */
+static void rans_code(const uint8_t *rest, uint8_t *tab, uint8_t *lens, std::vector<uint8_t> &out) {
+    long count[16] = {0};
+    for (size_t i = 0; i < (size_t)ROWS * (LD / 2); i++) count[rest[i] & 15]++, count[rest[i] >> 4]++;
+    const long total = (long)ROWS * LD;
+    unsigned freq[16], cum[17], top = 0;
+    long given = 0;
+    for (int k = 0; k < 16; k++) {
+        freq[k] = count[k] ? std::max<long>(1, (long)((double)count[k] * RM / total + 0.5)) : 0;
+        given += freq[k];
+        if (count[k] > count[top]) top = k;
+    }
+    freq[top] = (unsigned)((long)freq[top] + (long)RM - given);  // the most common code takes up the rounding
+    cum[0] = 0;
+    for (int k = 0; k < 16; k++) cum[k + 1] = cum[k] + freq[k];
+    memset(tab, 0, RTAB);
+    for (int k = 0; k < 16; k++) ((uint16_t *)tab)[k] = (uint16_t)freq[k];
+    const size_t start = out.size();
+    uint8_t buf[256];
+    for (int r = 0; r < ROWS; r++) {
+        uint8_t *ptr = buf + sizeof buf;
+        uint32_t x = RL;
+        for (int j = LD - 1; j >= 0; j--) {
+            const unsigned k = (rest[(size_t)r * (LD / 2) + (j >> 1)] >> ((j & 1) * 4)) & 15;
+            const uint32_t most = ((RL >> RM_BITS) << 8) * freq[k];
+            while (x >= most) *--ptr = (uint8_t)(x & 255), x >>= 8;
+            x = ((x / freq[k]) << RM_BITS) + (x % freq[k]) + cum[k];
+        }
+        ptr -= 4;
+        ptr[0] = (uint8_t)x, ptr[1] = (uint8_t)(x >> 8), ptr[2] = (uint8_t)(x >> 16), ptr[3] = (uint8_t)(x >> 24);
+        lens[r] = (uint8_t)(buf + sizeof buf - ptr);
+        out.insert(out.end(), ptr, buf + sizeof buf);
+    }
+    *(uint32_t *)(tab + 32) = (uint32_t)(out.size() - start);
+}
 
 struct Dev {  // an unpacked state
     void *block = nullptr;
@@ -2070,7 +2184,11 @@ static long take(F2 *c, long ticket, int keep) {
             u.tokens = h.tokens, u.kept = int8, u.exact = h.exact;
             u.joint = s + p.joint, u.at = (const int *)(s + p.at), u.rows = s + p.rows, u.rms = s + p.rms;
             u.cos = (const float *)c->cosb.p, u.sin = (const float *)c->sinb.p;
-            CU(cudaMemcpyAsync(b + l.low, s + p.left[0], p.end - p.left[0], cudaMemcpyDeviceToDevice));  // before unpack's synchronize
+            CU(cudaMemcpyAsync(b + l.low, s + p.left[0], p.rans - p.left[0], cudaMemcpyDeviceToDevice));  // before unpack's synchronize
+            Rans ra;
+            for (int i = 0; i < 9; i++) ra.lens[i] = (const uint8_t *)s + p.rlen[i], ra.tab[i] = (const uint8_t *)s + p.rtab[i], ra.out[i] = (uint8_t *)b + l.rest[i];
+            ra.data = (const uint8_t *)s + p.rans;
+            rans_k<<<9 * LH, LD>>>(ra);
             if (int8) u.k7 = b + l.k7, u.v7 = b + l.v7, u.k11 = b + l.k11, u.k7_scale = (float *)(b + l.k7s), u.v7_scale = (float *)(b + l.v7s), u.k11_scale = (float *)(b + l.k11s);
             else u.y = b + l.y;
             if (!unpack(c, &u)) return false;
@@ -2446,7 +2564,7 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
     c->mark = now();
     F2Head h;
     memset(&h, 0, sizeof h);
-    memcpy(h.magic, "F2STATE2", 8);
+    memcpy(h.magic, "F2STATE3", 8);
     h.kind = c->K ? 1 : 0, h.tokens = T, h.spans = spans, h.bytes = c->K ? c->bytes : 0, h.rank = c->K ? c->rank : 0, h.conv = CW, h.tail = tail_bytes, h.null = null;
     char *out = (char *)blob;
     auto pack = [&]() -> bool {
@@ -2477,6 +2595,14 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
             for (int t = 0; t < T; t++)
                 if (e[t] > cutoff) at.push_back(t);
             h.exact = (int)at.size();
+            // the recurrent states first: the rests' codes say how long the state is
+            std::vector<int8_t> left(M * LD * c->rank), right(M * c->rank * LD);
+            std::vector<float> fs(M * c->rank);
+            std::vector<uint16_t> scale(M * LD);
+            std::vector<uint8_t> rest(M * LD * (LD / 2)), tabs(9 * RTAB), lens(9 * ROWS), codes;
+            if (!lowrank(c, m, A, left.data(), right.data(), fs.data(), rest.data(), scale.data())) return false;
+            for (int i = 0; i < 9; i++) rans_code(&rest[(size_t)i * ROWS * (LD / 2)], &tabs[i * RTAB], &lens[i * ROWS], codes);
+            h.rans = (int)codes.size();
             const Parts p = parts(h);
             if ((long)p.end > room) return fail("no room for the packed state", (int)(p.end >> 20));
             memset(out, 0, p.end);
@@ -2491,20 +2617,17 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
             }
             CU(cudaMemcpy(out + p.joint, pk, (size_t)T * c->bytes, cudaMemcpyDeviceToHost));
             CU(cudaMemcpy(out + p.rms, rmsh, (size_t)2 * T * 2, cudaMemcpyDeviceToHost));
-            std::vector<int8_t> left(M * LD * c->rank), right(M * c->rank * LD);
-            std::vector<float> fs(M * c->rank);
-            std::vector<uint16_t> scale(M * LD);
-            std::vector<uint8_t> rest(M * LD * (LD / 2));
-            if (!lowrank(c, m, A, left.data(), right.data(), fs.data(), rest.data(), scale.data())) return false;
             for (int i = 0; i < 9; i++) {
                 const size_t a = (size_t)i * LH;
                 memcpy(out + p.left[i], &left[a * LD * c->rank], (size_t)LH * LD * c->rank);
                 memcpy(out + p.right[i], &right[a * c->rank * LD], (size_t)LH * c->rank * LD);
                 memcpy(out + p.right[i] + (size_t)LH * c->rank * LD, &fs[a * c->rank], (size_t)LH * c->rank * 4);
-                memcpy(out + p.rest[i], &rest[a * LD * (LD / 2)], (size_t)LH * LD * (LD / 2));
                 memcpy(out + p.scale[i], &scale[a * LD], (size_t)LH * LD * 2);
                 CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * CW, (size_t)LQKV * CW * 2, cudaMemcpyDeviceToHost));
+                memcpy(out + p.rlen[i], &lens[(size_t)i * ROWS], ROWS);
+                memcpy(out + p.rtab[i], &tabs[(size_t)i * RTAB], RTAB);
             }
+            memcpy(out + p.rans, codes.data(), codes.size());
             memcpy(out + p.ids, ids, (size_t)T * 4);
             memcpy(out + p.span, span, (size_t)spans * 8);
             memcpy(out + p.tail, tail, tail_bytes);

@@ -8,17 +8,18 @@ whole of it): a file's, the host's, the same. Its calls take plain ints,
 bytes and ctypes arrays, so this module needs no tensor library."""
 import array, ctypes, os
 
-ABI = 8  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
+ABI = 9  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
 
 
 class Head(ctypes.Structure):
     """F2Head of f2pass.h: a packed state's first 64 bytes"""
     _fields_ = [("magic", ctypes.c_char * 8), ("kind", ctypes.c_int), ("tokens", ctypes.c_int), ("spans", ctypes.c_int),
                 ("exact", ctypes.c_int), ("bytes", ctypes.c_int), ("rank", ctypes.c_int), ("conv", ctypes.c_int),
-                ("tail", ctypes.c_int), ("null", ctypes.c_int), ("unused", ctypes.c_int * 5)]
+                ("tail", ctypes.c_int), ("null", ctypes.c_int), ("rans", ctypes.c_int),
+                ("unused", ctypes.c_int * 4)]
 
 
-MAGIC = b"F2STATE2"
+MAGIC = b"F2STATE3"
 TOKENS = 4096  # the most tail tokens a pass may hold (MAXN)
 LIB = ctypes.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), "libf2pass.so"))
 assert LIB.f2_abi() == ABI, "libf2pass.so was built for another f2pass.py"
@@ -130,8 +131,8 @@ class Pass:
         """a shard read for the first time: its packed state (a bytearray),
         with room for a score a paragraph (zeros)"""
         h = Head(MAGIC, 1 if LIB.f2_book_bytes(self.ctx) else 0, len(ids), len(spans), len(ids) // 8 + 8, LIB.f2_book_bytes(self.ctx), 64, 3,
-                 len(tail), len(spans))
-        room = packed_bytes(h)  # at the most tokens a state keeps exact, a rank no book has, and the convolution's inputs kept
+                 len(tail), len(spans), 9 * 2048 * 200)
+        room = packed_bytes(h)  # at the most tokens a state keeps exact, a rank no book has, the convolution's inputs kept, a rest's longest code
         blob = bytearray(room)
         n = LIB.f2_read(self.ctx, len(ids), ints(ids), len(spans), ints([x for s in spans for x in s]), tail, len(tail), len(spans),
                         (ctypes.c_char * room).from_buffer(blob), room)
