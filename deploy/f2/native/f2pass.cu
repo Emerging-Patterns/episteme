@@ -731,18 +731,22 @@ struct Bin {  // where a coefficient's bin lies in a token's bytes, and half its
 static __device__ __forceinline__ float h2f(__half a) { return __half2float(a); }
 static __device__ __forceinline__ float rh(float x) { return __half2float(__float2half(x)); }
 
-/* a token's coefficients from its bytes, a thread a (token, coefficient): a
-   bin is at most eight bits, so it is in the two bytes from its first bit's
-   on; its middle is (twice its number less odd) half steps */
-__global__ void coef_k(const uint8_t *joint, int bytes, const Bin *bin, int K, __half *C, size_t n) {
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    size_t t = i / K;
-    Bin b = bin[i % K];
-    const uint8_t *p = joint + t * bytes + b.lo;
-    unsigned two = ((unsigned)p[0] | (b.lo + 1 < bytes ? (unsigned)p[1] << 8 : 0u)) << 1;
-    int m = (int)((two >> b.shift) & (unsigned)b.mask2) - b.odd;
-    C[i] = __float2half((float)m * __half2float(b.halfstep));
+/* a token's coefficients from its bytes, a block a token (its bytes read
+   once into shared memory), a thread a coefficient in turn: a bin is at
+   most eight bits, so it is in the two bytes from its first bit's on; its
+   middle is (twice its number less odd) half steps */
+__global__ void coef_k(const uint8_t *joint, int bytes, const Bin *bin, int K, __half *C) {
+    extern __shared__ uint8_t tb[];
+    const size_t t = blockIdx.x;
+    for (int i = threadIdx.x; i < bytes; i += blockDim.x) tb[i] = joint[t * bytes + i];
+    __syncthreads();
+    __half *out = C + t * K;
+    for (int j = threadIdx.x; j < K; j += blockDim.x) {
+        const Bin b = bin[j];
+        unsigned two = ((unsigned)tb[b.lo] | (b.lo + 1 < bytes ? (unsigned)tb[b.lo + 1] << 8 : 0u)) << 1;
+        int m = (int)((two >> b.shift) & (unsigned)b.mask2) - b.odd;
+        out[j] = __float2half((float)m * __half2float(b.halfstep));
+    }
 }
 
 /* a row as the model holds it, from the row the book gives: the keys'
@@ -766,12 +770,14 @@ static __device__ __forceinline__ void finish(__half *row, int col, const __half
     row[col] = __float2half(key ? a : a * (blk == 2 ? rms0 : rms1));
 }
 
-/* every row finished where the product left it, a thread a (token, place) */
-__global__ void rows_k(__half *y, const __half *mean, const __half *rms, const float *cos, const float *sin, int T, size_t n) {
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    size_t t = i / 1536;
-    finish(y + t * 1536, i % 1536, y + t * 1536, mean, cos + t * 64, sin + t * 64, __half2float(rms[t]), __half2float(rms[T + t]));
+/* every row finished where the product left it, a block a token, a thread
+   a place in each of its six heads of 256 in turn (so that a warp is all
+   keys or all values) */
+__global__ void rows_k(__half *y, const __half *mean, const __half *rms, const float *cos, const float *sin, int T) {
+    const size_t t = blockIdx.x;
+    __half *row = y + t * 1536;
+    const float r0 = __half2float(rms[t]), r1 = __half2float(rms[T + t]);
+    for (int col = threadIdx.x; col < 1536; col += 256) finish(row, col, row, mean, cos + t * 64, sin + t * 64, r0, r1);
 }
 
 /* the tokens kept exact: their rows as they were kept, finished the same way, over what the book gave */
@@ -1567,7 +1573,7 @@ static bool unpack(F2 *c, const F2Packed *p) {
     const size_t n = (size_t)T * 1536;
     if (!room(c->C, (size_t)T * K * 2) || (p->kept && !room(c->Y, n * 2)) || !room(c->us, 4 * 256 * 4 + 7 * LAYERS * 8)) return false;
     __half *C = (__half *)c->C.p, *y = (__half *)(p->kept ? c->Y.p : p->y);
-    coef_k<<<((size_t)T * K + 255) / 256, 256>>>((const uint8_t *)p->joint, c->bytes, c->bin, K, C, (size_t)T * K);
+    coef_k<<<T, 256, c->bytes>>>((const uint8_t *)p->joint, c->bytes, c->bin, K, C);
     lap(c, P_UCOEF);
     // rows [T][1536] = coefficients [T][K] times the book's [K][1536], the sums in half precision: the card's tensor
     // cores sum halves twice as fast as floats, and the rows are halves either way. It moves a shard's scores by about
@@ -1576,7 +1582,7 @@ static bool unpack(F2 *c, const F2Packed *p) {
     BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, 1536, T, K, &one16, c->back, CUDA_R_16F, 1536, C, CUDA_R_16F, K, &zero16, y, CUDA_R_16F, 1536,
                     CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
     lap(c, P_UGEMM);
-    rows_k<<<(n + 255) / 256, 256>>>(y, c->mean, (const __half *)p->rms, p->cos, p->sin, T, n);
+    rows_k<<<T, 256>>>(y, c->mean, (const __half *)p->rms, p->cos, p->sin, T);
     if (p->exact)
         exact_k<<<((size_t)p->exact * 1536 + 255) / 256, 256>>>(y, p->at, (const __half *)p->rows, (const __half *)p->rms, p->cos, p->sin, T,
                                                                   (size_t)p->exact * 1536);
