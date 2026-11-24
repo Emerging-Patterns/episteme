@@ -13,7 +13,7 @@ typedef struct F2 F2;
 
 /* the meaning of the calls below and the layout of a packed state: a caller
    built for another number must not call */
-#define F2_ABI 8
+#define F2_ABI 9
 int f2_abi(void);
 
 /* When the device has no room for a call (f2_read, f2_stage, f2_take,
@@ -41,20 +41,27 @@ void f2_close(F2 *);
    [bytes]), the tokens kept exact (int32 [exact]) and their rows (halves
    [exact][1536]), the values' root mean squares (halves [2][tokens]), and
    for each linear-attention layer in turn its recurrent states as a
-   low-rank product and the rest (int8 [16][128][rank]; int8 [16][rank]
-   [128] and then each singular pair's scale, fp32 [16][rank], the product
-   of its two vectors' scales; u8 [16][128][64] of four bits an entry;
-   halves [16][128]) and its convolution states (bf16 [6144][conv], conv
-   3: the last inputs, all the tail reads of them).
+   low-rank product (int8 [16][128][rank]; int8 [16][rank][128] and then
+   each singular pair's scale, fp32 [16][rank], the product of its two
+   vectors' scales), the rest's row scales (halves [16][128]), its
+   convolution states (bf16 [6144][conv], conv 3: the last inputs, all the
+   tail reads of them), and its rest's code: each row's bytes (u8 [2048])
+   and the table (u16 [16], the codes' frequencies out of 4096, then u32
+   the layer's bytes; 40 bytes). Last, rans bytes: every row's rest, a
+   layer after another, its 128 codes of four bits (-7..7 plus 7, over
+   the row's scale) coded by rANS, a byte at a time, against its layer's
+   table; the device decodes them to four bits an entry as the state
+   arrives.
 
    kind 0, with no book: layer 7's keys and values and layer 11's keys as
    int8 ([tokens][2][256] each), their scales (fp32: keys [2][256], values
    [2][tokens], keys [2][256]), and for each linear-attention layer its
    recurrent states (bf16 [16][128][128]) and its convolution states. */
 typedef struct {
-    char magic[8]; /* "F2STATE2" */
+    char magic[8]; /* "F2STATE3" */
     int kind, tokens, spans, exact, bytes, rank, conv, tail, null;
-    int unused[5];
+    int rans; /* the bytes of the rests' codes (kind 1), else 0 */
+    int unused[4];
 } F2Head;
 
 /* how many bytes a state of that header takes packed, and unpacked on the

@@ -24,8 +24,8 @@ def book_id(path):
 
 
 BOOK_ID = book_id(BOOK_PATH)
-PLAIN = "12|11:2.0|%s|v8" % DIR  # what a state kept with no book depends on
-VERSION = PLAIN if BOOK_ID is None else "12|11:2.0|%s|v8|%s" % (DIR, BOOK_ID)  # what a kept state depends on
+PLAIN = "12|11:2.0|%s|v9" % DIR  # what a state kept with no book depends on
+VERSION = PLAIN if BOOK_ID is None else "12|11:2.0|%s|v9|%s" % (DIR, BOOK_ID)  # what a kept state depends on
 
 
 def book(path):
