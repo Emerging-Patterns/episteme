@@ -2417,6 +2417,13 @@ void f2_words(int n, const int *at, const int *tf, const double *under, double i
 }
 
 
+void f2_less(int n, const float *row, const float *null, const float *root, float *out) {
+    for (int i = 0; i < n; i++) {
+        const float less = row[i] - null[i];
+        out[i] = less / root[i];
+    }
+}
+
 void f2_fuse(int n, const double *bm, const float *att, const int *of, double weight, double neighbour, double shard, int *order) {
     std::vector<double> fused(n), near(n);
     auto z = [&](auto get, double scale) {  // over the run's mean and deviation

@@ -928,8 +928,7 @@ class Run:
         for (k, _state, null, where), row in zip(batch, model.tail([b[1] for b in batch], qs)):
             for r in runs:
                 for i in r.need.pop(k):
-                    less = array.array("f", [x - y for x, y in zip(row[qs.index(r.q)], null)])  # in single precision, step by step
-                    score = array.array("f", [x / y for x, y in zip(less, roots(r.shards[i]))])
+                    score = f2pass.less(row[qs.index(r.q)], null, roots(r.shards[i]))  # less the null, over the root: in single precision, step by step
                     r.got[i] = score
                     r.came[where] += 1
                     with META:

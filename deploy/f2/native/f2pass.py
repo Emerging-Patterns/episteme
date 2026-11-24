@@ -6,9 +6,9 @@ file, the book states are coded by, and the unpacked states themselves. A
 packed state is one run of bytes (Head says its layout; f2pass.h, the
 whole of it): a file's, the host's, the same. Its calls take plain ints,
 bytes and ctypes arrays, so this module needs no tensor library."""
-import ctypes, os
+import array, ctypes, os
 
-ABI = 5  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
+ABI = 6  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
 
 
 class Head(ctypes.Structure):
@@ -41,6 +41,7 @@ for name, res, args in (
         ("f2_queries", ctypes.c_long, [VOID, VOID, VOID, ctypes.c_long]),
         ("f2_raw", ctypes.c_int, [VOID, ctypes.c_int, INTS, VOID, VOID, VOID]),
         ("f2_words", None, [ctypes.c_int, VOID, VOID, VOID, ctypes.c_double, ctypes.POINTER(ctypes.c_double)]),
+        ("f2_less", None, [ctypes.c_int, VOID, VOID, VOID, VOID]),
         ("f2_fuse", None, [ctypes.c_int, ctypes.POINTER(ctypes.c_double), FLOATS, INTS, ctypes.c_double, ctypes.c_double, ctypes.c_double, INTS]),
         ("f2_stop", None, [VOID, ctypes.c_int]),
         ("f2_hidden", ctypes.c_int, [VOID, VOID, ctypes.c_long]),
@@ -78,6 +79,16 @@ def words(post, idf, out):
     each count is taken over, as arrays of ints, ints and doubles"""
     at, tf, under = post
     LIB.f2_words(len(at), at.buffer_info()[0], tf.buffer_info()[0], under.buffer_info()[0], idf, out)
+
+
+def less(row, null, root):
+    """a shard's scores for a question as the reader ranks by them
+    (f2_less), an array of floats: row less null, over root, a paragraph
+    each, in single precision; all three arrays of floats"""
+    n = min(len(row), len(null), len(root))
+    out = array.array("f", bytes(4 * n))
+    LIB.f2_less(n, row.buffer_info()[0], null.buffer_info()[0], root.buffer_info()[0], out.buffer_info()[0])
+    return out
 
 
 def fuse(bm, att, of, weight, neighbour, shard):
