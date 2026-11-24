@@ -13,7 +13,7 @@ typedef struct F2 F2;
 
 /* the meaning of the calls below and the layout of a packed state: a caller
    built for another number must not call */
-#define F2_ABI 4
+#define F2_ABI 5
 int f2_abi(void);
 
 /* the weights of layers 0..11 read from a safetensors file onto the device */
@@ -106,6 +106,14 @@ long f2_queries(F2 *, void *q7, void *q11, long rows);
    fitting of a book: what a state is made of, copied to the host: layer 7's
    keys and values and layer 11's keys (bf16 [tokens][2][256]). 0, or -1 */
 int f2_raw(F2 *, int tokens, const int *ids, void *k7, void *v7, void *k11);
+
+/* a word's share of BM25 summed into a run's paragraphs' word scores, on the
+   host: for each of the n paragraphs that hold the word (at, places in out;
+   tf, how often it holds it; under, what BM25 takes the count over there:
+   tf + 1.2 (0.25 + 0.75 length / mean length)), idf tf 2.2 / under, the
+   products and the quotient in that order, in doubles. Called once a word of
+   a question, by several questions' threads at once, each with its own out */
+void f2_words(int n, const int *at, const int *tf, const double *under, double idf, double *out);
 
 /* a run's paragraphs put in order, on the host: each one's fused score is
    its word score and weight times its attention score, each over the run's

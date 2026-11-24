@@ -2410,7 +2410,12 @@ int f2_raw(F2 *c, int T, const int *ids, void *k7, void *v7, void *k11) {
     return raw() ? 0 : -1;
 }
 
-// ---------------------------------------------------------------- a run's paragraphs put in order
+// ---------------------------------------------------------------- a run's paragraphs: their word scores, and their order
+
+void f2_words(int n, const int *at, const int *tf, const double *under, double idf, double *out) {
+    for (int j = 0; j < n; j++) out[at[j]] += idf * tf[j] * 2.2 / under[j];
+}
+
 
 void f2_fuse(int n, const double *bm, const float *att, const int *of, double weight, double neighbour, double shard, int *order) {
     std::vector<double> fused(n), near(n);
