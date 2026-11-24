@@ -46,7 +46,7 @@ from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
 import f2pass
 
-if f2pass.ABI != 5:  # the package in the environment was built from another version of native/
+if f2pass.ABI != 6:  # the package in the environment was built from another version of native/
     raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = 12  # layers 0..11
