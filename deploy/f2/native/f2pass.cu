@@ -149,10 +149,10 @@ static __host__ __device__ __forceinline__ bf16 f2bf(float x) {  // to nearest, 
 
 static __host__ __device__ __forceinline__ float rbf(float x) { return bf2f(f2bf(x)); }
 static __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + expf(-x)); }
-/* 16 bits that are a half or bf16: a half for a state scored in passing and
-   what is multiplied with it, and for what the dense products take and give
-   in a pass (x, lin, y, act, o: the kernels' H), so that those products sum
-   in halves; bf16 for those of a prefill */
+/* 16 bits that are a half or bf16: a half for what the dense products take
+   and give in a pass (x, lin, y, act, o: the kernels' H), so that those
+   products sum in halves; bf16 for those of a prefill */
+static __device__ __forceinline__ float h2f(bf16 w) { return __half2float(__ushort_as_half(w)); }
 static __device__ __forceinline__ float w2f(bf16 w, bool half) { return half ? __half2float(__ushort_as_half(w)) : bf2f(w); }
 static __device__ __forceinline__ bf16 f2w(float x, bool half) { return half ? __half_as_ushort(__float2half(x)) : f2bf(x); }
 
@@ -371,9 +371,8 @@ __global__ void swiglu_k(const bf16 *gu, bf16 *act, size_t n, bool H) {
    its root mean square times 1 + w, its rotary channels turned to the
    token's position. Qp [rows][nq][256] the queries, Ko [rows][2][256] the
    keys; Qs, when given, the queries as the product with a shard's keys
-   takes them, [shards][2][each x tokens][256]: times the scaling and, for
-   int8 keys, the keys' scale a channel (bf16); for keys in half precision,
-   halves */
+   takes them, [shards][2][each x tokens][256], halves: times the scaling
+   and, for int8 keys, the keys' scale a channel */
 __global__ void qk_k(const bf16 *lin, int LW, int N, int nq, int qstep, int kcol, const float *qn1, const float *kn1,
                      const float *cs, const float *sn, float scaling, bf16 *Qp, bf16 *Ko, bf16 *Qs, const float *const *kscale, bool H) {
     __shared__ float sh[8];
@@ -402,7 +401,7 @@ __global__ void qk_k(const bf16 *lin, int LW, int N, int nq, int qstep, int kcol
     if (Qs) {
         int each = nq / NG, gq = u / each, e = u % each;
         const float *ks = kscale[b * NG + gq];  // none: the shard's keys are halves, and so is what meets them
-        Qs[(((b * NG + gq) * each + e) * N + n) * HD + c] = f2w(ks ? val * scaling * rbf(ks[c]) : val * scaling, !ks);
+        Qs[(((b * NG + gq) * each + e) * N + n) * HD + c] = __half_as_ushort(__float2half(ks ? val * scaling * rbf(ks[c]) : val * scaling));
     }
 }
 
@@ -450,7 +449,7 @@ __global__ void alone_k(const bf16 *Qp, const bf16 *Ko, const bf16 *lin, int LW,
     y[r * (NQ * HD) + hd * HD + c] = f2w(rbf(acc) * rbf(sigm(gt)), H);
 }
 
-/* the int8 keys or values of every shard and head as bf16, the numbers as
+/* the int8 keys or values of every shard and head as halves, the numbers as
    they are, laid one (shard, head) after another: a row of blocks a (shard,
    head), which says where its numbers lie (src, step), how many tokens it
    has (T) and where its rows go (off, in tokens) */
@@ -460,7 +459,7 @@ __global__ void cast_k(const int8_t *const *src, const long *step, const int *T,
     if (i >= (size_t)T[sg] * HD) return;
     const int8_t *p = src[sg] + (i / HD) * step[sg] + i % HD;
     bf16 *o = out + (size_t)off[sg] * HD + i;
-    for (int e = 0; e < 4; e++) o[e] = f2bf((float)p[e]);
+    for (int e = 0; e < 4; e++) o[e] = __half_as_ushort(__float2half((float)p[e]));
 }
 
 /* layer 7's softmax, a block a query row (a head of the group by a token)
@@ -469,8 +468,9 @@ __global__ void cast_k(const int8_t *const *src, const long *step, const int *T,
    row's tokens it sees. The weights on the shard's tokens are written where
    the logits were, times the values' scale a token (so that the product
    with the int8 values is the product with the values; a shard whose
-   values are halves has no scales, and its logits and weights are halves);
-   those on the row's tokens go to wown [shard, group][rows][tokens] */
+   values are halves has no scales); those on the row's tokens go to wown
+   [shard, group][rows][tokens]. The logits and weights in Lb are halves,
+   as the products with the shards' keys and values take and give them */
 __global__ void soft_k(bf16 *Lb, const int *Ts, const int *off, const float *const *vscale, const bf16 *Qp, const bf16 *Ko, int N,
                        int same, const int *start, float scaling, float *wown) {
     __shared__ float sh[8];
@@ -481,18 +481,17 @@ __global__ void soft_k(bf16 *Lb, const int *Ts, const int *off, const float *con
     bf16 *lb = Lb + ((size_t)off[sg] * each * N + (size_t)row * T);
     const float *vs = vscale[sg];
     int L = own_logits(Qp + ((b * N + n) * NQ + g * each + e) * HD, Ko, b, g, n, N, same, start, scaling, lg);
-    const bool half = !vs;
     float m = -INFINITY;
-    for (int i = c; i < T; i += HD) m = fmaxf(m, w2f(lb[i], half));
+    for (int i = c; i < T; i += HD) m = fmaxf(m, h2f(lb[i]));
     for (int x = c; x < L; x += HD) m = fmaxf(m, lg[x]);
     m = bmax(m, sh);
     float sum = 0;
-    for (int i = c; i < T; i += HD) sum += expf(w2f(lb[i], half) - m);
+    for (int i = c; i < T; i += HD) sum += expf(h2f(lb[i]) - m);
     for (int x = c; x < L; x += HD) sum += expf(lg[x] - m);
     float inv = 1.f / bsum(sum, sh);
     for (int i = c; i < T; i += HD) {
-        float p = rbf(expf(w2f(lb[i], half) - m) * inv);
-        lb[i] = f2w(half ? p : p * rbf(vs[i]), half);
+        float p = rbf(expf(h2f(lb[i]) - m) * inv);
+        lb[i] = __half_as_ushort(__float2half(vs ? p * rbf(vs[i]) : p));
     }
     for (int x = c; x < L; x += HD) wown[((size_t)sg * each * N + row) * N + x] = rbf(expf(lg[x] - m) * inv);
 }
@@ -509,7 +508,7 @@ __global__ void comb_k(const bf16 *Ya, const float *const *vscale, const float *
     int e1 = n < same ? n + 1 : same, st = start[n];
     int L = e1 + (n >= same ? n - st + 1 : 0);
     const float *wo = wown + (bg * each * N + row) * N;
-    float acc = w2f(Ya[(bg * each * N + row) * HD + c], !vscale[bg]);
+    float acc = h2f(Ya[(bg * each * N + row) * HD + c]);
     for (int x = 0; x < L; x++) {
         int s = x < e1 ? x : st + (x - e1);
         acc += wo[x] * w2f(lin[(b * N + s) * LW + NQ * 2 * HD + NG * HD + g * HD + c], H);
@@ -521,21 +520,20 @@ __global__ void comb_k(const bf16 *Ya, const float *const *vscale, const float *
 /* layer 11's softmax, a block a token of a shard and group (a row of
    blocks each): the largest logit and one over the sum, over the shard's
    tokens and the row's it sees, into stat [shard, group][tokens][2] */
-__global__ void stat_k(const bf16 *Lb, const int *Ts, const int *off, const float *const *kscale, const bf16 *Qp, const bf16 *Ko, int N,
+__global__ void stat_k(const bf16 *Lb, const int *Ts, const int *off, const bf16 *Qp, const bf16 *Ko, int N,
                        int same, const int *start, float scaling, float *stat) {
     __shared__ float sh[8];
     __shared__ float lg[MAXN];
     int sg = blockIdx.y, g = sg % NG, T = Ts[sg], n = blockIdx.x, c = threadIdx.x;
     size_t b = sg / NG;
     const bf16 *lb = Lb + ((size_t)off[sg] * N + (size_t)n * T);
-    const bool half = !kscale[sg];
     int L = own_logits(Qp + ((b * N + n) * NG + g) * HD, Ko, b, g, n, N, same, start, scaling, lg);
     float m = -INFINITY;
-    for (int i = c; i < T; i += HD) m = fmaxf(m, w2f(lb[i], half));
+    for (int i = c; i < T; i += HD) m = fmaxf(m, h2f(lb[i]));
     for (int x = c; x < L; x += HD) m = fmaxf(m, lg[x]);
     m = bmax(m, sh);
     float sum = 0;
-    for (int i = c; i < T; i += HD) sum += expf(w2f(lb[i], half) - m);
+    for (int i = c; i < T; i += HD) sum += expf(h2f(lb[i]) - m);
     for (int x = c; x < L; x += HD) sum += expf(lg[x] - m);
     sum = bsum(sum, sh);
     if (c == 0) {
@@ -548,7 +546,7 @@ __global__ void stat_k(const bf16 *Lb, const int *Ts, const int *off, const floa
    summed, into mass [shard][questions][TM]: a thread a (question, token of
    the shard), a row of blocks a shard, over the rows of the question that
    are read (rows [first, first + count)) */
-__global__ void mass_k(const bf16 *Lb, const int *Ts, const int *off, const float *const *kscale, const float *stat, const int *rows,
+__global__ void mass_k(const bf16 *Lb, const int *Ts, const int *off, const float *stat, const int *rows,
                        const int *first, const int *count, const float *share, int K, int N, float *mass, int TM) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x, b = blockIdx.y;
     int k = i / TM, t = i % TM, T = Ts[b * NG];
@@ -558,10 +556,9 @@ __global__ void mass_k(const bf16 *Lb, const int *Ts, const int *off, const floa
         size_t sg = b * NG + g;
         const bf16 *lb = Lb + (size_t)off[sg] * N + t;
         const float *st = stat + sg * N * 2;
-        const bool half = !kscale[sg];
-        for (int x = first[k]; x < first[k] + count[k]; x++) {
+            for (int x = first[k]; x < first[k] + count[k]; x++) {
             int n = rows[x];
-            acc += expf(w2f(lb[(size_t)n * T], half) - st[n * 2]) * st[n * 2 + 1];
+            acc += expf(h2f(lb[(size_t)n * T]) - st[n * 2]) * st[n * 2 + 1];
         }
     }
     mass[(b * K + k) * TM + t] = share[k] * acc;
@@ -1296,21 +1293,20 @@ static bool dense(F2 *c, const Mat &W, int out, int in, const bf16 *x, int rows,
 /* a product of a shard's keys or values of one head, T tokens by 256, with
    the pass's rows: keys (the logits, out [rows][T] = in [rows][256] times
    the keys transposed) or values (out [rows][256] = in [rows][T] times the
-   values). A kept state's int8 numbers were cast to bf16 at cast; a state
-   of halves is multiplied where it lies, its rows step bytes apart */
+   values), all halves, summed in halves. A kept state's int8 numbers were
+   cast to halves at cast; a state of halves is multiplied where it lies,
+   its rows step bytes apart */
 static bool across(F2 *c, const F2State &st, const void *held, long step, const bf16 *cast, bool keys, int T, int rows, const bf16 *in,
                    bf16 *out) {
-    const float one = 1, zero = 0;
-    const bool half = st.kind == 1;
-    const cudaDataType ty = half ? CUDA_R_16F : CUDA_R_16BF;
-    const void *A = half ? held : (const void *)cast;
-    const int lda = half ? (int)(step / 2) : HD;
+    const __half one = __float2half(1.f), zero = __float2half(0.f);
+    const void *A = st.kind == 1 ? held : (const void *)cast;
+    const int lda = st.kind == 1 ? (int)(step / 2) : HD;
     if (keys)
-        BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, T, rows, HD, &one, A, ty, lda, in, ty, HD, &zero, out, ty, T, CUBLAS_COMPUTE_32F,
-                        CUBLAS_GEMM_DEFAULT));
+        BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, T, rows, HD, &one, A, CUDA_R_16F, lda, in, CUDA_R_16F, HD, &zero, out, CUDA_R_16F, T,
+                        CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
     else
-        BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, HD, rows, T, &one, A, ty, lda, in, ty, T, &zero, out, ty, HD, CUBLAS_COMPUTE_32F,
-                        CUBLAS_GEMM_DEFAULT));
+        BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, HD, rows, T, &one, A, CUDA_R_16F, lda, in, CUDA_R_16F, T, &zero, out, CUDA_R_16F, HD,
+                        CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
     return true;
 }
 
@@ -1516,8 +1512,8 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
                             Qs + (size_t)sg * N * HD, Lb + (size_t)segoff[sg] * N))
                     return false;
             lap(c, P_AGEMM);
-            stat_k<<<dim3(N, SG), HD>>>(Lb, d_T, d_off, PT(const float *const *, T_K11S), (bf16 *)c->Q11.p, Ko, N, same, d_start, scaling, (float *)c->stat.p);
-            mass_k<<<dim3(((size_t)K * TM + 255) / 256, B), 256>>>(Lb, d_T, d_off, PT(const float *const *, T_K11S), (float *)c->stat.p, d_rows, d_rfirst, d_rcount, d_share, K, N,
+            stat_k<<<dim3(N, SG), HD>>>(Lb, d_T, d_off, (bf16 *)c->Q11.p, Ko, N, same, d_start, scaling, (float *)c->stat.p);
+            mass_k<<<dim3(((size_t)K * TM + 255) / 256, B), 256>>>(Lb, d_T, d_off, (float *)c->stat.p, d_rows, d_rfirst, d_rcount, d_share, K, N,
                                                                   (float *)c->mass.p, TM);
             lap(c, P_READ);
             break;
