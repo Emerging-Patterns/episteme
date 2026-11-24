@@ -36,7 +36,9 @@
    the product left them, then either left as halves or made int8 over the
    scales model.int8 gives; the recurrent states from their low-rank parts.
    Every step rounds as PyTorch's half-precision arithmetic does, in its
-   order, and the result is joint.py's bit for bit. */
+   order, but for the product, whose sums are halves where joint.py's are
+   floats (twice as fast on this card's tensor cores; a shard's scores move
+   by about a hundredth of its largest at the median). */
 #include "f2pass.h"
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
@@ -1477,14 +1479,16 @@ static bool unpack(F2 *c, const F2Packed *p) {
     cudaGetLastError();
     const int T = p->tokens, K = c->K;
     const size_t n = (size_t)T * 1536;
-    const float one = 1, zero = 0;
     if (!room(c->C, (size_t)T * K * 2) || (p->kept && !room(c->Y, n * 2)) || !room(c->us, 4 * 256 * 4 + 7 * LAYERS * 8)) return false;
     __half *C = (__half *)c->C.p, *y = (__half *)(p->kept ? c->Y.p : p->y);
     coef_k<<<((size_t)T * K + 255) / 256, 256>>>((const uint8_t *)p->joint, c->bytes, c->bin, K, C, (size_t)T * K);
     lap(c, P_UCOEF);
-    // rows [T][1536] = coefficients [T][K] times the book's [K][1536]
-    BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, 1536, T, K, &one, c->back, CUDA_R_16F, 1536, C, CUDA_R_16F, K, &zero, y, CUDA_R_16F, 1536,
-                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+    // rows [T][1536] = coefficients [T][K] times the book's [K][1536], the sums in half precision: the card's tensor
+    // cores sum halves twice as fast as floats, and the rows are halves either way. It moves a shard's scores by about
+    // a hundredth of its largest at the median, half what a pass of another shape moves them
+    const __half one16 = __float2half(1.f), zero16 = __float2half(0.f);
+    BL(cublasGemmEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, 1536, T, K, &one16, c->back, CUDA_R_16F, 1536, C, CUDA_R_16F, K, &zero16, y, CUDA_R_16F, 1536,
+                    CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
     lap(c, P_UGEMM);
     rows_k<<<(n + 255) / 256, 256>>>(y, c->mean, (const __half *)p->rms, p->cos, p->sin, T, n);
     if (p->exact)
