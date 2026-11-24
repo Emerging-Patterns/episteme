@@ -64,7 +64,11 @@
    channel for keys and a scale a token for values (a kept state);
    kind 1: the same three in half precision, no scales (a state scored in
    passing). A tensor of two key-value heads is given as a pointer a head and
-   the bytes from one token's row to the next. */
+   the bytes from one token's row to the next. The recurrent states of a state
+   coded by a book stay as its book keeps them, a low-rank product and a
+   four-bit rest a layer (left, right, rest, scale: a third of the bytes), and
+   the pass makes the matrices from them as it reads them; a state with no
+   book has them as bf16 matrices (rec). */
 typedef struct {
     int len;            /* the shard's tokens: the tail's positions start here */
     int kind;
@@ -72,7 +76,9 @@ typedef struct {
     long k7_step, v7_step, k11_step;
     const float *k7_scale[2], *v7_scale[2], *k11_scale[2];
     const void *conv[12]; /* linear-attention layers: bf16 [6144, conv_len] */
-    const void *rec[12];  /* bf16 [16, 128, 128] */
+    const void *rec[12];  /* bf16 [16, 128, 128], or none */
+    const void *left[12], *right[12], *rest[12], *scale[12]; /* the low-rank parts, when rec is none (packed state's layout) */
+    int rank;
     int conv_len;
     int spans;            /* paragraphs */
     const int *span;      /* host: [spans][2] token spans */
@@ -85,12 +91,9 @@ typedef struct {
     const int *at;
     const void *rows, *rms;
     const float *cos, *sin;
-    const void *left[12], *right[12], *rest[12], *scale[12], *conv[12];
-    int conv_bytes;
     void *y;
     void *k7, *v7, *k11;
     float *k7_scale, *v7_scale, *k11_scale;
-    void *rec[12], *conv_out[12];
 } F2Packed;
 
 /* where a prefill writes what a state is made of, on the device (prefill) */
@@ -268,11 +271,28 @@ __global__ void cum_k(const float *g, int N, int same, const int *start, float *
 }
 
 /* the shards' recurrent states (bf16, a pointer a shard) in half precision, one (shard, head) after another */
-__global__ void state_k(const bf16 *const *rec, __half *S, size_t n) {
+__global__ void state_k(const bf16 *const *rec, const __half *const *left, const __half *const *right, const uint8_t *const *rest,
+                        const __half *const *scale, int rank, __half *S, size_t n) {
     size_t i = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (i >= n) return;
-    const bf16 *p = rec[i / (LH * LD * LD)] + i % (LH * LD * LD);
-    for (int e = 0; e < 4; e++) S[i + e] = __float2half(bf2f(p[e]));
+    const size_t b = i / (LH * LD * LD), e = i % (LH * LD * LD);
+    if (rec[b]) {
+        const bf16 *p = rec[b] + e;
+        for (int q = 0; q < 4; q++) S[i + q] = __float2half(bf2f(p[q]));
+        return;
+    }
+    // a row's four entries from the low-rank product and the rest, rounded to bf16 as a kept matrix was
+    const int h = e / (LD * LD), r = e / LD % LD, j0 = e % LD;
+    const __half *a = left[b] + ((size_t)h * LD + r) * rank;
+    const float sc = __half2float(scale[b][h * LD + r]);
+    for (int q = 0; q < 4; q++) {
+        const int j = j0 + q;
+        const __half *c = right[b] + (size_t)h * rank * LD + j;
+        float x = 0;
+        for (int k = 0; k < rank; k++) x += __half2float(a[k]) * __half2float(c[k * LD]);
+        const int nib = (rest[b][((size_t)h * LD + r) * (LD / 2) + (j >> 1)] >> ((j & 1) * 4)) & 15;
+        S[i + q] = __float2half(bf2f(f2bf(x + (float)(nib - 7) * sc)));
+    }
 }
 
 /* the two triangles the rule needs, made of G where it lies: a token's
@@ -795,26 +815,6 @@ __global__ void int8_k(const __half *y, int T, const float *ks, const float *vs,
     (blk < 2 ? k7 : blk < 4 ? v7 : k11)[t * 512 + (col & 511)] = q;
 }
 
-/* the recurrent states of every linear-attention layer from their parts, a
-   thread a (layer, head, row, column): the low-rank product, and the rest,
-   four bits an entry (two to a byte, the low half first) over a scale a
-   row. The same launch copies the layers' convolution states */
-__global__ void lift_k(const __half *const *left, const __half *const *right, const uint8_t *const *rest, const __half *const *scale,
-                       bf16 *const *out, int rank, size_t n, const uint16_t *const *conv, uint16_t *const *conv_out, int words) {
-    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) {  // past the states: the layers' convolution states, copied a 16-bit word a thread
-        i -= n;
-        if (i < (n / (LH * LD * LD)) * words) conv_out[i / words][i % words] = conv[i / words][i % words];
-        return;
-    }
-    int l = i / (LH * LD * LD), e = i % (LH * LD * LD), h = e / (LD * LD), r = e / LD % LD, j = e % LD;
-    const __half *a = left[l] + ((size_t)h * LD + r) * rank, *b = right[l] + (size_t)h * rank * LD + j;
-    float x = 0;
-    for (int k = 0; k < rank; k++) x += __half2float(a[k]) * __half2float(b[k * LD]);
-    int nib = (rest[l][((size_t)h * LD + r) * (LD / 2) + (j >> 1)] >> ((j & 1) * 4)) & 15;
-    out[l][e] = f2bf(x + (float)(nib - 7) * __half2float(scale[l][h * LD + r]));
-}
-
 // ---------------------------------------------------------------- the weights
 
 struct Tensor {
@@ -893,10 +893,10 @@ struct Buf {
     size_t cap = 0;
 };
 
-enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_ULIFT, P_FDENSE, P_FDELTA, P_FATT, P_FREST, P_FPACK, P_TWAIT, P_TROOM, P_COUNT };
+enum { P_SETUP, P_NORM, P_GEMM, P_CONV, P_CUM, P_READS, P_DELTA, P_GATE, P_MLP, P_QK, P_ALONE, P_CAST, P_AGEMM, P_SOFT, P_COMB, P_READ, P_OUT, P_UCOEF, P_UGEMM, P_UROWS, P_UINT8, P_FDENSE, P_FDELTA, P_FATT, P_FREST, P_FPACK, P_TWAIT, P_TROOM, P_COUNT };
 static const char *PNAMES[P_COUNT] = {"setup", "norm", "dense", "conv", "delta: decay, state", "delta: products", "delta: solve", "gate", "swiglu", "qk", "alone", "cast",
                                       "attention products", "softmax", "combine", "readout", "out", "unpack: coefficients",
-                                      "unpack: product", "unpack: rows", "unpack: int8", "unpack: recurrent states", "prefill: dense",
+                                      "unpack: product", "unpack: rows", "unpack: int8", "prefill: dense",
                                       "prefill: delta rule", "prefill: attention", "prefill: the rest", "prefill: packing", "take: its transfer's end",
                                       "take: room on the device"};
 
@@ -1299,13 +1299,17 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
         memcpy(&ints[a], st[b].span, (size_t)st[b].spans * 2 * 4);
     }
     size_t i_span = i_off + SG;
-    enum { T_K7S = LAYERS * 2, T_K11S, T_V7S, T_K7, T_V7, T_K11, T_K7P, T_V7P, T_K11P, T_COUNT };  // tables of SG entries after the layers'
-    std::vector<uint64_t> ptrs((size_t)LAYERS * 2 * B + (size_t)(T_COUNT - LAYERS * 2) * SG);
-    auto tab = [&](int t) { return t < LAYERS * 2 ? (size_t)t * B : (size_t)LAYERS * 2 * B + (size_t)(t - LAYERS * 2) * SG; };
+    // tables of B entries a layer (convolution states, recurrent states, their low-rank parts), then of SG entries
+    enum { T_CONV = 0, T_REC = LAYERS, T_LEFT = 2 * LAYERS, T_RIGHT = 3 * LAYERS, T_REST = 4 * LAYERS, T_SCALE = 5 * LAYERS, T_K7S = 6 * LAYERS, T_K11S,
+           T_V7S, T_K7, T_V7, T_K11, T_K7P, T_V7P, T_K11P, T_COUNT };
+    std::vector<uint64_t> ptrs((size_t)T_K7S * B + (size_t)(T_COUNT - T_K7S) * SG);
+    auto tab = [&](int t) { return t < T_K7S ? (size_t)t * B : (size_t)T_K7S * B + (size_t)(t - T_K7S) * SG; };
     for (int b = 0; b < B; b++) {
         for (int li = 0; li < LAYERS; li++) {
-            ptrs[tab(li) + b] = (uint64_t)st[b].conv[li];
-            ptrs[tab(LAYERS + li) + b] = (uint64_t)st[b].rec[li];
+            ptrs[tab(T_CONV + li) + b] = (uint64_t)st[b].conv[li];
+            ptrs[tab(T_REC + li) + b] = (uint64_t)st[b].rec[li];
+            ptrs[tab(T_LEFT + li) + b] = (uint64_t)st[b].left[li], ptrs[tab(T_RIGHT + li) + b] = (uint64_t)st[b].right[li];
+            ptrs[tab(T_REST + li) + b] = (uint64_t)st[b].rest[li], ptrs[tab(T_SCALE + li) + b] = (uint64_t)st[b].scale[li];
         }
         for (int gq = 0; gq < NG; gq++) {
             int sg = b * NG + gq;
@@ -1364,7 +1368,9 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
                                    (float *)c->v.p, (float *)c->beta.p, (float *)c->g.p, N);
             lap(c, P_CONV);
             cum_k<<<(BH + 127) / 128, 128>>>((float *)c->g.p, N, same, d_start, (float *)c->cum.p, BH);
-            state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, LAYERS + li), S, (size_t)BH * LD * LD);
+            state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, T_REC + li), PT(const __half *const *, T_LEFT + li),
+                                                                 PT(const __half *const *, T_RIGHT + li), PT(const uint8_t *const *, T_REST + li),
+                                                                 PT(const __half *const *, T_SCALE + li), c->rank, S, (size_t)BH * LD * LD);
             lap(c, P_CUM);
             BL(cublasGemmStridedBatchedEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, LD, 2 * N, LD, &one, S, CUDA_R_16F, LD, LD * LD, X, CUDA_R_16F, LD,
                                           2 * N * LD, &zero, c->Rd.p, CUDA_R_32F, LD, 2 * N * LD, BH, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
@@ -1504,30 +1510,8 @@ static bool unpack(F2 *c, const F2Packed *p) {
         CU(cudaMemcpyAsync(p->k11_scale, ks + 2 * 256, 2 * 256 * 4, cudaMemcpyDeviceToDevice));
         lap(c, P_UINT8);
     }
-    // the recurrent states: the layers' parts and where they go, as tables on the device
-    const void *tab[7 * LAYERS];
-    int layers = 0;
-    for (int li = 0; li < LAYERS; li++)
-        if (c->layer[li].linear) {
-            if (!p->left[li] || !p->rec[li] || !p->conv[li] || !p->conv_out[li]) return fail("a packed state with no states for a layer", li);
-            layers++;
-        }
-    for (int li = 0, l = 0; li < LAYERS; li++)
-        if (c->layer[li].linear) {
-            tab[l] = p->left[li], tab[layers + l] = p->right[li], tab[2 * layers + l] = p->rest[li], tab[3 * layers + l] = p->scale[li],
-            tab[4 * layers + l] = p->rec[li], tab[5 * layers + l] = p->conv[li], tab[6 * layers + l] = p->conv_out[li];
-            l++;
-        }
-    const void **d = (const void **)((float *)c->us.p + 4 * 256);
-    CU(cudaMemcpy(d, tab, 7 * layers * 8, cudaMemcpyHostToDevice));
-    const size_t m = (size_t)layers * LH * LD * LD, words = p->conv_bytes / 2;
-    lift_k<<<(m + layers * words + 255) / 256, 256>>>((const __half *const *)d, (const __half *const *)(d + layers),
-                                                      (const uint8_t *const *)(d + 2 * layers), (const __half *const *)(d + 3 * layers),
-                                                      (bf16 *const *)(d + 4 * layers), c->rank, m, (const uint16_t *const *)(d + 5 * layers),
-                                                      (uint16_t *const *)(d + 6 * layers), (int)words);
     CU(cudaStreamSynchronize(0));
     CU(cudaGetLastError());
-    lap(c, P_ULIFT);
     return true;
 }
 
@@ -1832,7 +1816,7 @@ long f2_packed_bytes(const F2Head *h) { return sound(*h) ? (long)parts(*h).end :
    and their scales; else the rows in halves; then the layers' recurrent and
    convolution states */
 struct Lay {
-    size_t k7, v7, k11, k7s, v7s, k11s, y, rec[9], conv[9], end;
+    size_t k7, v7, k11, k7s, v7s, k11s, y, rec[9], conv[9], low, left[9], right[9], rest[9], scale[9], end;
 };
 
 static Lay lay(const F2Head &h, bool int8) {
@@ -1847,7 +1831,14 @@ static Lay lay(const F2Head &h, bool int8) {
     const size_t T = h.tokens;
     if (int8) l.k7 = take(T * 512), l.v7 = take(T * 512), l.k11 = take(T * 512), l.k7s = take(512 * 4), l.v7s = take(2 * T * 4), l.k11s = take(512 * 4);
     else l.y = take(T * 1536 * 2);
-    for (int i = 0; i < 9; i++) l.rec[i] = take((size_t)LH * LD * LD * 2), l.conv[i] = take((size_t)LQKV * h.conv * 2);
+    if (h.kind == 1) {  // the packed state's recurrent parts and convolution states, copied as they lie there, in one piece
+        const Parts p = parts(h);
+        l.low = take(p.end - p.left[0]);
+        for (int i = 0; i < 9; i++)
+            l.left[i] = l.low + p.left[i] - p.left[0], l.right[i] = l.low + p.right[i] - p.left[0], l.rest[i] = l.low + p.rest[i] - p.left[0],
+            l.scale[i] = l.low + p.scale[i] - p.left[0], l.conv[i] = l.low + p.conv[i] - p.left[0];
+    } else
+        for (int i = 0; i < 9; i++) l.rec[i] = take((size_t)LH * LD * LD * 2), l.conv[i] = take((size_t)LQKV * h.conv * 2);
     l.end = at;
     return l;
 }
@@ -1991,12 +1982,7 @@ static long take(F2 *c, long ticket, int keep) {
             u.tokens = h.tokens, u.kept = int8, u.exact = h.exact;
             u.joint = s + p.joint, u.at = (const int *)(s + p.at), u.rows = s + p.rows, u.rms = s + p.rms;
             u.cos = (const float *)c->cosb.p, u.sin = (const float *)c->sinb.p;
-            u.conv_bytes = LQKV * h.conv * 2;
-            for (int i = 0; i < 9; i++) {
-                const int li = LINEAR[i];
-                u.left[li] = s + p.left[i], u.right[li] = s + p.right[i], u.rest[li] = s + p.rest[i], u.scale[li] = s + p.scale[i], u.conv[li] = s + p.conv[i];
-                u.rec[li] = b + l.rec[i], u.conv_out[li] = b + l.conv[i];
-            }
+            CU(cudaMemcpyAsync(b + l.low, s + p.left[0], p.end - p.left[0], cudaMemcpyDeviceToDevice));  // before unpack's synchronize
             if (int8) u.k7 = b + l.k7, u.v7 = b + l.v7, u.k11 = b + l.k11, u.k7_scale = (float *)(b + l.k7s), u.v7_scale = (float *)(b + l.v7s), u.k11_scale = (float *)(b + l.k11s);
             else u.y = b + l.y;
             if (!unpack(c, &u)) return false;
@@ -2023,7 +2009,13 @@ static long take(F2 *c, long ticket, int keep) {
                 st.k7[gq] = b + l.y + gq * HD * 2, st.v7[gq] = b + l.y + (512 + gq * HD) * 2, st.k11[gq] = b + l.y + (1024 + gq * HD) * 2;
         }
         st.k7_step = st.v7_step = st.k11_step = int8 ? 512 : 1536 * 2;
-        for (int i = 0; i < 9; i++) st.rec[LINEAR[i]] = b + l.rec[i], st.conv[LINEAR[i]] = b + l.conv[i];
+        st.rank = h.rank;
+        for (int i = 0; i < 9; i++) {
+            const int li = LINEAR[i];
+            st.conv[li] = b + l.conv[i];
+            if (h.kind == 1) st.left[li] = b + l.left[i], st.right[li] = b + l.right[i], st.rest[li] = b + l.rest[i], st.scale[li] = b + l.scale[i];
+            else st.rec[li] = b + l.rec[i];
+        }
         return true;
     };
     auto undo = [&]() {  // the block of a try that failed
