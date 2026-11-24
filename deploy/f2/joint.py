@@ -56,8 +56,11 @@ state, the same size whatever the shard's length (nine layers of sixteen
 128 by 128 matrices, 4.7 MB in bf16) and so most of a coded state's bytes.
 Each matrix is nearly of low rank (its first singular value holds 88 to 98%
 of its energy, its first eight 99%), so it is kept as its first RANK
-singular triples in fp16 and the rest as RESID bits an entry, uniform, with
-one scale a row (low, lift).
+singular pairs, each vector in int8 over its largest magnitude with the
+product of the two scales beside them, and the rest as RESID bits an entry,
+uniform, with one scale a row, taken against the product as kept (low,
+lift). The convolution states keep the last three inputs, all a question's
+tail reads of them.
 """
 import torch
 
@@ -224,10 +227,10 @@ def spread(b, width, n):
 
 def low(x, rank, resid):
     """a stack of matrices [..., m, n] (float) as (left [..., m, rank] and
-    right [..., rank, n] in fp16, whose product is the matrix on its leading
-    subspace; the rest, whatever that product leaves, in resid bits an entry
-    [..., m, bytes] with one fp16 scale a row [..., m, 1]). resid 0 keeps
-    no rest"""
+    right [..., rank, n] in int8 with each pair's scale [..., rank] (fp32),
+    whose product is the matrix on its leading subspace; the rest, whatever
+    that product leaves, in resid bits an entry [..., m, bytes] with one
+    fp16 scale a row [..., m, 1]). resid 0 keeps no rest"""
     # on the host (a batch of small decompositions takes seconds on the GPU), and by subspace iteration, a quarter
     # of a full decomposition's time: what it misses of the best subspace goes to the rest like everything else
     a = x.float().cpu()
@@ -237,20 +240,29 @@ def low(x, rank, resid):
         y = a @ (a.transpose(-1, -2) @ torch.linalg.qr(y)[0])
     q = torch.linalg.qr(y)[0]
     u, sv, vh = torch.linalg.svd(q.transpose(-1, -2) @ a, full_matrices=False)
-    left = ((q @ u[..., :rank]) * sv[..., None, :rank]).to(torch.float16).to(x.device)
-    right = vh[..., :rank, :].to(torch.float16).to(x.device)
+    left, right = (q @ u[..., :rank]) * sv[..., None, :rank], vh[..., :rank, :]
+    ls, rs = left.abs().amax(-2) / 127, right.abs().amax(-1) / 127  # each vector over its largest magnitude
+    ls, rs = torch.where(ls > 0, ls, 1.0), torch.where(rs > 0, rs, 1.0)
+    left = (left / ls[..., None, :]).round().to(torch.int8).to(x.device)
+    right = (right / rs[..., None]).round().to(torch.int8).to(x.device)
+    fs = (ls.double() * rs.double()).float().to(x.device)
     if not resid:
-        return left, right, x.new_zeros((*x.shape[:-1], 0), dtype=torch.uint8), x.new_zeros((*x.shape[:-1], 1), dtype=torch.float16)
-    rest = x.float() - left.float() @ right.float()
+        return left, right, fs, x.new_zeros((*x.shape[:-1], 0), dtype=torch.uint8), x.new_zeros((*x.shape[:-1], 1), dtype=torch.float16)
+    rest = x.float() - product(left, right, fs)
     top = 2 ** (resid - 1) - 1
     scale = (rest.abs().amax(-1, keepdim=True).clamp(min=1e-12) / top).to(torch.float16)
     q = (rest / scale.float()).round().clamp(-top, top) + top
-    return left, right, squeeze(q.to(torch.uint8), resid), scale
+    return left, right, fs, squeeze(q.to(torch.uint8), resid), scale
 
 
-def lift(left, right, rest, scale, resid):
+def product(left, right, fs):
+    """the low-rank product as kept: int8 vectors, each pair's scale"""
+    return (left.float() * fs[..., None, :]) @ right.float()
+
+
+def lift(left, right, fs, rest, scale, resid):
     """low undone: the matrices [..., m, n] (float32)"""
-    x = left.float() @ right.float()
+    x = product(left, right, fs)
     if resid:
         x = x + (spread(rest, resid, right.shape[-1]) - (2 ** (resid - 1) - 1)) * scale.float()
     return x
