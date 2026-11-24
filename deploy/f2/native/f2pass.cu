@@ -149,7 +149,10 @@ static __host__ __device__ __forceinline__ bf16 f2bf(float x) {  // to nearest, 
 
 static __host__ __device__ __forceinline__ float rbf(float x) { return bf2f(f2bf(x)); }
 static __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + expf(-x)); }
-// 16 bits that are a half (a state scored in passing, and what is multiplied with it) or bf16
+/* 16 bits that are a half or bf16: a half for a state scored in passing and
+   what is multiplied with it, and for what the dense products take and give
+   in a pass (x, lin, y, act, o: the kernels' H), so that those products sum
+   in halves; bf16 for those of a prefill */
 static __device__ __forceinline__ float w2f(bf16 w, bool half) { return half ? __half2float(__ushort_as_half(w)) : bf2f(w); }
 static __device__ __forceinline__ bf16 f2w(float x, bool half) { return half ? __half_as_ushort(__float2half(x)) : f2bf(x); }
 
@@ -179,7 +182,7 @@ static __device__ __forceinline__ float bmax(float v, float *sh) {
 /* a layer's norm of the hidden states, a block a token: h (the embeddings
    of the row for the first layer, else h with add summed in, written back)
    over its root mean square, times 1 + w */
-__global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const float *w1, bf16 *x) {
+__global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const float *w1, bf16 *x, bool H) {
     __shared__ float sh[8];
     size_t r = blockIdx.x;
     int t = threadIdx.x;
@@ -187,7 +190,7 @@ __global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const f
     for (int e = 0; e < 4; e++) {
         int i = t * 4 + e;
         float hv = emb ? bf2f(emb[(r % N) * HID + i]) : bf2f(h[r * HID + i]);
-        if (add) hv = rbf(hv + bf2f(add[r * HID + i]));
+        if (add) hv = rbf(hv + w2f(add[r * HID + i], H));
         if (emb || add) h[r * HID + i] = f2bf(hv);
         v[e] = hv;
         ss += hv * hv;
@@ -195,7 +198,7 @@ __global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const f
     ss = bsum(ss, sh);
     float rs = rsqrtf(ss * (1.f / HID) + EPS);
     if (x)
-        for (int e = 0; e < 4; e++) x[r * HID + t * 4 + e] = f2bf(v[e] * rs * w1[t * 4 + e]);
+        for (int e = 0; e < 4; e++) x[r * HID + t * 4 + e] = f2w(v[e] * rs * w1[t * 4 + e], H);
 }
 
 /* a linear-attention layer between its input projection and the delta
@@ -209,7 +212,7 @@ __global__ void norm_k(bf16 *h, const bf16 *add, const bf16 *emb, int N, const f
    lin holds the input projection of every shard's rows (each) or, in layer
    0, where the rows are the embeddings whatever the shard, of the row once */
 __global__ void conv_k(const bf16 *lin, int each, const bf16 *const *conv, int clen, const bf16 *w, const int *src, int N,
-                       const float *negA, const float *dtb, __half *X, float *qf, float *kf, float *v, float *beta, float *g, int NP) {
+                       const float *negA, const float *dtb, __half *X, float *qf, float *kf, float *v, float *beta, float *g, int NP, bool H) {
     __shared__ float sh[4];
     size_t r = blockIdx.x / LH;
     int hd = blockIdx.x % LH, i = threadIdx.x;
@@ -223,7 +226,7 @@ __global__ void conv_k(const bf16 *lin, int each, const bf16 *const *conv, int c
         float acc = 0;
         for (int j = 0; j < KS; j++) {
             int s = src[n * KS + j];
-            float in = s < KS - 1 ? bf2f(cs[(size_t)c * clen + clen - (KS - 1) + s]) : bf2f(lin[(lb + s - (KS - 1)) * LIN + c]);
+            float in = s < KS - 1 ? bf2f(cs[(size_t)c * clen + clen - (KS - 1) + s]) : w2f(lin[(lb + s - (KS - 1)) * LIN + c], H);
             acc += in * bf2f(w[c * KS + j]);
         }
         float m = rbf(acc);
@@ -243,8 +246,8 @@ __global__ void conv_k(const bf16 *lin, int each, const bf16 *const *conv, int c
     v[at] = val[2];
     if (i == 0) {
         size_t bh = (b * LH + hd) * NP + n;
-        beta[bh] = rbf(sigm(bf2f(lin[(lb + n) * LIN + LQKV + LH * LD + hd])));
-        float a = bf2f(lin[(lb + n) * LIN + LQKV + LH * LD + LH + hd]) + dtb[hd];
+        beta[bh] = rbf(sigm(w2f(lin[(lb + n) * LIN + LQKV + LH * LD + hd], H)));
+        float a = w2f(lin[(lb + n) * LIN + LQKV + LH * LD + LH + hd], H) + dtb[hd];
         g[bh] = negA[hd] * (a > 20.f ? a : log1pf(expf(a)));
     }
 }
@@ -344,24 +347,24 @@ __global__ void solve_k(const float *v, const float *beta, const float *cum, int
 
 /* the delta rule's output over its root mean square a head, times the
    norm's weight and the activation of z: what the output projection takes */
-__global__ void gate_k(const float *out, const bf16 *lin, int each, int N, const float *w, bf16 *y) {
+__global__ void gate_k(const float *out, const bf16 *lin, int each, int N, const float *w, bf16 *y, bool H) {
     __shared__ float sh[4];
     size_t r = blockIdx.x / LH;
     int hd = blockIdx.x % LH, j = threadIdx.x;
     float o = out[(r * LH + hd) * LD + j];
     float ss = bsum(o * o, sh);
     float hs = rbf(o * rsqrtf(ss * (1.f / LD) + EPS));
-    float z = bf2f(lin[(each ? r : r % N) * LIN + LQKV + hd * LD + j]);
-    y[r * (LH * LD) + hd * LD + j] = f2bf(rbf(w[j] * hs) * (z * sigm(z)));
+    float z = w2f(lin[(each ? r : r % N) * LIN + LQKV + hd * LD + j], H);
+    y[r * (LH * LD) + hd * LD + j] = f2w(rbf(w[j] * hs) * (z * sigm(z)), H);
 }
 
 /* the MLP between its two products: act(gate) times up */
-__global__ void swiglu_k(const bf16 *gu, bf16 *act, size_t n) {
+__global__ void swiglu_k(const bf16 *gu, bf16 *act, size_t n, bool H) {
     size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     size_t r = i / MLP, c = i % MLP;
-    float gt = bf2f(gu[r * (2 * MLP) + c]), up = bf2f(gu[r * (2 * MLP) + MLP + c]);
-    act[i] = f2bf(rbf(gt * sigm(gt)) * up);
+    float gt = w2f(gu[r * (2 * MLP) + c], H), up = w2f(gu[r * (2 * MLP) + MLP + c], H);
+    act[i] = f2w(rbf(gt * sigm(gt)) * up, H);
 }
 
 /* an attention layer's queries and keys, a block a (token, head): each over
@@ -372,7 +375,7 @@ __global__ void swiglu_k(const bf16 *gu, bf16 *act, size_t n) {
    int8 keys, the keys' scale a channel (bf16); for keys in half precision,
    halves */
 __global__ void qk_k(const bf16 *lin, int LW, int N, int nq, int qstep, int kcol, const float *qn1, const float *kn1,
-                     const float *cs, const float *sn, float scaling, bf16 *Qp, bf16 *Ko, bf16 *Qs, const float *const *kscale) {
+                     const float *cs, const float *sn, float scaling, bf16 *Qp, bf16 *Ko, bf16 *Qs, const float *const *kscale, bool H) {
     __shared__ float sh[8];
     __shared__ float nv[HD];
     size_t r = blockIdx.x / (nq + NG);
@@ -381,7 +384,7 @@ __global__ void qk_k(const bf16 *lin, int LW, int N, int nq, int qstep, int kcol
     int n = r % N;
     bool isq = u < nq;
     int col = isq ? u * qstep : kcol + (u - nq) * HD;
-    float raw = bf2f(lin[r * LW + col + c]);
+    float raw = w2f(lin[r * LW + col + c], H);
     float ss = bsum(raw * raw, sh);
     float val = rbf(raw * rsqrtf(ss * (1.f / HD) + EPS) * (isq ? qn1[c] : kn1[c]));
     nv[c] = val;
@@ -423,7 +426,7 @@ static __device__ __forceinline__ int own_logits(const bf16 *qv, const bf16 *Ko,
 /* layer 3's attention, a block a (token, head): a token sees the row alone.
    The output goes through the gate, as the output projection takes it */
 __global__ void alone_k(const bf16 *Qp, const bf16 *Ko, const bf16 *lin, int LW, int N, int same, const int *start,
-                        float scaling, bf16 *y) {
+                        float scaling, bf16 *y, bool H) {
     __shared__ float sh[8];
     __shared__ float lg[MAXN];
     size_t r = blockIdx.x / NQ;
@@ -441,10 +444,10 @@ __global__ void alone_k(const bf16 *Qp, const bf16 *Ko, const bf16 *lin, int LW,
     float acc = 0;
     for (int x = 0; x < L; x++) {
         int s = x < e1 ? x : st + (x - e1);
-        acc += rbf(expf(lg[x] - m) / sum) * bf2f(lin[(b * N + s) * LW + NQ * 2 * HD + NG * HD + g * HD + c]);
+        acc += rbf(expf(lg[x] - m) / sum) * w2f(lin[(b * N + s) * LW + NQ * 2 * HD + NG * HD + g * HD + c], H);
     }
-    float gt = bf2f(lin[r * LW + hd * 2 * HD + HD + c]);
-    y[r * (NQ * HD) + hd * HD + c] = f2bf(rbf(acc) * rbf(sigm(gt)));
+    float gt = w2f(lin[r * LW + hd * 2 * HD + HD + c], H);
+    y[r * (NQ * HD) + hd * HD + c] = f2w(rbf(acc) * rbf(sigm(gt)), H);
 }
 
 /* the int8 keys or values of every shard and head as bf16, the numbers as
@@ -498,7 +501,7 @@ __global__ void soft_k(bf16 *Lb, const int *Ts, const int *off, const float *con
    with the shard's values gave (Ya) and the row's own tokens' values by
    their weights, through the gate */
 __global__ void comb_k(const bf16 *Ya, const float *const *vscale, const float *wown, const bf16 *lin, int LW, int N, int same,
-                       const int *start, bf16 *y) {
+                       const int *start, bf16 *y, bool H) {
     int each = NQ / NG;
     size_t bg = blockIdx.x / (each * N), b = bg / NG;
     int row = blockIdx.x % (each * N), g = bg % NG, e = row / N, n = row % N, c = threadIdx.x, hd = g * each + e;
@@ -509,10 +512,10 @@ __global__ void comb_k(const bf16 *Ya, const float *const *vscale, const float *
     float acc = w2f(Ya[(bg * each * N + row) * HD + c], !vscale[bg]);
     for (int x = 0; x < L; x++) {
         int s = x < e1 ? x : st + (x - e1);
-        acc += wo[x] * bf2f(lin[(b * N + s) * LW + NQ * 2 * HD + NG * HD + g * HD + c]);
+        acc += wo[x] * w2f(lin[(b * N + s) * LW + NQ * 2 * HD + NG * HD + g * HD + c], H);
     }
-    float gt = bf2f(lin[r * LW + hd * 2 * HD + HD + c]);
-    y[r * (NQ * HD) + hd * HD + c] = f2bf(rbf(acc) * rbf(sigm(gt)));
+    float gt = w2f(lin[r * LW + hd * 2 * HD + HD + c], H);
+    y[r * (NQ * HD) + hd * HD + c] = f2w(rbf(acc) * rbf(sigm(gt)), H);
 }
 
 /* layer 11's softmax, a block a token of a shard and group (a row of
@@ -879,9 +882,21 @@ struct File {
     }
 };
 
+/* a projection's weights, as cuBLAS reads them: in half precision, for the
+   passes' products that sum in halves; and the few bf16 numbers of the file
+   the halves do not hold exactly (beyond their range, or too fine below
+   it), by place, so that a prefill multiplies by the file's numbers */
+struct Mat {
+    __half *w = nullptr;
+    size_t n = 0;
+    unsigned *at = nullptr;  // [fixes]
+    bf16 *was = nullptr;     // [fixes]
+    int fixes = 0;
+};
+
 struct Layer {
     bool linear = false;
-    bf16 *Win = nullptr, *Wout = nullptr, *Wgu = nullptr, *Wd = nullptr;  // the stacked projections, as cuBLAS reads them
+    Mat Win, Wout, Wgu, Wd;  // the stacked projections
     float *n1 = nullptr, *n2 = nullptr;                                    // 1 + w of the two norms
     bf16 *convw = nullptr;
     float *negA = nullptr, *dtb = nullptr, *gw = nullptr;
@@ -930,6 +945,7 @@ struct F2 {
     struct Slab *slabs = nullptr;
     int nslabs = 0, slab = 0;
     size_t slab_bytes = 0;
+    Buf Wb;  // a projection's weights as bf16, for a prefill's product
     Buf h, x, o, lin, y, act, X, S, Rd, G, v, beta, g, out, Qp, Ko, Qs, Kb, Lb, Ya, wown, mass, stat, emb, tab, ptr, sc, res, cum, C, Y, us, Q11;
 };
 
@@ -1055,7 +1071,7 @@ static void shed(F2 *c) {
     drain();
     for (Buf *b : {&c->h, &c->x, &c->o, &c->lin, &c->y, &c->act, &c->X, &c->S, &c->Rd, &c->G, &c->v, &c->beta, &c->g, &c->out, &c->Qp, &c->Ko,
                    &c->Qs, &c->Kb, &c->Lb, &c->Ya, &c->wown, &c->mass, &c->stat, &c->emb, &c->tab, &c->ptr, &c->sc, &c->res, &c->cum, &c->C,
-                   &c->Y, &c->us, &c->Q11, &c->cosb, &c->sinb}) {
+                   &c->Y, &c->us, &c->Q11, &c->cosb, &c->sinb, &c->Wb}) {
         dfree(b->p, b->cap);
         b->p = nullptr, b->cap = 0;
     }
@@ -1098,6 +1114,57 @@ static bool stack(const File &f, const std::vector<std::pair<std::string, std::p
         CU(cudaMemcpy(*out + at, ts[i].data + first * wide * 2, rows * wide * 2, cudaMemcpyHostToDevice));
         at += rows * wide;
     }
+    return true;
+}
+
+/* a bf16 number as a half, and the places of those the half does not hold
+   exactly, counted (at null) or written with their numbers */
+__global__ void tohalf_k(const bf16 *a, __half *h, size_t n, int *count, unsigned *at, bf16 *was) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    __half v = __float2half(bf2f(a[i]));
+    h[i] = v;
+    if (f2bf(__half2float(v)) != a[i]) {
+        int k = atomicAdd(count, 1);
+        if (at) at[k] = (unsigned)i, was[k] = a[i];
+    }
+}
+
+/* the halves back as bf16, the file's numbers where they differ */
+__global__ void tobf_k(const __half *h, bf16 *a, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) a[i] = f2bf(__half2float(h[i]));
+}
+
+__global__ void fix_k(const unsigned *at, const bf16 *was, int fixes, bf16 *a) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < fixes) a[at[i]] = was[i];
+}
+
+static bool stack(const File &f, const std::vector<std::pair<std::string, std::pair<long, long>>> &parts, Mat *m) {
+    bf16 *b = nullptr;
+    if (!stack(f, parts, &b)) return false;
+    size_t n = 0;
+    for (auto &p : parts) {
+        Tensor t;
+        f.find(p.first, t);
+        n += (p.second.second < 0 ? t.shape[0] : p.second.second) * (t.count() / t.shape[0]);
+    }
+    int *count;
+    CU(cudaMalloc((void **)&count, 4));
+    CU(cudaMemset(count, 0, 4));
+    m->n = n;
+    CU(dalloc((void **)&m->w, n * 2));
+    const unsigned blocks = (unsigned)((n + 255) / 256);
+    tohalf_k<<<blocks, 256>>>(b, m->w, n, count, nullptr, nullptr);
+    CU(cudaMemcpy(&m->fixes, count, 4, cudaMemcpyDeviceToHost));
+    CU(dalloc((void **)&m->at, (size_t)m->fixes * 4));
+    CU(dalloc((void **)&m->was, (size_t)m->fixes * 2));
+    CU(cudaMemset(count, 0, 4));
+    tohalf_k<<<blocks, 256>>>(b, m->w, n, count, m->at, m->was);
+    CU(cudaDeviceSynchronize());
+    cudaFree(count);
+    dfree(b, n * 2);
     return true;
 }
 
@@ -1205,10 +1272,23 @@ static void lap(F2 *c, int part) {
     c->mark = t;
 }
 
-/* y [rows][out] = x [rows][in] times W [out][in] transposed, in bf16 */
-static bool dense(F2 *c, const bf16 *W, int out, int in, const bf16 *x, int rows, bf16 *y) {
+/* y [rows][out] = x [rows][in] times W [out][in] transposed: in a pass (H)
+   halves, summed in halves (GeForce Ampere's tensor cores sum halves at
+   twice the rate of floats); in a prefill bf16 summed in floats, by the
+   file's numbers, made again from the halves for the product */
+static bool dense(F2 *c, const Mat &W, int out, int in, const bf16 *x, int rows, bf16 *y, bool H) {
+    if (H) {
+        const __half one = __float2half(1.f), zero = __float2half(0.f);
+        BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, out, rows, in, &one, W.w, CUDA_R_16F, in, x, CUDA_R_16F, in, &zero, y, CUDA_R_16F, out,
+                        CUBLAS_COMPUTE_16F, CUBLAS_GEMM_DEFAULT));
+        return true;
+    }
+    if (!room(c->Wb, W.n * 2)) return false;
+    bf16 *Wb = (bf16 *)c->Wb.p;
+    tobf_k<<<(unsigned)((W.n + 255) / 256), 256>>>(W.w, Wb, W.n);
+    if (W.fixes) fix_k<<<(W.fixes + 255) / 256, 256>>>(W.at, W.was, W.fixes, Wb);
     const float one = 1, zero = 0;
-    BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, out, rows, in, &one, W, CUDA_R_16BF, in, x, CUDA_R_16BF, in, &zero, y,
+    BL(cublasGemmEx(c->cb, CUBLAS_OP_T, CUBLAS_OP_N, out, rows, in, &one, Wb, CUDA_R_16BF, in, x, CUDA_R_16BF, in, &zero, y,
                     CUDA_R_16BF, out, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
     return true;
 }
@@ -1358,14 +1438,14 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
     const bf16 *add = nullptr;  // what the next norm sums into h first
     for (int li = 0; li < LAYERS; li++) {
         Layer &L = c->layer[li];
-        norm_k<<<R, 256>>>(h, add, li == 0 ? (const bf16 *)c->emb.p : nullptr, N, L.n1, x);
+        norm_k<<<R, 256>>>(h, add, li == 0 ? (const bf16 *)c->emb.p : nullptr, N, L.n1, x, true);
         lap(c, P_NORM);
         if (L.linear) {
             const int own = li > 0;  // layer 0 reads the embeddings: its input projection is one for all shards
-            if (!dense(c, L.Win, LIN, HID, x, own ? R : N, lin)) return false;
+            if (!dense(c, L.Win, LIN, HID, x, own ? R : N, lin, true)) return false;
             lap(c, P_GEMM);
             conv_k<<<R * LH, LD>>>(lin, own, PT(const bf16 *const *, li), st[0].conv_len, L.convw, d_src, N, L.negA, L.dtb, X, nullptr, nullptr,
-                                   (float *)c->v.p, (float *)c->beta.p, (float *)c->g.p, N);
+                                   (float *)c->v.p, (float *)c->beta.p, (float *)c->g.p, N, true);
             lap(c, P_CONV);
             cum_k<<<(BH + 127) / 128, 128>>>((float *)c->g.p, N, same, d_start, (float *)c->cum.p, BH);
             state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, T_REC + li), PT(const __half *const *, T_LEFT + li),
@@ -1384,19 +1464,19 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
             solve_k<<<dim3(BH, K), LD>>>((float *)c->v.p, (float *)c->beta.p, (float *)c->cum.p, N, same, d_start, d_from + 1, d_to + 1,
                                          (float *)c->G.p, (float *)c->Rd.p, (float *)c->out.p);
             lap(c, P_DELTA);
-            gate_k<<<R * LH, LD>>>((float *)c->out.p, lin, own, N, L.gw, y);
+            gate_k<<<R * LH, LD>>>((float *)c->out.p, lin, own, N, L.gw, y, true);
             lap(c, P_GATE);
-            if (!dense(c, L.Wout, HID, LH * LD, y, R, o)) return false;
+            if (!dense(c, L.Wout, HID, LH * LD, y, R, o, true)) return false;
             lap(c, P_GEMM);
         } else if (li != TOP) {
             const int LW = NQ * 2 * HD + 2 * NG * HD;
-            if (!dense(c, L.Win, LW, HID, x, R, lin)) return false;
+            if (!dense(c, L.Win, LW, HID, x, R, lin, true)) return false;
             lap(c, P_GEMM);
             qk_k<<<R * (NQ + NG), HD>>>(lin, LW, N, NQ, 2 * HD, NQ * 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, Ko,
-                                        li == MID ? Qs : nullptr, PT(const float *const *, T_K7S));
+                                        li == MID ? Qs : nullptr, PT(const float *const *, T_K7S), true);
             lap(c, P_QK);
             if (li == ALONE) {
-                alone_k<<<R * NQ, HD>>>(Qp, Ko, lin, LW, N, same, d_start, scaling, y);
+                alone_k<<<R * NQ, HD>>>(Qp, Ko, lin, LW, N, same, d_start, scaling, y, true);
                 lap(c, P_ALONE);
             } else {
                 // the queries' product with each shard's keys, the softmax, the weights' product with its values
@@ -1417,17 +1497,17 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
                                 Lb + (size_t)segoff[sg] * rws, Ya + (size_t)sg * rws * HD))
                         return false;
                 lap(c, P_AGEMM);
-                comb_k<<<SG * rws, HD>>>(Ya, PT(const float *const *, T_V7S), (float *)c->wown.p, lin, LW, N, same, d_start, y);
+                comb_k<<<SG * rws, HD>>>(Ya, PT(const float *const *, T_V7S), (float *)c->wown.p, lin, LW, N, same, d_start, y, true);
                 lap(c, P_COMB);
             }
-            if (!dense(c, L.Wout, HID, NQ * HD, y, R, o)) return false;
+            if (!dense(c, L.Wout, HID, NQ * HD, y, R, o, true)) return false;
             lap(c, P_GEMM);
         } else {
             // layer 11: the weights of the two heads that are read, summed over each paragraph's tokens
             const int LW = 2 * HD + NG * HD;
-            if (!dense(c, L.Win, LW, HID, x, R, lin)) return false;
+            if (!dense(c, L.Win, LW, HID, x, R, lin, true)) return false;
             lap(c, P_GEMM);
-            qk_k<<<R * (NG + NG), HD>>>(lin, LW, N, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, (bf16 *)c->Q11.p, Ko, Qs, PT(const float *const *, T_K11S));
+            qk_k<<<R * (NG + NG), HD>>>(lin, LW, N, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, (bf16 *)c->Q11.p, Ko, Qs, PT(const float *const *, T_K11S), true);
             lap(c, P_QK);
             cast_k<<<castgrid, 256>>>(PT(const int8_t *const *, T_K11), PT(const long *, T_K11P), d_cast, d_off, Kb);
             lap(c, P_CAST);
@@ -1443,21 +1523,21 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
             break;
         }
         if (c->stop == li) {  // the attention's output summed in, the MLP left out
-            norm_k<<<R, 256>>>(h, o, nullptr, N, L.n1, nullptr);
+            norm_k<<<R, 256>>>(h, o, nullptr, N, L.n1, nullptr, true);
             CU(cudaDeviceSynchronize());
             return true;
         }
-        norm_k<<<R, 256>>>(h, o, nullptr, N, L.n2, x);
+        norm_k<<<R, 256>>>(h, o, nullptr, N, L.n2, x, true);
         lap(c, P_NORM);
-        if (!dense(c, L.Wgu, 2 * MLP, HID, x, R, lin)) return false;
+        if (!dense(c, L.Wgu, 2 * MLP, HID, x, R, lin, true)) return false;
         lap(c, P_GEMM);
-        swiglu_k<<<(R * MLP + 255) / 256, 256>>>(lin, act, R * MLP);
+        swiglu_k<<<(R * MLP + 255) / 256, 256>>>(lin, act, R * MLP, true);
         lap(c, P_MLP);
-        if (!dense(c, L.Wd, HID, MLP, act, R, o)) return false;
+        if (!dense(c, L.Wd, HID, MLP, act, R, o, true)) return false;
         lap(c, P_GEMM);
         add = o;
         if (c->stop == li + 100) {  // the whole layer
-            norm_k<<<R, 256>>>(h, o, nullptr, N, L.n1, nullptr);
+            norm_k<<<R, 256>>>(h, o, nullptr, N, L.n1, nullptr, true);
             CU(cudaDeviceSynchronize());
             return true;
         }
@@ -1582,13 +1662,13 @@ static bool prefill(F2 *c, const F2Fill *f) {
     lap(c, P_FREST);
     for (int li = 0; li < LAYERS; li++) {
         Layer &L = c->layer[li];
-        norm_k<<<T, 256>>>(h, add, li == 0 ? d_emb : nullptr, T, L.n1, x);
+        norm_k<<<T, 256>>>(h, add, li == 0 ? d_emb : nullptr, T, L.n1, x, false);
         lap(c, P_FREST);
         if (L.linear) {
-            if (!dense(c, L.Win, LIN, HID, x, T, lin)) return false;
+            if (!dense(c, L.Win, LIN, HID, x, T, lin, false)) return false;
             lap(c, P_FDENSE);
             ptaps_k<<<(LQKV * KS + 255) / 256, 256>>>(lin, T, (bf16 *)f->conv[li]);
-            conv_k<<<(size_t)T * LH, LD>>>(lin, 1, tab, KS - 1, L.convw, d_src, T, L.negA, L.dtb, nullptr, q, k, v, beta, g, TP);
+            conv_k<<<(size_t)T * LH, LD>>>(lin, 1, tab, KS - 1, L.convw, d_src, T, L.negA, L.dtb, nullptr, q, k, v, beta, g, TP, false);
             lap(c, P_FREST);
             // every chunk's own part: the decays, the two triangles, the system solved
             pcum_k<<<(LH * NC + 255) / 256, 256>>>(g, cum, (size_t)LH * NC);
@@ -1615,13 +1695,13 @@ static bool prefill(F2 *c, const F2Fill *f) {
             lap(c, P_FDELTA);
             pgate_k<<<(size_t)T * LH, LD>>>(out, TP, lin, L.gw, y);
             lap(c, P_FREST);
-            if (!dense(c, L.Wout, HID, LH * LD, y, T, o)) return false;
+            if (!dense(c, L.Wout, HID, LH * LD, y, T, o, false)) return false;
             lap(c, P_FDENSE);
         } else if (li != TOP) {
             const int LW = NQ * 2 * HD + 2 * NG * HD, vcol = NQ * 2 * HD + NG * HD;
-            if (!dense(c, L.Win, LW, HID, x, T, lin)) return false;
+            if (!dense(c, L.Win, LW, HID, x, T, lin, false)) return false;
             lap(c, P_FDENSE);
-            qk_k<<<(size_t)T * (NQ + NG), HD>>>(lin, LW, T, NQ, 2 * HD, NQ * 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, Ko, nullptr, nullptr);
+            qk_k<<<(size_t)T * (NQ + NG), HD>>>(lin, LW, T, NQ, 2 * HD, NQ * 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, Ko, nullptr, nullptr, false);
             for (int gq = 0; gq < NG; gq++)
                 for (int r0 = 0; r0 < T; r0 += RUN) {
                     const int rows = T - r0 < RUN ? T - r0 : RUN, keys = r0 + rows, qr = each * rows;
@@ -1638,21 +1718,21 @@ static bool prefill(F2 *c, const F2Fill *f) {
                 pcols_k<<<((size_t)T * NG * HD + 255) / 256, 256>>>(lin, LW, vcol, NG * HD, (bf16 *)f->v7, (size_t)T * NG * HD);
             }
             lap(c, P_FATT);
-            if (!dense(c, L.Wout, HID, NQ * HD, y, T, o)) return false;
+            if (!dense(c, L.Wout, HID, NQ * HD, y, T, o, false)) return false;
             lap(c, P_FDENSE);
         } else {
             // layer 11: its keys alone
             const int LW = 2 * HD + NG * HD;
-            if (!dense(c, L.Win, LW, HID, x, T, lin)) return false;
-            qk_k<<<(size_t)T * (NG + NG), HD>>>(lin, LW, T, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, (bf16 *)f->k11, nullptr, nullptr);
+            if (!dense(c, L.Win, LW, HID, x, T, lin, false)) return false;
+            qk_k<<<(size_t)T * (NG + NG), HD>>>(lin, LW, T, NG, HD, 2 * HD, L.qn, L.kn, d_cs, d_sn, scaling, Qp, (bf16 *)f->k11, nullptr, nullptr, false);
             lap(c, P_FDENSE);
             break;
         }
-        norm_k<<<T, 256>>>(h, o, nullptr, T, L.n2, x);
+        norm_k<<<T, 256>>>(h, o, nullptr, T, L.n2, x, false);
         lap(c, P_FREST);
-        if (!dense(c, L.Wgu, 2 * MLP, HID, x, T, lin)) return false;
-        swiglu_k<<<((size_t)T * MLP + 255) / 256, 256>>>(lin, act, (size_t)T * MLP);
-        if (!dense(c, L.Wd, HID, MLP, act, T, o)) return false;
+        if (!dense(c, L.Wgu, 2 * MLP, HID, x, T, lin, false)) return false;
+        swiglu_k<<<((size_t)T * MLP + 255) / 256, 256>>>(lin, act, (size_t)T * MLP, false);
+        if (!dense(c, L.Wd, HID, MLP, act, T, o, false)) return false;
         lap(c, P_FDENSE);
         add = o;
     }
