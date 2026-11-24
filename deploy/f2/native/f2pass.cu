@@ -971,13 +971,21 @@ static void drain() {
     POOLED = 0;
 }
 
+static std::atomic<bool> STARVED{false};  // an allocation found no room on the device, the pool given back: what again() asks
+
 /* device memory, the pool given back first when there is none */
 static cudaError_t dalloc_hard(void **p, size_t bytes) {
     cudaError_t e = dalloc(p, bytes);
     if (e == cudaSuccess) return e;
     cudaGetLastError();
     drain();
-    return dalloc(p, bytes);
+    e = dalloc(p, bytes);
+    if (e != cudaSuccess) {
+        *p = nullptr;
+        cudaGetLastError();
+        STARVED = true;
+    }
+    return e;
 }
 
 static void *palloc(size_t bytes) {
@@ -1019,6 +1027,7 @@ static bool fail(const char *what, int code) {
 #define BL(call)                                               \
     do {                                                       \
         cublasStatus_t s_ = (call);                            \
+        if (s_ == CUBLAS_STATUS_ALLOC_FAILED) STARVED = true;  \
         if (s_ != CUBLAS_STATUS_SUCCESS) return fail("cublas", (int)s_ * 100000 + __LINE__); \
     } while (0)
 
@@ -1029,6 +1038,42 @@ static bool room(Buf &b, size_t bytes) {
     CU(dalloc_hard(&b.p, bytes + bytes / 4));
     b.cap = bytes + bytes / 4;
     return true;
+}
+
+/* What the handle holds on the device that no call has in hand is given
+   back: the pool's blocks, and the buffers of the passes and of the unpack,
+   which only grow and which the next call takes again as it needs them. For
+   when the device has no room for the call in hand: a pass over long shards
+   leaves buffers of a gigabyte and more, and the first reading of a long
+   shard needs two of its own. The weights, the book, the states and what
+   is on its way to the device stay. The caller holds c->one */
+static void shed(F2 *c) {
+    cudaDeviceSynchronize();  // nothing queued still writes into them
+    cudaGetLastError();
+    drain();
+    for (Buf *b : {&c->h, &c->x, &c->o, &c->lin, &c->y, &c->act, &c->X, &c->S, &c->Rd, &c->G, &c->v, &c->beta, &c->g, &c->out, &c->Qp, &c->Ko,
+                   &c->Qs, &c->Kb, &c->Lb, &c->Ya, &c->wown, &c->mass, &c->stat, &c->emb, &c->tab, &c->ptr, &c->sc, &c->res, &c->cum, &c->C,
+                   &c->Y, &c->us, &c->Q11, &c->cosb, &c->sinb}) {
+        dfree(b->p, b->cap);
+        b->p = nullptr, b->cap = 0;
+    }
+    c->angles = 0, c->rows = 0, c->hidden = 0;  // the tables of angles are made again, and the last pass's queries and hidden states are gone
+    fprintf(stderr, "f2pass: the device was full: the pool and the passes' buffers were given back\n");
+}
+
+/* a call made, and made once more after shed when it failed because the
+   device had no room: what stands beside the states is then the call's own
+   and nothing left by the calls before it. 0; or -1 when the call failed;
+   or -2 when it failed the second time too for want of room (the caller of
+   the library may then give up states and call again). The caller holds
+   c->one */
+template <class F> static int again(F2 *c, F call) {
+    STARVED = false;
+    if (call()) return 0;
+    if (!STARVED.exchange(false)) return -1;
+    shed(c);
+    if (call()) return 0;
+    return STARVED.exchange(false) ? -2 : -1;
 }
 
 /* tensors of the file as bf16 on the device, one after another (stacked rows) */
@@ -1727,7 +1772,7 @@ static bool angles(F2 *c, int T) {
     const int n = T > 32768 ? T : 32768;
     if (!room(c->cosb, (size_t)n * 64 * 4) || !room(c->sinb, (size_t)n * 64 * 4)) return false;
     float *invf;
-    CU(dalloc((void **)&invf, 32 * 4));
+    CU(dalloc_hard((void **)&invf, 32 * 4));
     CU(cudaMemcpy(invf, c->invf, 32 * 4, cudaMemcpyHostToDevice));
     angle_k<<<((size_t)n * 64 + 255) / 256, 256>>>((float *)c->cosb.p, (float *)c->sinb.p, invf, (size_t)n * 64);
     CU(cudaDeviceSynchronize());
@@ -1853,8 +1898,16 @@ long f2_stage(F2 *c, const void *blob, long bytes) {
         const Parts p = parts(h);
         t->spans.assign((const int *)((const char *)blob + p.span), (const int *)((const char *)blob + p.span) + (size_t)h.spans * 2);
         if (!(t->dev = palloc(bytes))) {
+            {  // between two passes (this thread is not the passes'): what they left is given back
+                std::lock_guard<std::mutex> lock(c->one);
+                shed(c);
+            }
+            t->dev = palloc(bytes);
+        }
+        if (!t->dev) {
             delete t;
-            return fail("no room on the device for a packed state", (int)(bytes >> 20)) - 1;
+            fail("no room on the device for a packed state", (int)(bytes >> 20));
+            return -2;
         }
         bool ok;
         if ((size_t)bytes <= c->slab_bytes) {
@@ -1922,7 +1975,7 @@ static long take(F2 *c, long ticket, int keep) {
     auto fill = [&]() -> bool {
         if (h.kind == 1 && (!c->K || h.bytes != c->bytes || h.rank != c->rank)) return fail("a state coded by another book than the reader's", h.bytes);
         if (d->pooled) d->block = palloc(l.end);
-        else CU(dalloc_hard(&d->block, l.end));
+        else dalloc_hard(&d->block, l.end);
         if (!d->block) return fail("no room on the device for a state", (int)(l.end >> 20));
         lap(c, P_TROOM);
         char *b = (char *)d->block;
@@ -1969,14 +2022,21 @@ static long take(F2 *c, long ticket, int keep) {
         for (int i = 0; i < 9; i++) st.rec[LINEAR[i]] = b + l.rec[i], st.conv[LINEAR[i]] = b + l.conv[i];
         return true;
     };
-    const bool ok = fill();
-    pfree(t->dev, t->bytes);
-    delete t;
-    if (!ok) {
+    auto undo = [&]() {  // the block of a try that failed
         if (d->pooled) pfree(d->block, l.end);
         else dfree(d->block, d->block ? l.end : 0);
+        d->block = nullptr;
+    };
+    const int failed = again(c, [&]() {
+        undo();
+        return fill();
+    });
+    pfree(t->dev, t->bytes);
+    delete t;
+    if (failed) {
+        undo();
         delete d;
-        return -1;
+        return failed;
     }
     for (size_t i = 0; i < c->devs.size(); i++)
         if (!c->devs[i]) {
@@ -1994,7 +2054,7 @@ long f2_take(F2 *c, long ticket, int keep) {
 
 long f2_put(F2 *c, const void *blob, long bytes, int keep) {
     long t = f2_stage(c, blob, bytes);
-    return t < 0 ? -1 : f2_take(c, t, keep);
+    return t < 0 ? t : f2_take(c, t, keep);
 }
 
 void f2_unstage(F2 *c, long ticket) {
@@ -2022,7 +2082,7 @@ int f2_tail(F2 *c, int B, const long *states, int N, const int *ids, const int *
         if (states[b] < 1 || states[b] > (long)c->devs.size() || !c->devs[states[b] - 1]) return fail("no such state", (int)states[b]) - 1;
         st[b] = c->devs[states[b] - 1]->st;
     }
-    return tail(c, B, st.data(), N, ids, who, at, same, K, lens, out, most) ? 0 : -1;
+    return again(c, [&]() { return tail(c, B, st.data(), N, ids, who, at, same, K, lens, out, most); });
 }
 
 // ---------------------------------------------------------------- packing a new state
@@ -2386,7 +2446,9 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
 
 long f2_read(F2 *c, int T, const int *ids, int spans, const int *span, const char *tail, int tail_bytes, int null, void *blob, long room) {
     std::lock_guard<std::mutex> lock(c->one);
-    return read(c, T, ids, spans, span, tail, tail_bytes, null, blob, room);
+    long bytes = -1;
+    const int failed = again(c, [&]() { return (bytes = read(c, T, ids, spans, span, tail, tail_bytes, null, blob, room)) >= 0; });
+    return failed ? failed : bytes;
 }
 
 int f2_raw(F2 *c, int T, const int *ids, void *k7, void *v7, void *k11) {
@@ -2407,7 +2469,7 @@ int f2_raw(F2 *c, int T, const int *ids, void *k7, void *v7, void *k11) {
         CU(cudaMemcpy(k11, d11, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
         return true;
     };
-    return raw() ? 0 : -1;
+    return again(c, raw);
 }
 
 // ---------------------------------------------------------------- a run's paragraphs: their word scores, and their order

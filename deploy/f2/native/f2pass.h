@@ -13,8 +13,16 @@ typedef struct F2 F2;
 
 /* the meaning of the calls below and the layout of a packed state: a caller
    built for another number must not call */
-#define F2_ABI 6
+#define F2_ABI 7
 int f2_abi(void);
+
+/* When the device has no room for a call (f2_read, f2_stage, f2_take,
+   f2_put, f2_tail, f2_raw), the library gives back what no call has in hand:
+   its pool of short-lived blocks and the buffers of the passes, which only
+   grow and which the next call takes again. It says so on stderr and makes
+   the call once more. A call that still finds no room returns -2 where
+   another failure returns -1: the caller may drop states (f2_drop) and call
+   again. */
 
 /* the weights of layers 0..11 read from a safetensors file onto the device */
 F2 *f2_open(const char *safetensors);
