@@ -8,7 +8,7 @@ whole of it): a file's, the host's, the same. Its calls take plain ints,
 bytes and ctypes arrays, so this module needs no tensor library."""
 import ctypes, os
 
-ABI = 4  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
+ABI = 5  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
 
 
 class Head(ctypes.Structure):
@@ -40,6 +40,7 @@ for name, res, args in (
                                    FLOATS, ctypes.c_int]),
         ("f2_queries", ctypes.c_long, [VOID, VOID, VOID, ctypes.c_long]),
         ("f2_raw", ctypes.c_int, [VOID, ctypes.c_int, INTS, VOID, VOID, VOID]),
+        ("f2_words", None, [ctypes.c_int, VOID, VOID, VOID, ctypes.c_double, ctypes.POINTER(ctypes.c_double)]),
         ("f2_fuse", None, [ctypes.c_int, ctypes.POINTER(ctypes.c_double), FLOATS, INTS, ctypes.c_double, ctypes.c_double, ctypes.c_double, INTS]),
         ("f2_stop", None, [VOID, ctypes.c_int]),
         ("f2_hidden", ctypes.c_int, [VOID, VOID, ctypes.c_long]),
@@ -66,13 +67,27 @@ def unpacked_bytes(h, keep):
     return LIB.f2_unpacked_bytes(ctypes.byref(h), int(keep))
 
 
+def zeros(n):
+    """n doubles, all zero: what a run's word scores are summed into"""
+    return (ctypes.c_double * n)()
+
+
+def words(post, idf, out):
+    """a word's share of BM25 summed into out (f2_words), with the
+    interpreter's lock let go: post its paragraphs, their counts and what
+    each count is taken over, as arrays of ints, ints and doubles"""
+    at, tf, under = post
+    LIB.f2_words(len(at), at.buffer_info()[0], tf.buffer_info()[0], under.buffer_info()[0], idf, out)
+
+
 def fuse(bm, att, of, weight, neighbour, shard):
-    """a run's paragraphs best first (f2_fuse): bm their word scores, att
-    their attention scores (an array of floats), of each one's shard"""
+    """a run's paragraphs best first (f2_fuse): bm their word scores
+    (doubles: a ctypes array is read where it lies), att their attention
+    scores (an array of floats), of each one's shard"""
     n = len(bm)
     order = (ctypes.c_int * n)()
-    LIB.f2_fuse(n, (ctypes.c_double * n)(*bm), (ctypes.c_float * n).from_buffer(att), ints(of) if not isinstance(of, ctypes.Array) else of,
-                weight, neighbour, shard, order)
+    LIB.f2_fuse(n, bm if isinstance(bm, ctypes.Array) else (ctypes.c_double * n)(*bm), (ctypes.c_float * n).from_buffer(att),
+                ints(of) if not isinstance(of, ctypes.Array) else of, weight, neighbour, shard, order)
     return order
 
 

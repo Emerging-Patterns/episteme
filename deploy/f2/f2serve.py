@@ -135,7 +135,11 @@ kept from one question to the next: the shards as read from the store
 (SHARDS_MAX of them, each while its file stays as it was), each shard's words
 with the paragraphs that hold them (TERMS_MAX shards; BM25 visits only the
 paragraphs that hold a word of the question), and the paragraphs of the
-LOTS sets of shards asked about last.
+LOTS sets of shards asked about last, each set with the paragraphs of the
+words asked of it laid in arrays (WORDS_MB of them a set, those asked
+last): a word's share of BM25 is then one sum in f2pass, made with the
+interpreter's lock let go, so that the questions of a round sum theirs
+beside each other and not in turn.
 
 Host copies are plain pageable memory, never pinned (only the SLABS slabs
 of SLAB_MB a state passes through on its way to the GPU are, in f2pass).
@@ -170,7 +174,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2).
 """
 import array, collections, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, struct, sys, threading, time, traceback
@@ -202,6 +206,7 @@ AHEAD = int(os.environ.get("AHEAD", "8"))
 WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
 NULL = float(os.environ.get("NULL", "1.6"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
+WORDS_BYTES = float(os.environ.get("WORDS_MB", "64")) * 1048576
 BATCH = int(os.environ.get("BATCH", "8"))
 PASS = min(int(os.environ.get("PASS", "768")), model.TOKENS)
 LOTS_MAX = int(os.environ.get("LOTS", "4"))
@@ -756,6 +761,37 @@ class Lot:
         self.avg = sum(self.dl) / max(len(self.dl), 1)
         self.shard = f2pass.ints([p[0] for p in self.paras])
         self.words = None
+        self.post, self.post_b = collections.OrderedDict(), 0  # word -> its paragraphs here (posted), and their bytes
+
+    def posted(self, w):
+        """the paragraphs of these shards that hold the word w, as BM25
+        sums them (f2pass.words): their places, how often each holds it,
+        and what its count is taken over there (the count plus 1.2 times
+        0.25 + 0.75 of the paragraph's length over the mean), as arrays of
+        ints, ints and doubles; None for a word none holds. Kept for the
+        words asked last, up to WORDS_BYTES: the words most paragraphs hold
+        are the ones most questions say"""
+        with META:
+            got = self.post.get(w)
+            if got is not None:
+                self.post.move_to_end(w)
+                return got
+        at, tf, under = array.array("i"), array.array("i"), array.array("d")
+        for first, held in zip(self.first, self.held):
+            for i, c in held.get(w, ()):
+                at.append(first + i)
+                tf.append(c)
+                under.append(c + 1.2 * (0.25 + 0.75 * self.dl[first + i] / self.avg))
+        if not at:
+            return None
+        got = (at, tf, under)
+        with META:
+            if w not in self.post:
+                self.post[w] = got
+                self.post_b += 16 * len(at)
+                while self.post_b > WORDS_BYTES and len(self.post) > 1:
+                    self.post_b -= 16 * len(self.post.popitem(last=False)[1][0])
+        return got
 
 
 class Run:
@@ -794,20 +830,16 @@ class Run:
         return self.lot.words
 
     def bm25(self, q):
-        """per paragraph. Only the paragraphs that hold a word of the
-        question are visited, through each shard's words"""
+        """per paragraph (doubles, as f2pass.fuse reads them). Only the
+        paragraphs that hold a word of the question are visited, through
+        the lot's arrays of them, a word's share summed by f2pass"""
         lot = self.lot
-        N, out, seen = len(lot.paras), [0.0] * len(lot.paras), {}
+        N, out = len(lot.paras), f2pass.zeros(len(lot.paras))
         for w in words(q):  # in the question's order, a word it says twice counted twice
-            if w not in seen:
-                hits = [(first, held[w]) for first, held in zip(lot.first, lot.held) if w in held]
-                seen[w] = (sum(len(h) for _, h in hits), hits)
-            df, hits = seen[w]
-            if df:
-                idf = math.log(1 + (N - df + 0.5) / (df + 0.5))
-                for first, h in hits:
-                    for i, tf in h:
-                        out[first + i] += idf * tf * 2.2 / (tf + 1.2 * (0.25 + 0.75 * lot.dl[first + i] / lot.avg))
+            post = lot.posted(w)
+            if post is not None:
+                df = len(post[0])
+                f2pass.words(post, math.log(1 + (N - df + 0.5) / (df + 0.5)), out)
         return out
 
     def attention(self, q):
