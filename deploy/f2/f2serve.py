@@ -115,6 +115,14 @@ again. Such a copy is unpacked no further than the pass needs (with a book:
 to half precision, not on to the tier's int8). RAM keeps the packed copy
 of a state it hands to the GPU, and of one read from disk while it has
 room; it evicts those copies first.
+The GPU's tier gives way to the work beside it. What a call of the model
+needs on the device is its own and varies (the first reading of a long
+shard two gigabytes, a pass over long shards one and a half, of which
+f2pass keeps the buffers): when the device has no room for a call, f2pass
+first gives back what no call has in hand and tries again, and if there is
+still none the reader drops the GIVE_GB of the tier used least recently and
+calls again, twice at most (roomy). So CACHE_GB is chosen for speed, near
+what the card holds, and not for the largest call.
 
 The scoring is done in passes (model.tail), the GPU lock held for one pass
 at a time: up to BATCH shards, each scored for several questions at once.
@@ -174,7 +182,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
-CACHE_GB (7), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2).
 """
 import array, collections, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, struct, sys, threading, time, traceback
@@ -207,6 +215,7 @@ WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
 NULL = float(os.environ.get("NULL", "1.6"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 WORDS_BYTES = float(os.environ.get("WORDS_MB", "64")) * 1048576
+GIVE_BYTES = float(os.environ.get("GIVE_GB", "1")) * 1e9
 BATCH = int(os.environ.get("BATCH", "8"))
 PASS = min(int(os.environ.get("PASS", "768")), model.TOKENS)
 LOTS_MAX = int(os.environ.get("LOTS", "4"))
@@ -456,6 +465,19 @@ class States:
             self.ram[k] = (st, size)
             self.ram_b += size
 
+    def give(self, most):
+        """the least recently used states of the GPU's tier dropped, most
+        bytes of them: whether any was. RAM and the disk have them"""
+        gone = 0
+        while self.gpu and gone < most:
+            k, (_, size) = self.gpu.popitem(last=False)
+            self.gpu_b -= size
+            self.used.pop(k, None)
+            gone += size
+        if gone:
+            self.n["given"] += 1
+        return gone > 0
+
     def save(self, k, blob):
         try:
             write(blob, self.path(k))
@@ -508,7 +530,7 @@ class States:
             return na
         rnd = random.Random(k)
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
-        rows = model.tail([state], qs)[0]
+        rows = roomy(lambda: model.tail([state], qs))[0]
         wn = array.array("f", [NULL * sum(x) / len(rows) for x in zip(*rows)])
         write(NULLS + wn.tobytes(), path)
         return wn
@@ -534,12 +556,17 @@ class States:
             self.n["gpu"] += 1
             return self.gpu[k][0]
         try:  # a file that is not a state (cut short, another layout's) is a miss like an empty one: the shard is read anew
+            have = None
             if loading is not None:
-                have = loading.get()
-            elif k in self.ram:
-                have = self.ram[k][0] + (None, True)
-            else:
-                have = self.load(k) + (None, False) if self.kept(k) else None
+                try:
+                    have = loading.get()
+                except f2pass.NoRoom:  # the device had no room to stage it: it is sent as it is taken, with room made for it
+                    pass
+            if have is None:
+                if k in self.ram:
+                    have = self.ram[k][0] + (None, True)
+                elif self.kept(k):
+                    have = self.load(k) + (None, False)
         except (OSError, ValueError):
             have = None
         if have is not None:
@@ -548,7 +575,12 @@ class States:
                 self.ram.move_to_end(k)
             size = model.unpacked(blob)
             passing = self.own(k, size, keep, among)
-            there = model.take(ticket, blob, kept=not passing) if ticket is not None else model.unpack(blob, kept=not passing)
+            staged = [ticket]  # spent by the first try, whatever comes of it
+
+            def unpacked():
+                sent = staged.pop() if staged else None
+                return model.take(sent, blob, kept=not passing) if sent is not None else model.unpack(blob, kept=not passing)
+            there = roomy(unpacked)
             if not had:  # from disk: the null the file holds is its "N/A" score
                 null = self.wordnull(k, there, null, pool)
             self.n["ram" if had else "disk"] += 1
@@ -559,9 +591,9 @@ class States:
                 return st
             self.spare(k, (blob, null), len(blob))
         else:
-            fresh = model.prefill(shard)
-            there = model.unpack(fresh)
-            na = model.scores(there, "N/A")
+            fresh = roomy(lambda: model.prefill(shard))
+            there = roomy(lambda: model.unpack(fresh))
+            na = roomy(lambda: model.scores(there, "N/A"))
             model.null(fresh, na)
             blob = bytes(fresh)
             st, size = (there, self.wordnull(k, there, na, pool)), there.size
@@ -572,6 +604,23 @@ class States:
         self.put_gpu(k, st, size, keep)
         self.used[k] = run
         return st
+
+
+def roomy(call):
+    """call(), a call of the model's; and when the device has no room for
+    it, though f2pass gave back what no call had in hand, again with the
+    GIVE_BYTES of the GPU's tier used least recently given up, twice at
+    most. So the tier's size says how many states are at hand and not what
+    the largest call may need beside them: the first reading of a long
+    shard takes two gigabytes of its own, a pass over long shards one and a
+    half. The states a pass has in hand are its own for as long as it holds
+    them; those given up are unpacked again when they are next asked"""
+    for left in (2, 1, 0):
+        try:
+            return call()
+        except f2pass.NoRoom:
+            if not left or not STATES.give(GIVE_BYTES):
+                raise
 
 
 TERMS = collections.OrderedDict()  # shard key -> its words' paragraphs and its paragraphs' lengths
@@ -925,7 +974,7 @@ class Run:
             state, null = STATES.get(k, self.shards[self.need[k][0]], later, STAGED.pop(k, None), self.serial, self.pool, among)
             batch.append((k, state, null, where))
         self.stage(taken)
-        for (k, _state, null, where), row in zip(batch, model.tail([b[1] for b in batch], qs)):
+        for (k, _state, null, where), row in zip(batch, roomy(lambda: model.tail([b[1] for b in batch], qs))):
             for r in runs:
                 for i in r.need.pop(k):
                     score = f2pass.less(row[qs.index(r.q)], null, roots(r.shards[i]))  # less the null, over the root: in single precision, step by step

@@ -8,7 +8,7 @@ whole of it): a file's, the host's, the same. Its calls take plain ints,
 bytes and ctypes arrays, so this module needs no tensor library."""
 import array, ctypes, os
 
-ABI = 6  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
+ABI = 7  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
 
 
 class Head(ctypes.Structure):
@@ -102,6 +102,17 @@ def fuse(bm, att, of, weight, neighbour, shard):
     return order
 
 
+class NoRoom(RuntimeError):
+    """the device has no room for a call, though the library gave back what
+    no call had in hand (-2 of f2pass.h): the caller may drop states it
+    holds there and call again"""
+
+
+def failed(code, what):
+    """the error of a call that returned code (below 0)"""
+    return (NoRoom if code == -2 else RuntimeError)(what + " (its reason is on stderr)")
+
+
 class Pass:
     """the weights on the device, the book, and the states unpacked there"""
 
@@ -125,7 +136,7 @@ class Pass:
         n = LIB.f2_read(self.ctx, len(ids), ints(ids), len(spans), ints([x for s in spans for x in s]), tail, len(tail), len(spans),
                         (ctypes.c_char * room).from_buffer(blob), room)
         if n < 0:
-            raise RuntimeError("the f2pass prefill failed (its reason is on stderr)")
+            raise failed(n, "the f2pass prefill failed")
         del blob[n:]
         return blob
 
@@ -133,14 +144,14 @@ class Pass:
         """a packed state sent to the device beside whatever it is doing; a ticket for take"""
         t = LIB.f2_stage(self.ctx, (ctypes.c_char * len(blob)).from_buffer(blob) if isinstance(blob, bytearray) else blob, len(blob))
         if t < 0:
-            raise RuntimeError("f2pass could not send a state to the device (its reason is on stderr)")
+            raise failed(t, "f2pass could not send a state to the device")
         return t
 
     def take(self, ticket, keep):
         """a staged state unpacked on the device: its handle"""
         h = LIB.f2_take(self.ctx, ticket, int(keep))
         if h < 0:
-            raise RuntimeError("the f2pass unpacking failed (its reason is on stderr)")
+            raise failed(h, "the f2pass unpacking failed")
         return h
 
     def drop(self, handle):
@@ -162,9 +173,10 @@ class Pass:
         same: how many tokens all questions open with; lens: each question's
         tail tokens; most: the most paragraphs a shard has"""
         out = (ctypes.c_float * (len(handles) * len(lens) * most))()
-        if LIB.f2_tail(self.ctx, len(handles), (ctypes.c_long * len(handles))(*handles), len(ids), ints(ids), ints(who), ints(at), same,
-                       len(lens), ints(lens), out, most):
-            raise RuntimeError("the f2pass tail pass failed (its reason is on stderr)")
+        code = LIB.f2_tail(self.ctx, len(handles), (ctypes.c_long * len(handles))(*handles), len(ids), ints(ids), ints(who), ints(at), same,
+                           len(lens), ints(lens), out, most)
+        if code:
+            raise failed(code, "the f2pass tail pass failed")
         return out
 
     def queries(self, rows):
@@ -181,8 +193,9 @@ class Pass:
         keys and values and layer 11's keys, three buffers of bf16
         [tokens][2][256]"""
         out = [ctypes.create_string_buffer(len(ids) * 512 * 2) for _ in range(3)]
-        if LIB.f2_raw(self.ctx, len(ids), ints(ids), *out):
-            raise RuntimeError("the f2pass prefill failed (its reason is on stderr)")
+        code = LIB.f2_raw(self.ctx, len(ids), ints(ids), *out)
+        if code:
+            raise failed(code, "the f2pass prefill failed")
         return out
 
     def hidden(self, layer, rows, *tail):
