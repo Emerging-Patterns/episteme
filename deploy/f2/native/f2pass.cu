@@ -115,6 +115,7 @@ typedef struct {
 #define LIN 8224    // its whole input projection: q k v, z, b, a
 #define MLP 3584
 #define KS 4        // the convolution's kernel
+#define CW (KS - 1)  // the convolution's inputs a state keeps: the last KS - 1, all the tail reads of them
 #define LAYERS 12
 #define ALONE 3
 #define MID 7
@@ -274,7 +275,7 @@ __global__ void cum_k(const float *g, int N, int same, const int *start, float *
 }
 
 /* the shards' recurrent states (bf16, a pointer a shard) in half precision, one (shard, head) after another */
-__global__ void state_k(const bf16 *const *rec, const __half *const *left, const __half *const *right, const uint8_t *const *rest,
+__global__ void state_k(const bf16 *const *rec, const int8_t *const *left, const int8_t *const *right, const uint8_t *const *rest,
                         const __half *const *scale, int rank, __half *S, size_t n) {
     size_t i = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 4;
     if (i >= n) return;
@@ -286,13 +287,14 @@ __global__ void state_k(const bf16 *const *rec, const __half *const *left, const
     }
     // a row's four entries from the low-rank product and the rest, rounded to bf16 as a kept matrix was
     const int h = e / (LD * LD), r = e / LD % LD, j0 = e % LD;
-    const __half *a = left[b] + ((size_t)h * LD + r) * rank;
+    const int8_t *a = left[b] + ((size_t)h * LD + r) * rank;
+    const float *fs = (const float *)(right[b] + (size_t)LH * rank * LD) + h * rank;  // each pair's scale, after the vectors
     const float sc = __half2float(scale[b][h * LD + r]);
     for (int q = 0; q < 4; q++) {
         const int j = j0 + q;
-        const __half *c = right[b] + (size_t)h * rank * LD + j;
+        const int8_t *c = right[b] + (size_t)h * rank * LD + j;
         float x = 0;
-        for (int k = 0; k < rank; k++) x += __half2float(a[k]) * __half2float(c[k * LD]);
+        for (int k = 0; k < rank; k++) x += (float)(a[k] * c[k * LD]) * fs[k];
         const int nib = (rest[b][((size_t)h * LD + r) * (LD / 2) + (j >> 1)] >> ((j & 1) * 4)) & 15;
         S[i + q] = __float2half(bf2f(f2bf(x + (float)(nib - 7) * sc)));
     }
@@ -668,11 +670,11 @@ __global__ void pgate_k(const float *out, int TP, const bf16 *lin, const float *
     y[r * (LH * LD) + hd * LD + j] = f2bf(rbf(w[j] * hs) * (z * sigm(z)));
 }
 
-/* a linear-attention layer's last KS inputs of its convolution (what follows the shard reads them): [6144][KS], zeros before the first token */
+/* a linear-attention layer's last CW inputs of its convolution (what follows the shard reads them): [6144][CW], zeros before the first token */
 __global__ void ptaps_k(const bf16 *lin, int T, bf16 *conv) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= LQKV * KS) return;
-    int c = i / KS, t = T - KS + i % KS;
+    if (i >= LQKV * CW) return;
+    int c = i / CW, t = T - CW + i % CW;
     conv[i] = t < 0 ? 0 : lin[(size_t)t * LIN + c];
 }
 
@@ -1454,8 +1456,8 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
                                    (float *)c->v.p, (float *)c->beta.p, (float *)c->g.p, N, true);
             lap(c, P_CONV);
             cum_k<<<(BH + 127) / 128, 128>>>((float *)c->g.p, N, same, d_start, (float *)c->cum.p, BH);
-            state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, T_REC + li), PT(const __half *const *, T_LEFT + li),
-                                                                 PT(const __half *const *, T_RIGHT + li), PT(const uint8_t *const *, T_REST + li),
+            state_k<<<((size_t)BH * LD * LD / 4 + 255) / 256, 256>>>(PT(const bf16 *const *, T_REC + li), PT(const int8_t *const *, T_LEFT + li),
+                                                                 PT(const int8_t *const *, T_RIGHT + li), PT(const uint8_t *const *, T_REST + li),
                                                                  PT(const __half *const *, T_SCALE + li), c->rank, S, (size_t)BH * LD * LD);
             lap(c, P_CUM);
             BL(cublasGemmStridedBatchedEx(c->cb, CUBLAS_OP_N, CUBLAS_OP_N, LD, 2 * N, LD, &one, S, CUDA_R_16F, LD, LD * LD, X, CUDA_R_16F, LD,
@@ -1673,7 +1675,7 @@ static bool prefill(F2 *c, const F2Fill *f) {
         if (L.linear) {
             if (!dense(c, L.Win, LIN, HID, x, T, lin, false)) return false;
             lap(c, P_FDENSE);
-            ptaps_k<<<(LQKV * KS + 255) / 256, 256>>>(lin, T, (bf16 *)f->conv[li]);
+            ptaps_k<<<(LQKV * CW + 255) / 256, 256>>>(lin, T, (bf16 *)f->conv[li]);
             conv_k<<<(size_t)T * LH, LD>>>(lin, 1, tab, KS - 1, L.convw, d_src, T, L.negA, L.dtb, nullptr, q, k, v, beta, g, TP, false);
             lap(c, P_FREST);
             // every chunk's own part: the decays, the two triangles, the system solved
@@ -1879,7 +1881,7 @@ static Parts parts(const F2Head &h) {
     if (h.kind == 1) {
         p.joint = take(T * h.bytes), p.at = take((size_t)h.exact * 4), p.rows = take((size_t)h.exact * 1536 * 2), p.rms = take(2 * T * 2);
         for (int l = 0; l < 9; l++) {
-            p.left[l] = take((size_t)LH * LD * h.rank * 2), p.right[l] = take((size_t)LH * h.rank * LD * 2);
+            p.left[l] = take((size_t)LH * LD * h.rank), p.right[l] = take((size_t)LH * h.rank * LD + (size_t)LH * h.rank * 4);
             p.rest[l] = take((size_t)LH * LD * (LD / 2)), p.scale[l] = take((size_t)LH * LD * 2), p.conv[l] = take((size_t)LQKV * h.conv * 2);
         }
     } else {
@@ -1892,7 +1894,7 @@ static Parts parts(const F2Head &h) {
 }
 
 static bool sound(const F2Head &h) {
-    return !memcmp(h.magic, "F2STATE1", 8) && (h.kind == 0 || h.kind == 1) && h.tokens > 0 && h.spans >= 0 && h.exact >= 0 && h.conv >= KS - 1 &&
+    return !memcmp(h.magic, "F2STATE2", 8) && (h.kind == 0 || h.kind == 1) && h.tokens > 0 && h.spans >= 0 && h.exact >= 0 && h.conv == CW &&
            h.tail >= 0 && h.null >= 0 && (h.kind == 0 || (h.bytes > 0 && h.rank > 0));
 }
 
@@ -2255,16 +2257,16 @@ __global__ void bfround_k(const float *x, float *out, bf16 *kept, size_t n) {
 
 /* what a low-rank product leaves of a matrix, four bits an entry over a
    scale a row, a block a (matrix, row): the rest is the matrix less left
-   times right (halves, as they are kept), its scale the row's largest
+   times right (int8 and the pairs' scales, as they are kept), its scale the row's largest
    magnitude over 7, an entry its rest over the scale, rounded, within -7..7,
    plus 7; two entries a byte, the low half first */
-__global__ void rest_k(const float *a, const __half *left, const __half *right, int rank, uint8_t *rest, __half *scale) {
+__global__ void rest_k(const float *a, const int8_t *left, const int8_t *right, const float *fs, int rank, uint8_t *rest, __half *scale) {
     __shared__ float sh[4];
     __shared__ float r[LD];
     size_t m = blockIdx.x / LD;
     int i = blockIdx.x % LD, j = threadIdx.x;
     float x = 0;
-    for (int k = 0; k < rank; k++) x += __half2float(left[(m * LD + i) * rank + k]) * __half2float(right[(m * rank + k) * LD + j]);
+    for (int k = 0; k < rank; k++) x += (float)(left[(m * LD + i) * rank + k] * right[(m * rank + k) * LD + j]) * fs[m * rank + k];
     x = a[(m * LD + i) * LD + j] - x;
     float most = bmax(fabsf(x), sh);
     __half sc = __float2half(fmaxf(most, 1e-12f) / 7.f);
@@ -2355,16 +2357,20 @@ static void eigen(double *m, double *v, int p) {
    and the rest in four bits (joint.low): the leading subspace by three
    rounds of subspace iteration from the book's fixed directions, the
    products on the device, the small orthogonalisations and one small
-   decomposition a matrix on the host. left [144][128][rank], right
-   [144][rank][128] (halves), rest [144][128][64], scale [144][128] to the
-   host */
-static bool lowrank(F2 *c, Held &m, const float *A, uint16_t *left, uint16_t *right, uint8_t *rest, uint16_t *scale) {
+   decomposition a matrix on the host. Each singular pair's vectors are kept
+   as int8 over their largest magnitudes, the product of the two scales
+   beside them, and the rest is taken against the product as kept. left
+   [144][128][rank] and right [144][rank][128] (int8), fs [144][rank]
+   (fp32), rest [144][128][64], scale [144][128] to the host */
+static bool lowrank(F2 *c, Held &m, const float *A, int8_t *left, int8_t *right, float *fs, uint8_t *rest, uint16_t *scale) {
     const int M = 9 * LH, P = c->rank + 8, R = c->rank;
     const float one = 1, zero = 0;
     float *Y = (float *)m.get((size_t)M * LD * P * 4), *Z = (float *)m.get((size_t)M * LD * P * 4), *Bd = (float *)m.get((size_t)M * P * LD * 4);
-    __half *dl = (__half *)m.get((size_t)M * LD * R * 2), *dr = (__half *)m.get((size_t)M * R * LD * 2), *ds = (__half *)m.get((size_t)M * LD * 2);
+    int8_t *dl = (int8_t *)m.get((size_t)M * LD * R), *dr = (int8_t *)m.get((size_t)M * R * LD);
+    float *dfs = (float *)m.get((size_t)M * R * 4);
+    __half *ds = (__half *)m.get((size_t)M * LD * 2);
     uint8_t *drest = (uint8_t *)m.get((size_t)M * LD * (LD / 2));
-    if (!Y || !Z || !Bd || !dl || !dr || !ds || !drest) return fail("out of memory for a state's packing", 0);
+    if (!Y || !Z || !Bd || !dl || !dr || !dfs || !ds || !drest) return fail("out of memory for a state's packing", 0);
     std::vector<float> y((size_t)M * LD * P), b((size_t)M * P * LD);
     // a matrix is rows here and columns to cuBLAS, so each is its own transpose there: for A times a [128][P] block,
     // the block (as [P][128] there) times A as it lies; for A transposed times it, times A transposed there
@@ -2382,6 +2388,7 @@ static bool lowrank(F2 *c, Held &m, const float *A, uint16_t *left, uint16_t *ri
     CU(cudaMemcpy(b.data(), Bd, b.size() * 4, cudaMemcpyDeviceToHost));
     std::vector<double> g(P * P), v(P * P);
     std::vector<int> ord(P);
+    std::vector<double> lv(LD), rv(LD);
     for (int i = 0; i < M; i++) {
         const float *q = &y[(size_t)i * LD * P], *bb = &b[(size_t)i * P * LD];
         for (int r = 0; r < P; r++)
@@ -2396,21 +2403,28 @@ static bool lowrank(F2 *c, Held &m, const float *A, uint16_t *left, uint16_t *ri
         for (int r = 0; r < R; r++) {
             const int e = ord[r];
             const double sv = sqrt(g[e * P + e] > 0 ? g[e * P + e] : 0);
+            double lm = 0, rm = 0;
             for (int row = 0; row < LD; row++) {  // left: Q times the vector, times the singular value
                 double d = 0;
                 for (int k = 0; k < P; k++) d += (double)q[row * P + k] * v[k * P + e];
-                left[((size_t)i * LD + row) * R + r] = tohalf((float)(d * sv));
+                lv[row] = d * sv, lm = std::max(lm, fabs(lv[row]));
             }
             for (int j = 0; j < LD; j++) {  // right: the vector's row of B over the singular value
                 double d = 0;
                 for (int k = 0; k < P; k++) d += v[k * P + e] * bb[k * LD + j];
-                right[((size_t)i * R + r) * LD + j] = tohalf(sv > 1e-30 ? (float)(d / sv) : 0.f);
+                rv[j] = sv > 1e-30 ? d / sv : 0, rm = std::max(rm, fabs(rv[j]));
             }
+            // each vector over its largest magnitude, in 127 steps a side; the pair's scale is the product of the two
+            const double ls = lm > 0 ? lm / 127 : 1, rs = rm > 0 ? rm / 127 : 1;
+            for (int row = 0; row < LD; row++) left[((size_t)i * LD + row) * R + r] = (int8_t)std::lrint(lv[row] / ls);
+            for (int j = 0; j < LD; j++) right[((size_t)i * R + r) * LD + j] = (int8_t)std::lrint(rv[j] / rs);
+            fs[(size_t)i * R + r] = (float)(ls * rs);
         }
     }
-    CU(cudaMemcpy(dl, left, (size_t)M * LD * R * 2, cudaMemcpyHostToDevice));
-    CU(cudaMemcpy(dr, right, (size_t)M * R * LD * 2, cudaMemcpyHostToDevice));
-    rest_k<<<M * LD, LD>>>(A, dl, dr, R, drest, ds);
+    CU(cudaMemcpy(dl, left, (size_t)M * LD * R, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(dr, right, (size_t)M * R * LD, cudaMemcpyHostToDevice));
+    CU(cudaMemcpy(dfs, fs, (size_t)M * R * 4, cudaMemcpyHostToDevice));
+    rest_k<<<M * LD, LD>>>(A, dl, dr, dfs, R, drest, ds);
     CU(cudaMemcpy(rest, drest, (size_t)M * LD * (LD / 2), cudaMemcpyDeviceToHost));
     CU(cudaMemcpy(scale, ds, (size_t)M * LD * 2, cudaMemcpyDeviceToHost));
     return true;
@@ -2421,19 +2435,19 @@ static bool prefill(F2 *c, const F2Fill *f);
 static long read(F2 *c, int T, const int *ids, int spans, const int *span, const char *tail, int tail_bytes, int null, void *blob, long room) {
     Held m;
     bf16 *k7 = (bf16 *)m.get((size_t)T * 512 * 2), *v7 = (bf16 *)m.get((size_t)T * 512 * 2), *k11 = (bf16 *)m.get((size_t)T * 512 * 2),
-         *conv = (bf16 *)m.get((size_t)9 * LQKV * KS * 2);
+         *conv = (bf16 *)m.get((size_t)9 * LQKV * CW * 2);
     float *rec = (float *)m.get((size_t)9 * LH * LD * LD * 4);
     if (!k7 || !v7 || !k11 || !conv || !rec) return fail("out of memory for a prefill", T) - 1;
     F2Fill f;
     memset(&f, 0, sizeof f);
     f.tokens = T, f.ids = ids, f.k7 = k7, f.v7 = v7, f.k11 = k11;
-    for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * KS, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
+    for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * CW, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
     if (!prefill(c, &f)) return -1;
     c->mark = now();
     F2Head h;
     memset(&h, 0, sizeof h);
-    memcpy(h.magic, "F2STATE1", 8);
-    h.kind = c->K ? 1 : 0, h.tokens = T, h.spans = spans, h.bytes = c->K ? c->bytes : 0, h.rank = c->K ? c->rank : 0, h.conv = KS, h.tail = tail_bytes, h.null = null;
+    memcpy(h.magic, "F2STATE2", 8);
+    h.kind = c->K ? 1 : 0, h.tokens = T, h.spans = spans, h.bytes = c->K ? c->bytes : 0, h.rank = c->K ? c->rank : 0, h.conv = CW, h.tail = tail_bytes, h.null = null;
     char *out = (char *)blob;
     auto pack = [&]() -> bool {
         const size_t n = (size_t)T * 1536, M = 9 * LH;
@@ -2477,16 +2491,19 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
             }
             CU(cudaMemcpy(out + p.joint, pk, (size_t)T * c->bytes, cudaMemcpyDeviceToHost));
             CU(cudaMemcpy(out + p.rms, rmsh, (size_t)2 * T * 2, cudaMemcpyDeviceToHost));
-            std::vector<uint16_t> left(M * LD * c->rank), right(M * c->rank * LD), scale(M * LD);
+            std::vector<int8_t> left(M * LD * c->rank), right(M * c->rank * LD);
+            std::vector<float> fs(M * c->rank);
+            std::vector<uint16_t> scale(M * LD);
             std::vector<uint8_t> rest(M * LD * (LD / 2));
-            if (!lowrank(c, m, A, left.data(), right.data(), rest.data(), scale.data())) return false;
+            if (!lowrank(c, m, A, left.data(), right.data(), fs.data(), rest.data(), scale.data())) return false;
             for (int i = 0; i < 9; i++) {
                 const size_t a = (size_t)i * LH;
-                memcpy(out + p.left[i], &left[a * LD * c->rank], (size_t)LH * LD * c->rank * 2);
-                memcpy(out + p.right[i], &right[a * c->rank * LD], (size_t)LH * c->rank * LD * 2);
+                memcpy(out + p.left[i], &left[a * LD * c->rank], (size_t)LH * LD * c->rank);
+                memcpy(out + p.right[i], &right[a * c->rank * LD], (size_t)LH * c->rank * LD);
+                memcpy(out + p.right[i] + (size_t)LH * c->rank * LD, &fs[a * c->rank], (size_t)LH * c->rank * 4);
                 memcpy(out + p.rest[i], &rest[a * LD * (LD / 2)], (size_t)LH * LD * (LD / 2));
                 memcpy(out + p.scale[i], &scale[a * LD], (size_t)LH * LD * 2);
-                CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * KS, (size_t)LQKV * KS * 2, cudaMemcpyDeviceToHost));
+                CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * CW, (size_t)LQKV * CW * 2, cudaMemcpyDeviceToHost));
             }
             memcpy(out + p.ids, ids, (size_t)T * 4);
             memcpy(out + p.span, span, (size_t)spans * 8);
@@ -2512,7 +2529,7 @@ static long read(F2 *c, int T, const int *ids, int spans, const int *span, const
         bfround_k<<<(M * LD * LD + 255) / 256, 256>>>(rec, nullptr, rb, M * LD * LD);
         for (int i = 0; i < 9; i++) {
             CU(cudaMemcpy(out + p.rec[i], rb + (size_t)i * LH * LD * LD, (size_t)LH * LD * LD * 2, cudaMemcpyDeviceToHost));
-            CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * KS, (size_t)LQKV * KS * 2, cudaMemcpyDeviceToHost));
+            CU(cudaMemcpy(out + p.conv[i], conv + (size_t)i * LQKV * CW, (size_t)LQKV * CW * 2, cudaMemcpyDeviceToHost));
         }
         memcpy(out + p.ids, ids, (size_t)T * 4);
         memcpy(out + p.span, span, (size_t)spans * 8);
@@ -2538,13 +2555,13 @@ int f2_raw(F2 *c, int T, const int *ids, void *k7, void *v7, void *k11) {
     auto raw = [&]() -> bool {
         Held m;
         bf16 *d7 = (bf16 *)m.get((size_t)T * 512 * 2), *dv = (bf16 *)m.get((size_t)T * 512 * 2), *d11 = (bf16 *)m.get((size_t)T * 512 * 2),
-             *conv = (bf16 *)m.get((size_t)9 * LQKV * KS * 2);
+             *conv = (bf16 *)m.get((size_t)9 * LQKV * CW * 2);
         float *rec = (float *)m.get((size_t)9 * LH * LD * LD * 4);
         if (!d7 || !dv || !d11 || !conv || !rec) return fail("out of memory for a prefill", T);
         F2Fill f;
         memset(&f, 0, sizeof f);
         f.tokens = T, f.ids = ids, f.k7 = d7, f.v7 = dv, f.k11 = d11;
-        for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * KS, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
+        for (int i = 0; i < 9; i++) f.conv[LINEAR[i]] = conv + (size_t)i * LQKV * CW, f.rec[LINEAR[i]] = rec + (size_t)i * LH * LD * LD;
         if (!prefill(c, &f)) return false;
         CU(cudaMemcpy(k7, d7, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
         CU(cudaMemcpy(v7, dv, (size_t)T * 512 * 2, cudaMemcpyDeviceToHost));
