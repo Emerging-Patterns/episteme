@@ -927,6 +927,11 @@ struct F2 {
     File file;
     const bf16 *embed = nullptr;
     Layer layer[LAYERS];
+    // a tail pass's own weights, when a file of them was given (f2_tail_weights): each layer as the model's, but for
+    // the projections that file holds. A shard is read (prefill) with the model's own, so a kept state is the same
+    File tfile;
+    Layer tlayer[LAYERS];
+    bool tailed = false;
     cublasHandle_t cb = nullptr;
     float invf[32];
     int stop = -1;
@@ -1102,13 +1107,18 @@ template <class F> static int again(F2 *c, F call) {
     return STARVED.exchange(false) ? -2 : -1;
 }
 
+/* a tensor by its name: first's when first is given and holds it, else f's */
+static bool found(const File &f, const File *first, const std::string &name, Tensor &t) {
+    return (first && first->find(name, t)) || f.find(name, t);
+}
+
 /* tensors of the file as bf16 on the device, one after another (stacked rows) */
-static bool stack(const File &f, const std::vector<std::pair<std::string, std::pair<long, long>>> &parts, bf16 **out) {
+static bool stack(const File &f, const std::vector<std::pair<std::string, std::pair<long, long>>> &parts, bf16 **out, const File *first = nullptr) {
     size_t total = 0;
     std::vector<Tensor> ts;
     for (auto &p : parts) {
         Tensor t;
-        if (!f.find(p.first, t)) return fail(p.first.c_str(), 404);
+        if (!found(f, first, p.first, t)) return fail(p.first.c_str(), 404);
         if (t.dtype != "BF16") return fail("a projection that is not bf16", 0);
         ts.push_back(t);
         long rows = p.second.second < 0 ? t.shape[0] : p.second.second;
@@ -1149,13 +1159,13 @@ __global__ void fix_k(const unsigned *at, const bf16 *was, int fixes, bf16 *a) {
     if (i < fixes) a[at[i]] = was[i];
 }
 
-static bool stack(const File &f, const std::vector<std::pair<std::string, std::pair<long, long>>> &parts, Mat *m) {
+static bool stack(const File &f, const std::vector<std::pair<std::string, std::pair<long, long>>> &parts, Mat *m, const File *first = nullptr) {
     bf16 *b = nullptr;
-    if (!stack(f, parts, &b)) return false;
+    if (!stack(f, parts, &b, first)) return false;
     size_t n = 0;
     for (auto &p : parts) {
         Tensor t;
-        f.find(p.first, t);
+        found(f, first, p.first, t);
         n += (p.second.second < 0 ? t.shape[0] : p.second.second) * (t.count() / t.shape[0]);
     }
     int *count;
@@ -1199,6 +1209,24 @@ template <class F> static bool vec(const File &f, const std::string &name, float
     return true;
 }
 
+/* a layer's stacked attention projections, each tensor first's when first holds it. A full-attention layer's are
+   its query, key and value projections and its output's; the top layer's only the queries of the two heads that are
+   read (3 and 4) and the keys; a linear layer's its four input projections and its output's */
+static bool projections(const File &f, const File *first, int li, Layer &L) {
+    auto all = [](const std::string &n) { return std::make_pair(n, std::make_pair(0L, -1L)); };
+    std::string p = "model.language_model.layers." + std::to_string(li) + ".";
+    if (L.linear) {
+        std::string a = p + "linear_attn.";
+        return stack(f, {all(a + "in_proj_qkv.weight"), all(a + "in_proj_z.weight"), all(a + "in_proj_b.weight"), all(a + "in_proj_a.weight")}, &L.Win, first) &&
+               stack(f, {all(a + "out_proj.weight")}, &L.Wout, first);
+    }
+    std::string a = p + "self_attn.";
+    if (li == TOP)
+        return stack(f, {{a + "q_proj.weight", {3 * 2 * HD, HD}}, {a + "q_proj.weight", {4 * 2 * HD, HD}}, all(a + "k_proj.weight")}, &L.Win, first);
+    return stack(f, {all(a + "q_proj.weight"), all(a + "k_proj.weight"), all(a + "v_proj.weight")}, &L.Win, first) &&
+           stack(f, {all(a + "o_proj.weight")}, &L.Wout, first);
+}
+
 static bool load(F2 *c, const char *path) {
     if (!c->file.open(path)) return fail("cannot read the weights", 0);
     const File &f = c->file;
@@ -1213,10 +1241,9 @@ static bool load(F2 *c, const char *path) {
         std::string p = "model.language_model.layers." + std::to_string(li) + ".";
         L.linear = li % 4 != 3;
         if (!vec(f, p + "input_layernorm.weight", &L.n1, plus1)) return false;
+        if (!projections(f, nullptr, li, L)) return false;
         if (L.linear) {
             std::string a = p + "linear_attn.";
-            if (!stack(f, {all(a + "in_proj_qkv.weight"), all(a + "in_proj_z.weight"), all(a + "in_proj_b.weight"), all(a + "in_proj_a.weight")}, &L.Win)) return false;
-            if (!stack(f, {all(a + "out_proj.weight")}, &L.Wout)) return false;
             if (!stack(f, {all(a + "conv1d.weight")}, &L.convw)) return false;
             if (!vec(f, a + "A_log", &L.negA, [](float w) { return -expf(w); })) return false;
             if (!vec(f, a + "dt_bias", &L.dtb, same)) return false;
@@ -1224,13 +1251,9 @@ static bool load(F2 *c, const char *path) {
         } else {
             std::string a = p + "self_attn.";
             if (li == TOP) {
-                // only the queries of the two heads that are read (3 and 4), and the keys
-                if (!stack(f, {{a + "q_proj.weight", {3 * 2 * HD, HD}}, {a + "q_proj.weight", {4 * 2 * HD, HD}}, all(a + "k_proj.weight")}, &L.Win)) return false;
                 // the layer's query scale doubled: its norm's weight, kept as w, becomes 2 (1 + w) - 1
                 if (!vec(f, a + "q_norm.weight", &L.qn, [](float w) { return 1.f + rbf((1.f + w) * 2.f - 1.f); })) return false;
             } else {
-                if (!stack(f, {all(a + "q_proj.weight"), all(a + "k_proj.weight"), all(a + "v_proj.weight")}, &L.Win)) return false;
-                if (!stack(f, {all(a + "o_proj.weight")}, &L.Wout)) return false;
                 if (!vec(f, a + "q_norm.weight", &L.qn, plus1)) return false;
             }
             if (!vec(f, a + "k_norm.weight", &L.kn, plus1)) return false;
@@ -1253,6 +1276,31 @@ F2 *f2_open(const char *path) {
         return nullptr;
     }
     return c;
+}
+
+/* tail passes run with the projections of the file at path where it holds them (a safetensors file of the model's
+   own names: some or all of the layers' attention projections), and the model's own everywhere else. A layer none
+   of whose projections the file holds shares the model's, so the file costs the device only what it changes.
+   Reading a shard keeps the model's own weights. 1, or 0 with the reason on stderr */
+int f2_tail_weights(F2 *c, const char *path) {
+    std::lock_guard<std::mutex> lock(c->one);
+    if (c->tailed) return fail("the tail's weights are given once", 0);
+    if (!c->tfile.open(path)) return fail("cannot read the tail's weights", 0);
+    for (int li = 0; li < LAYERS; li++) {
+        Layer &L = c->tlayer[li];
+        L = c->layer[li];
+        std::string p = "model.language_model.layers." + std::to_string(li) + (L.linear ? ".linear_attn." : ".self_attn.");
+        Tensor t;
+        bool any = false;
+        for (const char *n : {"in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj", "q_proj", "k_proj", "v_proj", "o_proj"})
+            any = any || c->tfile.find(p + n + ".weight", t);
+        if (!any) continue;
+        L.Win = Mat();
+        L.Wout = li == TOP ? L.Wout : Mat();
+        if (!projections(c->file, &c->tfile, li, L)) return 0;
+    }
+    c->tailed = true;
+    return 1;
 }
 
 void f2_close(F2 *c) { delete c; }
@@ -1445,7 +1493,7 @@ static bool tail(F2 *c, int B, const F2State *st, int N, const int *ids, const i
     const dim3 castgrid(((size_t)TM * HD / 4 + 255) / 256, SG);
     const bf16 *add = nullptr;  // what the next norm sums into h first
     for (int li = 0; li < LAYERS; li++) {
-        Layer &L = c->layer[li];
+        Layer &L = c->tailed ? c->tlayer[li] : c->layer[li];
         norm_k<<<R, 256>>>(h, add, li == 0 ? (const bf16 *)c->emb.p : nullptr, N, L.n1, x, true);
         lap(c, P_NORM);
         if (L.linear) {

@@ -183,7 +183,16 @@ the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
 CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
-F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2).
+F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2),
+F2_TAIL (none).
+
+With F2_TAIL, a safetensors file of attention projections under the model's
+own names, a question's tail pass uses those projections in place of the
+model's: the question's side of the reader trained to read better, while a
+shard is still read by the model as it is. So no kept state depends on the
+file, and it may be given, changed or taken away over a store as it stands;
+a shard's word null and a kept score are tail passes' numbers and are made
+again under it (their names and what made them take the file's bytes).
 """
 import array, collections, ctypes, difflib, hashlib, itertools, json, math, os, random, re, signal, struct, sys, threading, time, traceback
 from multiprocessing.pool import ThreadPool
@@ -662,7 +671,7 @@ def made_by():
     question: the model, the nulls, this reader's code as it was read when
     the process began, and what runs its tail passes (a change to how a
     score is made must not find the scores the old code made)"""
-    return [model.VERSION, WORDNULLS, NULL, CODE, model.by()]
+    return [model.VERSION, WORDNULLS, NULL, CODE, model.by(), names.TAIL_ID]
 
 
 KEPT = b"F2SCORE1"  # the kept scores' file opens with it
@@ -1162,5 +1171,6 @@ if __name__ == "__main__":
         threading.Thread(target=rewarming, args=(SCORES_PATH,), daemon=True).start()
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores, tail passes by %s" % (PORT, RAM_BYTES / 1e9, had, model.by()), flush=True)
+    print("f2 reader on 127.0.0.1:%d, RAM tier %.1f GB, %d kept scores, tail passes by %s%s" % (
+        PORT, RAM_BYTES / 1e9, had, model.by(), ", the tail's weights %s" % names.TAIL_ID if names.TAIL_ID else ""), flush=True)
     Server(("127.0.0.1", PORT), Handler).serve_forever()

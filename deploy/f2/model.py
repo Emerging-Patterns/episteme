@@ -46,7 +46,7 @@ from names import DIR, BOOK_PATH, BOOK_ID, PLAIN, VERSION
 
 import f2pass
 
-if f2pass.ABI != 9:  # the package in the environment was built from another version of native/
+if f2pass.ABI != 10:  # the package in the environment was built from another version of native/
     raise RuntimeError("f2pass in this environment is not this code's: run `uv sync --no-editable` in %s" % os.path.dirname(os.path.abspath(__file__)))
 
 LAYERS = 12  # layers 0..11
@@ -59,7 +59,7 @@ TOKENS = f2pass.TOKENS  # the most tail tokens a pass may hold
 
 tok = Tokenizer.from_file(os.path.join(DIR, "tokenizer.json"))
 WEIGHTS = next(os.path.join(DIR, f) for f in sorted(os.listdir(DIR)) if f.endswith(".safetensors"))
-LIB = f2pass.Pass(WEIGHTS)  # the weights on the device
+LIB = f2pass.Pass(WEIGHTS, names.TAIL)  # the weights on the device, and the tail's own when a file of them is given
 # a state kept with a book is coded by it; names.py says what a kept state depends on (VERSION, PLAIN)
 BOOK = None if BOOK_ID is None else names.book(BOOK_PATH)
 if BOOK is not None and not LIB.book(BOOK["coefficients"], *(BOOK[k] for k in ("mean", "fwd", "inv", "widths", "step")), BOOK["exact"],

@@ -8,7 +8,7 @@ whole of it): a file's, the host's, the same. Its calls take plain ints,
 bytes and ctypes arrays, so this module needs no tensor library."""
 import array, ctypes, os
 
-ABI = 9  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
+ABI = 10  # what f2pass.h calls F2_ABI: the calls' meaning and a packed state's layout
 
 
 class Head(ctypes.Structure):
@@ -26,6 +26,7 @@ assert LIB.f2_abi() == ABI, "libf2pass.so was built for another f2pass.py"
 INTS, FLOATS, VOID = ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float), ctypes.c_void_p
 for name, res, args in (
         ("f2_open", VOID, [ctypes.c_char_p]),
+        ("f2_tail_weights", ctypes.c_int, [VOID, ctypes.c_char_p]),
         ("f2_packed_bytes", ctypes.c_long, [ctypes.POINTER(Head)]),
         ("f2_unpacked_bytes", ctypes.c_long, [ctypes.POINTER(Head), ctypes.c_int]),
         ("f2_book", ctypes.c_int, [VOID, ctypes.c_int, VOID, VOID, VOID, VOID, VOID, ctypes.c_float, ctypes.c_int, ctypes.c_int]),
@@ -117,10 +118,15 @@ def failed(code, what):
 class Pass:
     """the weights on the device, the book, and the states unpacked there"""
 
-    def __init__(self, weights):
+    def __init__(self, weights, tail=None):
+        """the model's weights; with tail, a second file whose attention
+        projections a tail pass uses in place of the model's (a shard is
+        read with the model's own either way)"""
         self.ctx = LIB.f2_open(os.fsencode(weights))
         if not self.ctx:
             raise OSError("f2pass could not read the weights at %s" % weights)
+        if tail and not LIB.f2_tail_weights(self.ctx, os.fsencode(tail)):
+            raise OSError("f2pass could not read the tail's weights at %s" % tail)
 
     def book(self, coefficients, mean, fwd, inv, widths, step, exact, rank, resid):
         """the book states are coded by, from host buffers (f2_book); whether
