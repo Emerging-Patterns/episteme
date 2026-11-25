@@ -5,7 +5,9 @@ running reader.
 A shard's key is its text's. Its state's name is the key's with what a kept
 state depends on (VERSION: the model's directory, the layout of a state and,
 with a book, the book's bytes; PLAIN with none). A change to any of them
-leaves the old files under names no reader says again."""
+leaves the old files under names no reader says again. A word null's name
+also takes the tail's weights when a file of them is given (TAIL_ID): a
+null is a tail pass's score, a state is not."""
 import hashlib, os, struct
 import store
 
@@ -24,6 +26,12 @@ def book_id(path):
 
 
 BOOK_ID = book_id(BOOK_PATH)
+# F2_TAIL: a safetensors file of attention projections that tail passes use in place of the model's (the question's
+# side trained; a shard is read with the model's own). A state does not depend on it; a word null and a kept score do
+TAIL = os.environ.get("F2_TAIL") or None
+if TAIL and book_id(TAIL) is None:
+    raise ValueError("F2_TAIL names %s, which is no file" % TAIL)
+TAIL_ID = book_id(TAIL) if TAIL else None
 PLAIN = "12|11:2.0|%s|v9" % DIR  # what a state kept with no book depends on
 VERSION = PLAIN if BOOK_ID is None else "12|11:2.0|%s|v9|%s" % (DIR, BOOK_ID)  # what a kept state depends on
 
@@ -61,4 +69,4 @@ def state(k):
 
 def null(k):
     """where k's word null is kept"""
-    return "%s/%s.wn.f2" % (WN_DIR, hashlib.sha1((k + VERSION).encode()).hexdigest())
+    return "%s/%s.wn.f2" % (WN_DIR, hashlib.sha1((k + VERSION + (TAIL_ID or "")).encode()).hexdigest())

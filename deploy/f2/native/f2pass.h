@@ -13,7 +13,7 @@ typedef struct F2 F2;
 
 /* the meaning of the calls below and the layout of a packed state: a caller
    built for another number must not call */
-#define F2_ABI 9
+#define F2_ABI 10
 int f2_abi(void);
 
 /* When the device has no room for a call (f2_read, f2_stage, f2_take,
@@ -26,6 +26,9 @@ int f2_abi(void);
 
 /* the weights of layers 0..11 read from a safetensors file onto the device */
 F2 *f2_open(const char *safetensors);
+/* tail passes use the attention projections the safetensors file at path holds, and the model's own for the rest;
+   a shard is still read with the model's own, so kept states do not depend on it. Once, before any pass. 1 or 0 */
+int f2_tail_weights(F2 *, const char *safetensors);
 void f2_close(F2 *);
 
 /* ---- a packed state: one run of bytes, the same in a file, in host memory

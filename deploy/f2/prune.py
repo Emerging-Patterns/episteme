@@ -29,7 +29,8 @@ fewer than half of the store's shards have a state under the names worked
 out here, nothing is removed and it says so; --force removes anyway, for
 the store whose book was just fitted again.
 
-env: EPISTEME_HOME, F2_MODEL, F2_BOOK, F2_STATES, F2_WORDNULLS, as the reader's.
+env: EPISTEME_HOME, F2_MODEL, F2_BOOK, F2_TAIL, F2_STATES, F2_WORDNULLS, as the reader's
+(a word null made under other tail weights is a stranger's, as one made under another book).
 """
 import glob, os, re, sys, time
 import names, store
