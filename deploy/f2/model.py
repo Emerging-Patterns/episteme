@@ -174,8 +174,8 @@ def unpack(blob, kept=True):
     return take(stage(blob), blob, kept)
 
 
-# ASK_PREFIX: fixed framing before the question text ("Question: " live).
-# ASK_PREFIX=auto picks by form (ranking-86): "Question: " if it ends with ?,
+# ASK_PREFIX: fixed framing before the question text (default "Question: ").
+# ASK_PREFIX=auto picks by form: "Question: " if it ends with ?,
 # "Find where the record says: " if long, else "Passages about: ".
 ASK_PREFIX = os.environ.get("ASK_PREFIX", "Question: ")
 

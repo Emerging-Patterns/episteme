@@ -229,8 +229,7 @@ AHEAD = int(os.environ.get("AHEAD", "8"))
 WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
 NULL = float(os.environ.get("NULL", "1.6"))
 # multiply the kept word-null vector at score time (wn files already hold
-# NULL). 1.0 leaves them as written; 0.75 is effective NULL 1.2 when NULL is 1.6.
-# Side readers on another GPU use this to sweep ranking-78 without remaking wn.
+# NULL). 1.0 leaves them as written; other values retune without remaking wn.
 NULL_SCALE = float(os.environ.get("NULL_SCALE", "1.0"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 WORDS_BYTES = float(os.environ.get("WORDS_MB", "64")) * 1048576
@@ -245,22 +244,20 @@ FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
 # stop filling once a paragraph's fused score falls below REL_PEAK times the
 # best's (0: fill to the budget), but not before REL_FLOOR tokens are taken.
-# 0.42 with floor 1200: Hit@g2 51/51, TokPrec 25.0%, meanTok 2302 on the
-# 2026-11-26 judged set at depth 3000 (climb-2026-11-26 iter 3)
+# On a 60-question judged set at depth 3000: REL_PEAK 0.42 and REL_FLOOR 1200
+# keep Hit@g2 51/51 at TokPrec 25.0% meanTok 2302 (depth 4000 alone: 19.4%/3567).
 REL_PEAK = float(os.environ.get("REL_PEAK", "0.42"))
 REL_FLOOR = float(os.environ.get("REL_FLOOR", "1200"))
 REPEAT = float(os.environ.get("REPEAT", "0.98"))
-# 6: Hit 51/51 TokPrec 25.3% meanTok 2310 on judged-2026-11-26 at
-# REL_PEAK=0.42 REL_FLOOR=1200 (climb iter4); 8 was 25.0%/2302
+# 6: same set, TokPrec 25.3% meanTok 2310 with the cut above (8 was 25.0%/2302).
 REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "6"))
 # add RECENCY times each paragraph's rank among the run's record times
 # (0 oldest .. 1 newest) to its fused score before ordering and the peak cut.
-# 0.05: Hit 51/51 TokPrec 25.5% meanTok 2310 Rec 50.4% on judged-2026-11-26
-# (climb iter8; was 25.3%/49.6% with no prior). ranking-70.
+# 0.05: same set, TokPrec 25.5% meanTok 2310 Rec 50.4% (0: 25.3%/49.6%).
 RECENCY = float(os.environ.get("RECENCY", "0.05"))
 # when the best fused score is ADAPT_PEAK times the 5th among candidates,
 # fill no deeper than ADAPT_BUDGET tokens (else the notice's budget).
-# 2.0 / 1200: Hit 51 TokPrec 25.9% meanTok 2273 on judged-2026-11-26 (iter9b).
+# 2.0 / 1200: same set, Hit 51 TokPrec 25.9% meanTok 2273.
 ADAPT_PEAK = float(os.environ.get("ADAPT_PEAK", "2.0"))
 ADAPT_BUDGET = float(os.environ.get("ADAPT_BUDGET", "1200"))
 STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
