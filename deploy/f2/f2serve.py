@@ -1,5 +1,9 @@
 """F2, an episteme reader: BM25 fused with an attention ranker (model.py).
 
+Trusted, not proved: which paragraphs come first (the fused order, the word
+null, WEIGHT, NEIGHBOUR, SHARD, FLOOR). The Bend laws only constrain that
+answers are labels and that ask prints the best ranked that fit the budget.
+
 It speaks the reader protocol: GET /health, and POST /v1/chat/completions
 for one shard (the messages of src/read.bend Read.request), answered with
 {"ids": [...]}. Before a question's reads, episteme posts the run notice
@@ -77,8 +81,10 @@ question over a large source is nothing but the reading of its states
 (a quarter of a second each from a hard disk, two minutes for 448), and
 after a restart every question would be a first one. It reads one state at
 a time on its own thread and stands back while a run is being scored, so a
-question asked meanwhile has the disk; a state whose word null is not kept
-yet is left for the run that makes it.
+question asked meanwhile has the disk. A state whose word null is not kept
+yet under this F2_TAIL is still read back (its "N/A" stands in); the first
+ask remakes the missing nulls and writes them on the disk writer, so a cold
+remake does not fsync the spinning disk under the GPU lock.
 
 A shard's state (model.prefill: the keys and values of the layers a
 question reads the shard in, and its linear-attention states) is kept on
@@ -182,7 +188,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
-CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (8), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REL_PEAK (0.42), REL_FLOOR (1200), REPEAT (0.98), REPEAT_WORDS (6), RECENCY (0.05), ADAPT_PEAK (2.0), ADAPT_BUDGET (1200), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2),
 F2_TAIL (none).
 
@@ -222,6 +228,10 @@ SAVES = int(os.environ.get("SAVES", "4"))
 AHEAD = int(os.environ.get("AHEAD", "8"))
 WORDNULLS = int(os.environ.get("WORDNULLS", "6"))
 NULL = float(os.environ.get("NULL", "1.6"))
+# multiply the kept word-null vector at score time (wn files already hold
+# NULL). 1.0 leaves them as written; 0.75 is effective NULL 1.2 when NULL is 1.6.
+# Side readers on another GPU use this to sweep ranking-78 without remaking wn.
+NULL_SCALE = float(os.environ.get("NULL_SCALE", "1.0"))
 TERMS_MAX = int(os.environ.get("TERMS_MAX", "4096"))
 WORDS_BYTES = float(os.environ.get("WORDS_MB", "64")) * 1048576
 GIVE_BYTES = float(os.environ.get("GIVE_GB", "1")) * 1e9
@@ -233,8 +243,26 @@ WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
 FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
+# stop filling once a paragraph's fused score falls below REL_PEAK times the
+# best's (0: fill to the budget), but not before REL_FLOOR tokens are taken.
+# 0.42 with floor 1200: Hit@g2 51/51, TokPrec 25.0%, meanTok 2302 on the
+# 2026-11-26 judged set at depth 3000 (climb-2026-11-26 iter 3)
+REL_PEAK = float(os.environ.get("REL_PEAK", "0.42"))
+REL_FLOOR = float(os.environ.get("REL_FLOOR", "1200"))
 REPEAT = float(os.environ.get("REPEAT", "0.98"))
-REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "8"))
+# 6: Hit 51/51 TokPrec 25.3% meanTok 2310 on judged-2026-11-26 at
+# REL_PEAK=0.42 REL_FLOOR=1200 (climb iter4); 8 was 25.0%/2302
+REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "6"))
+# add RECENCY times each paragraph's rank among the run's record times
+# (0 oldest .. 1 newest) to its fused score before ordering and the peak cut.
+# 0.05: Hit 51/51 TokPrec 25.5% meanTok 2310 Rec 50.4% on judged-2026-11-26
+# (climb iter8; was 25.3%/49.6% with no prior). ranking-70.
+RECENCY = float(os.environ.get("RECENCY", "0.05"))
+# when the best fused score is ADAPT_PEAK times the 5th among candidates,
+# fill no deeper than ADAPT_BUDGET tokens (else the notice's budget).
+# 2.0 / 1200: Hit 51 TokPrec 25.9% meanTok 2273 on judged-2026-11-26 (iter9b).
+ADAPT_PEAK = float(os.environ.get("ADAPT_PEAK", "2.0"))
+ADAPT_BUDGET = float(os.environ.get("ADAPT_BUDGET", "1200"))
 STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
 SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.f2"
 WARM = int(os.environ.get("WARM", "1"))
@@ -243,6 +271,7 @@ GPU = threading.Lock()  # the model, the state tiers, ASKING and STAGED: held fo
 META = threading.RLock()  # TERMS, LOTS, SCORES, RUNS and the store
 WANT = [0]  # runs waiting for or holding the GPU lock
 BUSY = [0]  # runs being scored
+PENDING_WN = []  # (k, state, na) waiting for a batched word-null remake under the GPU lock
 
 
 class Turn:
@@ -345,6 +374,48 @@ def repeats(a, b):
     if sm.quick_ratio() * (n + m) / 2 < REPEAT * m:  # too few words in common, whatever their order
         return False
     return sum(x.size for x in sm.get_matching_blocks()) >= REPEAT * m
+
+
+def fused_scores(bm, att, of, weight, neighbour, shard):
+    """each paragraph's fused score as f2pass.fuse ranks by: z-scored BM25
+    plus weight times z-scored attention, plus neighbour and shard bonuses.
+    Used only for REL_PEAK's cutoff; the order still comes from f2pass.fuse."""
+    n = len(att)
+    if n == 0:
+        return []
+    bm = [bm[i] for i in range(n)]
+    att = [att[i] for i in range(n)]
+    of = [of[i] for i in range(n)]
+
+    def z(xs):
+        m = sum(xs) / n
+        v = sum((x - m) ** 2 for x in xs) / n
+        sd = math.sqrt(v) if v > 1e-24 else 1.0
+        return [(x - m) / sd for x in xs]
+
+    zb = z(bm) if any(x != 0 for x in bm) else [0.0] * n
+    za = z(att) if weight != 0 and any(x != 0 for x in att) else [0.0] * n
+    base = [zb[i] + weight * za[i] for i in range(n)]
+    with_nb = base[:]
+    if neighbour:
+        for i in range(n):
+            best = None
+            if i > 0 and of[i - 1] == of[i]:
+                best = base[i - 1]
+            if i + 1 < n and of[i + 1] == of[i]:
+                best = base[i + 1] if best is None else max(best, base[i + 1])
+            if best is not None and best > 0:
+                with_nb[i] += neighbour * best
+    out = with_nb[:]
+    if shard:
+        bests = {}
+        for i in range(n):
+            if with_nb[i] > bests.get(of[i], -1e30):
+                bests[of[i]] = with_nb[i]
+        for i in range(n):
+            if bests[of[i]] > 0:
+                out[i] += shard * bests[of[i]]
+    return out
 
 
 key = names.key
@@ -493,6 +564,14 @@ class States:
         finally:
             self.slots.release()
 
+    def save_null(self, k, wn):
+        """a word null written off the GPU lock: the spinning disk's fsync
+        must not stall a pass (cold-speed-61)"""
+        try:
+            write(NULLS + wn.tobytes(), self.null_path(k))
+        except OSError:
+            pass
+
     @staticmethod
     def null_path(k):
         return names.null(k)
@@ -520,20 +599,30 @@ class States:
         lacks it, and sent to the GPU, while the GPU scores other shards"""
         return self.reader.apply_async(self.stage, (k,))
 
+    def try_null(self, k):
+        """k's word null from its file, or None when missing or unreadable"""
+        if WORDNULLS <= 0:
+            return None
+        try:
+            if kept(self.null_path(k)):
+                return floats(self.null_path(k))
+        except (OSError, ValueError):
+            pass
+        return None
+
     def wordnull(self, k, state, na, pool):
         """the vector taken from k's scores: NULL times the mean score of
         WORDNULLS nulls in the shape of a question, "What about <8 words>?",
         the words drawn from pool (words of the run's shards) by a seed that
         is the shard's key; kept in a file beside the state. With no words to
-        draw, or WORDNULLS 0, it is the "N/A" score na"""
+        draw, or WORDNULLS 0, it is the "N/A" score na. The file is written
+        on the disk writer, so a cold remake of many nulls does not fsync on
+        the spinning disk under the GPU lock."""
         if WORDNULLS <= 0:
             return na
-        path = self.null_path(k)
-        try:
-            if kept(path):
-                return floats(path)
-        except (OSError, ValueError):  # not a null vector's file: made again
-            pass
+        got = self.try_null(k)
+        if got is not None:
+            return got
         words = pool() if pool is not None else []
         if len(words) < 64:
             return na
@@ -541,8 +630,43 @@ class States:
         qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
         rows = roomy(lambda: model.tail([state], qs))[0]
         wn = array.array("f", [NULL * sum(x) / len(rows) for x in zip(*rows)])
-        write(NULLS + wn.tobytes(), path)
+        self.writer.apply_async(self.save_null, (k, wn))
         return wn
+
+    def wordnulls(self, need, pool):
+        """word nulls for several (k, state, na): each shard still draws its
+        own null questions from pool by its key (so a shared pass over every
+        question would waste work on the cross terms). Missing ones are
+        scored one shard at a time and written on the disk writer, so the
+        spinning disk's fsync is off the GPU lock. Answers {k: null}."""
+        out = {}
+        words = None
+        for k, state, na in need:
+            if WORDNULLS <= 0:
+                out[k] = na
+                continue
+            got = self.try_null(k)
+            if got is not None:
+                out[k] = got
+                continue
+            if words is None:
+                words = pool() if pool is not None else []
+            if len(words) < 64:
+                out[k] = na
+                continue
+            rnd = random.Random(k)
+            qs = ["What about " + " ".join(rnd.choice(words) for _ in range(8)) + "?" for _ in range(WORDNULLS)]
+            rows = roomy(lambda: model.tail([state], qs))[0]
+            wn = array.array("f", [NULL * sum(x) / len(rows) for x in zip(*rows)])
+            out[k] = wn
+            self.writer.apply_async(self.save_null, (k, wn))
+            if k in self.gpu:
+                st, size = self.gpu[k]
+                self.gpu[k] = ((st[0], wn), size)
+            if k in self.ram:
+                (blob, _old), size = self.ram[k]
+                self.ram[k] = ((blob, wn), size)
+        return out
 
     def own(self, k, size, keep, among):
         """whether putting k on the GPU would evict a state one of the runs
@@ -590,8 +714,16 @@ class States:
                 sent = staged.pop() if staged else None
                 return model.take(sent, blob, kept=not passing) if sent is not None else model.unpack(blob, kept=not passing)
             there = roomy(unpacked)
-            if not had:  # from disk: the null the file holds is its "N/A" score
-                null = self.wordnull(k, there, null, pool)
+            # A word null remade under a new F2_TAIL (or missing after rewarm used
+            # the state's "N/A") is not scored here: the pass collects them and
+            # remakes a BATCH at a time (wordnulls), so a cold ask does not run
+            # one null pass and one fsync a shard under the GPU lock.
+            if WORDNULLS > 0 and (not had or self.try_null(k) is None):
+                got = self.try_null(k)
+                if got is not None:
+                    null = got
+                else:
+                    PENDING_WN.append((k, there, null))
             self.n["ram" if had else "disk"] += 1
             st = (there, null)
             if passing:
@@ -605,7 +737,14 @@ class States:
             na = roomy(lambda: model.scores(there, "N/A"))
             model.null(fresh, na)
             blob = bytes(fresh)
-            st, size = (there, self.wordnull(k, there, na, pool)), there.size
+            if WORDNULLS > 0:
+                got = self.try_null(k)
+                null = got if got is not None else na
+                if got is None:
+                    PENDING_WN.append((k, there, na))
+            else:
+                null = na
+            st, size = (there, null), there.size
             self.n["prefill"] += 1
             self.slots.acquire()
             self.writer.apply_async(self.save, (k, blob))
@@ -680,14 +819,30 @@ KEPT = b"F2SCORE1"  # the kept scores' file opens with it
 def keep(path):
     """the kept scores written at path, least recently used first: after
     KEPT and a length, JSON of what made them, their keys and their
-    lengths, then the scores end to end as floats"""
+    lengths, then the scores end to end as floats. An empty SCORES does not
+    overwrite a file that still names the shards asked about last: rewarm
+    and lately read those keys even when made_by has changed (a new F2_TAIL
+    drops the scores themselves, not the shard list). Prior keys absent from
+    SCORES are kept with length 0 so lately still finds them."""
     with KEEPING:
         with META:
             items, CHANGED[0] = list(SCORES.items()), False
-        if items:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            said = json.dumps({"by": made_by(), "keys": [k for k, _ in items], "lens": [len(v) for _, v in items]}).encode()
-            write(KEPT + struct.pack("<Q", len(said)) + said + b"".join(v.tobytes() for _, v in items), path)
+        if not items:
+            return
+        prior = []
+        try:
+            if kept(path):
+                prior = kept_scores(path)[0].get("keys") or []
+        except Exception:
+            prior = []
+        have = {tuple(k) for k, _ in items}
+        extras = [tuple(k) for k in prior if tuple(k) not in have]
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        keys = [k for k, _ in items] + extras
+        lens = [len(v) for _, v in items] + [0] * len(extras)
+        said = json.dumps({"by": made_by(), "keys": keys, "lens": lens}).encode()
+        body = b"".join(v.tobytes() for _, v in items)
+        write(KEPT + struct.pack("<Q", len(said)) + said + body, path)
 
 
 def kept_scores(path):
@@ -739,18 +894,21 @@ def rewarm(keys):
     """the kept states of the shards keys, in that order, read into RAM
     until it is full: each read on this thread with no lock held, then put
     in the tier under the GPU lock as a run would. While a run is being
-    scored (BUSY) it waits, so the run has the disk. Answers how many it
-    read and their bytes"""
+    scored (BUSY) it waits, so the run has the disk. A state whose word
+    null is not yet under this F2_TAIL is still read: its "N/A" stands in
+    until the first ask remakes the null in a batch (cold-speed-62). Answers
+    how many it read and their bytes"""
     n = size_all = 0
     for k in keys:
         while BUSY[0] > 0:
             time.sleep(0.05)
-        wn = STATES.null_path(k)
-        if k in STATES.ram or k in STATES.gpu or not kept(STATES.path(k)) or (WORDNULLS > 0 and not kept(wn)):
+        if k in STATES.ram or k in STATES.gpu or not kept(STATES.path(k)):
             continue
         try:
             blob, na = STATES.load(k)
-            null = floats(wn) if WORDNULLS > 0 else na
+            null = STATES.try_null(k)
+            if null is None:
+                null = na
         except Exception:
             continue
         size = len(blob)
@@ -807,12 +965,14 @@ class Lot:
     def __init__(self, shards, keys):
         self.paras = []  # (shard index, label number, characters, start and end in the shard's text)
         self.authors = []  # each paragraph's author, None for a shard known by its text alone
+        self.times = []  # each paragraph's record ts (ISO string), "" when unknown
         self.first, self.held, self.dl = [], [], []  # each shard's first paragraph, its words (terms); each paragraph's length in words
         for si, (k, sh) in enumerate(zip(keys, shards)):
             self.first.append(len(self.paras))
             for li, (x, y, n) in enumerate(sh["spans"]):
                 self.paras.append((si, li + 1, n, x, y))
             self.authors += sh.get("authors") or [None] * len(sh["spans"])
+            self.times += sh.get("times") or [""] * len(sh["spans"])
             held, lengths = terms(k, sh)
             self.held.append(held)
             self.dl += lengths
@@ -976,6 +1136,7 @@ class Run:
         among = frozenset(ASKING)
         later = frozenset().union(*(r.need.keys() for r in ASKING.values()))  # what a run being scored still reads, this pass's shards among them
         batch, taken = [], set()
+        del PENDING_WN[:]
         for k in keys:
             self.stage(taken)
             taken.add(k)
@@ -983,10 +1144,17 @@ class Run:
             state, null = STATES.get(k, self.shards[self.need[k][0]], later, STAGED.pop(k, None), self.serial, self.pool, among)
             batch.append((k, state, null, where))
         self.stage(taken)
+        if PENDING_WN:
+            filled = STATES.wordnulls(list(PENDING_WN), self.pool)
+            del PENDING_WN[:]
+            batch = [(k, st, filled.get(k, null), where) for k, st, null, where in batch]
         for (k, _state, null, where), row in zip(batch, roomy(lambda: model.tail([b[1] for b in batch], qs))):
             for r in runs:
                 for i in r.need.pop(k):
-                    score = f2pass.less(row[qs.index(r.q)], null, roots(r.shards[i]))  # less the null, over the root: in single precision, step by step
+                    nvec = null
+                    if NULL_SCALE != 1.0 and null is not None:
+                        nvec = array.array("f", (x * NULL_SCALE for x in null))
+                    score = f2pass.less(row[qs.index(r.q)], nvec, roots(r.shards[i]))  # less the null, over the root: in single precision, step by step
                     r.got[i] = score
                     r.came[where] += 1
                     with META:
@@ -1001,7 +1169,8 @@ class Run:
         that repeats one taken before it, each with its place among those
         taken, from 1; with authors named in who, only paragraphs by one of
         them are taken, and of those only the ones whose attention score
-        reaches FLOOR"""
+        reaches FLOOR. With REL_PEAK above 0, filling also stops once a
+        paragraph's fused score is below REL_PEAK times the best's."""
         with META:
             BUSY[0] += 1
         try:
@@ -1016,18 +1185,47 @@ class Run:
         # mean and deviation; plus NEIGHBOUR times the better of its two neighbours' in its shard (a paragraph next to
         # a strong one is likelier to bear on the question than one that stands alone); plus SHARD times the best in
         # its shard (a shard that holds a strong paragraph is likelier to hold others that bear on it)
-        order = f2pass.fuse(self.bm25(q), att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
+        bm = self.bm25(q)
+        order = f2pass.fuse(bm, att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
+        scores = fused_scores(bm, att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
+        if RECENCY > 0 and lot.times:
+            # rank of each paragraph's record time among the run (0..1 newer)
+            ranked = sorted(set(lot.times))
+            place = {t: i for i, t in enumerate(ranked)}
+            denom = max(len(ranked) - 1, 1)
+            scores = [scores[i] + RECENCY * (place.get(lot.times[i], 0) / denom)
+                      for i in range(len(scores))]
+            order = sorted(range(len(scores)), key=lambda i: -scores[i])
+        elif REL_PEAK <= 0 and ADAPT_PEAK <= 0:
+            scores = None
         reach = [x >= FLOOR for x in att] if who else None
-        used, taken = 0.0, []
+        fill = budget
+        if ADAPT_PEAK > 0 and scores is not None:
+            top = []
+            for i in order:
+                if who and (lot.authors[i] not in who or not reach[i]):
+                    continue
+                top.append(scores[i])
+                if len(top) >= 5:
+                    break
+            if len(top) >= 5 and top[4] > 0 and top[0] / top[4] > ADAPT_PEAK:
+                fill = min(fill, ADAPT_BUDGET)
+        used, taken, peak = 0.0, [], None
         for i in order:
             if who and (lot.authors[i] not in who or not reach[i]):
                 continue
+            if scores is not None and REL_PEAK > 0:
+                sc = scores[i]
+                if peak is None:
+                    peak = sc
+                elif peak > 0 and sc < REL_PEAK * peak and used >= REL_FLOOR:
+                    break
             si, label, chars, x, y = lot.paras[i]
             text = said(self.shards[si]["text"][y - chars:y])  # the line less its label
             if any(repeats(text, t) for t in taken):
                 continue
             cost = chars / CHARS_PER_TOKEN
-            if used + cost > budget and used > 0:
+            if used + cost > fill and used > 0:
                 break
             taken.append(text)
             out[self.keys[si]].append((label, len(taken)))

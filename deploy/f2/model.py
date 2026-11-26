@@ -174,11 +174,28 @@ def unpack(blob, kept=True):
     return take(stage(blob), blob, kept)
 
 
+# ASK_PREFIX: fixed framing before the question text ("Question: " live).
+# ASK_PREFIX=auto picks by form (ranking-86): "Question: " if it ends with ?,
+# "Find where the record says: " if long, else "Passages about: ".
+ASK_PREFIX = os.environ.get("ASK_PREFIX", "Question: ")
+
+
+def ask_prefix(question):
+    if ASK_PREFIX != "auto":
+        return ASK_PREFIX
+    t = question.strip()
+    if t.endswith("?"):
+        return "Question: "
+    if len(t.split()) > 40:
+        return "Find where the record says: "
+    return "Passages about: "
+
+
 @functools.lru_cache(maxsize=4096)
 def opening(question):
     """the tokens of a question's tail a pass runs: the template's up to
     the question, then the question's"""
-    return tuple(tok.encode("<|im_start|>user\nQuestion: " + question, add_special_tokens=False).ids)
+    return tuple(tok.encode("<|im_start|>user\n" + ask_prefix(question) + question, add_special_tokens=False).ids)
 
 
 def tokens(question):
