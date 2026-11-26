@@ -3,7 +3,7 @@
 Summary-less RAG in Bend 2: retrieval returns verbatim, cited source paragraphs. No embeddings, and no generated text in retrieval.
 
 Records a caller gives as JSON lines go into one append-only log, packed into frozen shards (one source per shard). For a question, small local reader models pick the paragraphs that bear on it, and episteme returns them in time order. Readers only name paragraphs; they never write.
-The gate is `nix flake check`; what episteme guarantees is in `laws/`, one file per guarantee.
+The gate is `nix flake check`; what episteme guarantees is in `laws/` (labels, packing, print budget), not that the reader's ranking is the right order. On a 60-question real judged set, live fusion finds a direct answer at 4k tokens for 51/51 questions vs 44/51 for BM25 alone.
 
 ```
 episteme ingest records <file|-> [--complete]   # records given as JSON lines

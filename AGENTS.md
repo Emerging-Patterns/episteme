@@ -25,7 +25,7 @@ Flakes see only files git tracks: `git add` a new file before `nix flake check`.
 - **Trust dependency proofs.** Dependents cite a dependency's proved guarantees, its law files; never prove its internals.
 - **Never publish to the hub**, not even to test: no real `ez publish` or `bend --publish`. Push only what the maintainer asks to push.
 - **Never lower bolt levels** or add suppressions to get green.
-- **Ground on the fleet's current origin/main** (ezsys, ezhttp, ezjson, shake, bolt), not the `ez` on PATH, `~/.bend/current` or cached skills. Bend is 2.0.38, pinned in `flake.nix`; run everything through `nix develop -c`.
+- **Ground on the fleet's current origin/main** (ezsys, ezhttp, ezjson, shake, bolt), not the `ez` on PATH, `~/.bend/current` or cached skills. Bend is 2.0.40, pinned in `flake.nix`; run everything through `nix develop -c`.
 - **Generic records only.** No source-specific code: what a kind of source becomes as records is its caller's, piped in with `episteme ingest records`. Law prose names no source kinds.
 - **Keep it simple.** Every addition must earn its place by a measured result; the default answer to a new mechanism is no. Readers output labels only, never text. No summaries anywhere. No embeddings.
 - **No corpus or chat text in the repo**, the skill included, and nothing about one person's deployment (hosts, GPUs, paths, services). Data lives under `EPISTEME_HOME`.

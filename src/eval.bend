@@ -6,19 +6,22 @@
 # writes them; a line that is not one stops it with exit 1). A `--label`
 # holding `/` is refused with exit 2, and so, before any read, is a file in
 # which some question's filter `Filter.check` refuses (the question's id and
-# the refusal on stderr). For each question, in order, it runs `Ask.gather`,
-# the path `episteme ask` runs (src/ask.bend: the config, `Store.ready`, so a
-# log ahead of the shards stops the eval with exit 1 at its first question,
-# the shards the filter hits, `Pool.run`, `Read.ordered`, `Excerpt.resolve`
-# and `Excerpt.merge`) in process, delivering nothing, and makes the
-# question's row: `Score.hits` of its gold, `Score.chars` of the merged
-# excerpts, the unknown labels, the count of `Read.failed`, the gather's wall
-# milliseconds and the sums of its reads' `prompt_n` and `prompt_ms`; it
-# writes one progress line a question on stderr. Then it writes `{"label",
-# "rows": [...], "totals": {...}}` to `report.json` in `runs/eval-<label>-<ISO
-# time>/`, a directory claimed as `ask` claims one, prints the directory on
-# stderr and the header and totals row of `Score.total` on stdout, and exits
-# 0.
+# the refusal on stderr), and a file whose gold names a `chat:` or `git:`
+# source (overlap recall is not a measure there: each record's paragraph
+# offsets restart at 0, so one span hits nearly every record; use a harness
+# that matches exact offsets, or wait for eval-41). For each question, in
+# order, it runs `Ask.gather`, the path `episteme ask` runs (src/ask.bend: the
+# config, `Store.ready`, so a log ahead of the shards stops the eval with
+# exit 1 at its first question, the shards the filter hits, `Pool.run`,
+# `Read.ordered`, `Excerpt.resolve` and `Excerpt.merge`) in process,
+# delivering nothing, and makes the question's row: `Score.hits` of its gold,
+# `Score.chars` of the merged excerpts, the unknown labels, the count of
+# `Read.failed`, the gather's wall milliseconds and the sums of its reads'
+# `prompt_n` and `prompt_ms`; it writes one progress line a question on
+# stderr. Then it writes `{"label", "rows": [...], "totals": {...}}` to
+# `report.json` in `runs/eval-<label>-<ISO time>/`, a directory claimed as
+# `ask` claims one, prints the directory on stderr and the header and totals
+# row of `Score.total` on stdout, and exits 0.
 #
 # Why it is trusted: It is IO sequencing over src/ask.bend's run,
 # laws/HitsCountRecalled.bend, laws/CoverageAddsOverExcerpts.bend,
@@ -145,15 +148,51 @@ def Eval.refusal(res: Result<&2, &2, String, Unit>, +id: String, more: Unit -> M
     case Done{_u}:
       more(Unit{})
 
-# the first question whose filter ask would refuse, with the refusal, or None
+# Some{why} when hit, else more
+def Eval.bad_src.if(hit: Bool, +src: String, more: Unit -> Maybe<&2, String>) -> Maybe<&2, String>:
+  match hit:
+    case True{}:
+      Some{src ++ ": chat: and git: golds are refused (offsets restart per record; overlap recall is not a measure; see eval-41)"}
+    case False{}:
+      more(Unit{})
+
+# Some{why} when src is chat: or git:, else more
+def Eval.bad_src(+src: String, more: Unit -> Maybe<&2, String>) -> Maybe<&2, String>:
+  Eval.bad_src.if(String.starts_with(src, "chat:"), src, _u =>
+    Eval.bad_src.if(String.starts_with(src, "git:"), src, more))
+
+# the first gold span of gs whose source restarts offsets, or None
+def Eval.bad_gold(+gs: List<&2, E.Gold>) -> Maybe<&2, String>:
+  match gs:
+    case Nil{}:
+      None{}
+    case Con{g, rest}:
+      match g:
+        case E.Gold{source, _start, _end}:
+          Eval.bad_src(source, _u => Eval.bad_gold(rest))
+
+# a question refused for its gold, else more with its id
+def Eval.golded(
+  got: Maybe<&2, String>,
+  +id: String,
+  more: String -> Maybe<&2, String>
+) -> Maybe<&2, String>:
+  match got:
+    case Some{why}:
+      Some{id ++ ": " ++ why}
+    case None{}:
+      more(id)
+
+# the first question with a refused filter or a bad gold, or None
 def Eval.refused(+refs: List<&2, F.Refusal>, qs: List<&2, Q>) -> Maybe<&2, String>:
   match qs:
     case Nil{}:
       None{}
     case Con{quest, rest}:
       match quest:
-        case Q{id, _question, filter, _gold}:
-          Eval.refusal(F.Filter.check(refs, F.Filter.parse(filter)), id, _u => Eval.refused(refs, rest))
+        case Q{id, _question, filter, gold}:
+          Eval.golded(Eval.bad_gold(gold), id, id2 =>
+            Eval.refusal(F.Filter.check(refs, F.Filter.parse(filter)), id2, _u => Eval.refused(refs, rest)))
 
 # a row, after its progress line on stderr
 def Eval.told(row: Sc.Row) -> IO(Sc.Row):

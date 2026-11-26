@@ -29,7 +29,10 @@
 # laws/RequestAdmitsOnlyLabels.bend (readers and ask;
 # laws/BestRankedArePrinted.bend says which of the labels they name are
 # printed, laws/AskingsArePassedOver.bend which are passed over first as
-# earlier askings of the question),
+# earlier askings of the question). Which paragraphs a reader ranks best is
+# trusted in the reader (`deploy/f2/`), not proved here: the laws constrain
+# labels, how ranks order what is printed, and the print budget, not that
+# the ranked order is the right one for the question,
 # laws/ToolQueryIsCliQuery.bend (the server's tool calls),
 # laws/TelemetryLineOfARun.bend (telemetry),
 # laws/CliNamesItsCommands.bend (the command line, src/cli.bend), and
