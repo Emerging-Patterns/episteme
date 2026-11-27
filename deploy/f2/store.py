@@ -19,10 +19,10 @@ def shard_dir():
 
 
 def render(d, path):
-    """a shard as {"path", "text", "spans", "authors", "times"}: the text
-    Shard.render writes, for each paragraph p<i+1> its (start, end) in the
-    text and its own length, the author of its record, and the record's ts"""
-    parts, spans, authors, times, at = [], [], [], [], 0
+    """a shard as {"path", "text", "spans", "authors"}: the text Shard.render
+    writes, for each paragraph p<i+1> its (start, end) in the text and its own
+    length, and the author of its record"""
+    parts, spans, authors, at = [], [], [], 0
     for k, it in enumerate(d["items"]):
         rec = it["rec"]
         s = "== %s | %s | %s | %s\n" % (rec["source"], rec["ts"], rec["author"], rec["id"])
@@ -30,13 +30,12 @@ def render(d, path):
             line = "[p%d] %s" % (len(spans) + 1, t)
             spans.append((at + len(s), at + len(s) + len(line), len(t)))
             authors.append(rec["author"])
-            times.append(rec["ts"] or "")
             s += line + "\n"
         if k + 1 < len(d["items"]):
             s += "\n"
         parts.append(s)
         at += len(s)
-    return {"path": path, "text": "".join(parts), "spans": spans, "authors": authors, "times": times}
+    return {"path": path, "text": "".join(parts), "spans": spans, "authors": authors}
 
 
 def read(path):

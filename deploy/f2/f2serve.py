@@ -188,7 +188,7 @@ memory is within MARGIN_GB of the limit, since what the process holds beyond
 the tier varies.
 
 env: EPISTEME_HOME, PORT (18112), WARM (1), BUDGET (32000), SHARD_BUDGET (120),
-CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REL_PEAK (0.42), REL_FLOOR (1200), REPEAT (0.98), REPEAT_WORDS (6), RECENCY (0.05), ADAPT_PEAK (2.0), ADAPT_BUDGET (1200), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
+CACHE_GB (7), GIVE_GB (1), RAM_GB (24), HEADROOM_GB (8), MARGIN_GB (2), SAVES (4), AHEAD (8), SLABS (12), SLAB_MB (64), TERMS_MAX (4096), WORDS_MB (64), SHARDS_MAX (2048), LOTS (4), SCORES (65536), BATCH (8), PASS (768), WEIGHT (0.3), NEIGHBOUR (0.4), FLOOR (0.001), SHARD (0.2), REPEAT (0.98), REPEAT_WORDS (6), F2_MODEL ($EPISTEME_HOME/f2/qwen08),
 F2_STATES ($EPISTEME_HOME/f2/states), F2_SCORES ($EPISTEME_HOME/f2/scores.f2), F2_BOOK ($EPISTEME_HOME/f2/book.f2),
 F2_TAIL (none).
 
@@ -242,24 +242,8 @@ WEIGHT = float(os.environ.get("WEIGHT", "0.3"))
 NEIGHBOUR = float(os.environ.get("NEIGHBOUR", "0.4"))
 FLOOR = float(os.environ.get("FLOOR", "0.001"))
 SHARD = float(os.environ.get("SHARD", "0.2"))
-# stop filling once a paragraph's fused score falls below REL_PEAK times the
-# best's (0: fill to the budget), but not before REL_FLOOR tokens are taken.
-# On a 60-question judged set at depth 3000: REL_PEAK 0.42 and REL_FLOOR 1200
-# keep Hit@g2 51/51 at TokPrec 25.0% meanTok 2302 (depth 4000 alone: 19.4%/3567).
-REL_PEAK = float(os.environ.get("REL_PEAK", "0.42"))
-REL_FLOOR = float(os.environ.get("REL_FLOOR", "1200"))
 REPEAT = float(os.environ.get("REPEAT", "0.98"))
-# 6: same set, TokPrec 25.3% meanTok 2310 with the cut above (8 was 25.0%/2302).
 REPEAT_WORDS = int(os.environ.get("REPEAT_WORDS", "6"))
-# add RECENCY times each paragraph's rank among the run's record times
-# (0 oldest .. 1 newest) to its fused score before ordering and the peak cut.
-# 0.05: same set, TokPrec 25.5% meanTok 2310 Rec 50.4% (0: 25.3%/49.6%).
-RECENCY = float(os.environ.get("RECENCY", "0.05"))
-# when the best fused score is ADAPT_PEAK times the 5th among candidates,
-# fill no deeper than ADAPT_BUDGET tokens (else the notice's budget).
-# 2.0 / 1200: same set, Hit 51 TokPrec 25.9% meanTok 2273.
-ADAPT_PEAK = float(os.environ.get("ADAPT_PEAK", "2.0"))
-ADAPT_BUDGET = float(os.environ.get("ADAPT_BUDGET", "1200"))
 STATES_DIR, WN_DIR = names.STATES_DIR, names.WN_DIR
 SCORES_PATH = os.environ.get("F2_SCORES") or store.HOME + "/f2/scores.f2"
 WARM = int(os.environ.get("WARM", "1"))
@@ -371,48 +355,6 @@ def repeats(a, b):
     if sm.quick_ratio() * (n + m) / 2 < REPEAT * m:  # too few words in common, whatever their order
         return False
     return sum(x.size for x in sm.get_matching_blocks()) >= REPEAT * m
-
-
-def fused_scores(bm, att, of, weight, neighbour, shard):
-    """each paragraph's fused score as f2pass.fuse ranks by: z-scored BM25
-    plus weight times z-scored attention, plus neighbour and shard bonuses.
-    Used only for REL_PEAK's cutoff; the order still comes from f2pass.fuse."""
-    n = len(att)
-    if n == 0:
-        return []
-    bm = [bm[i] for i in range(n)]
-    att = [att[i] for i in range(n)]
-    of = [of[i] for i in range(n)]
-
-    def z(xs):
-        m = sum(xs) / n
-        v = sum((x - m) ** 2 for x in xs) / n
-        sd = math.sqrt(v) if v > 1e-24 else 1.0
-        return [(x - m) / sd for x in xs]
-
-    zb = z(bm) if any(x != 0 for x in bm) else [0.0] * n
-    za = z(att) if weight != 0 and any(x != 0 for x in att) else [0.0] * n
-    base = [zb[i] + weight * za[i] for i in range(n)]
-    with_nb = base[:]
-    if neighbour:
-        for i in range(n):
-            best = None
-            if i > 0 and of[i - 1] == of[i]:
-                best = base[i - 1]
-            if i + 1 < n and of[i + 1] == of[i]:
-                best = base[i + 1] if best is None else max(best, base[i + 1])
-            if best is not None and best > 0:
-                with_nb[i] += neighbour * best
-    out = with_nb[:]
-    if shard:
-        bests = {}
-        for i in range(n):
-            if with_nb[i] > bests.get(of[i], -1e30):
-                bests[of[i]] = with_nb[i]
-        for i in range(n):
-            if bests[of[i]] > 0:
-                out[i] += shard * bests[of[i]]
-    return out
 
 
 key = names.key
@@ -962,14 +904,12 @@ class Lot:
     def __init__(self, shards, keys):
         self.paras = []  # (shard index, label number, characters, start and end in the shard's text)
         self.authors = []  # each paragraph's author, None for a shard known by its text alone
-        self.times = []  # each paragraph's record ts (ISO string), "" when unknown
         self.first, self.held, self.dl = [], [], []  # each shard's first paragraph, its words (terms); each paragraph's length in words
         for si, (k, sh) in enumerate(zip(keys, shards)):
             self.first.append(len(self.paras))
             for li, (x, y, n) in enumerate(sh["spans"]):
                 self.paras.append((si, li + 1, n, x, y))
             self.authors += sh.get("authors") or [None] * len(sh["spans"])
-            self.times += sh.get("times") or [""] * len(sh["spans"])
             held, lengths = terms(k, sh)
             self.held.append(held)
             self.dl += lengths
@@ -1166,8 +1106,7 @@ class Run:
         that repeats one taken before it, each with its place among those
         taken, from 1; with authors named in who, only paragraphs by one of
         them are taken, and of those only the ones whose attention score
-        reaches FLOOR. With REL_PEAK above 0, filling also stops once a
-        paragraph's fused score is below REL_PEAK times the best's."""
+        reaches FLOOR"""
         with META:
             BUSY[0] += 1
         try:
@@ -1182,47 +1121,18 @@ class Run:
         # mean and deviation; plus NEIGHBOUR times the better of its two neighbours' in its shard (a paragraph next to
         # a strong one is likelier to bear on the question than one that stands alone); plus SHARD times the best in
         # its shard (a shard that holds a strong paragraph is likelier to hold others that bear on it)
-        bm = self.bm25(q)
-        order = f2pass.fuse(bm, att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
-        scores = fused_scores(bm, att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
-        if RECENCY > 0 and lot.times:
-            # rank of each paragraph's record time among the run (0..1 newer)
-            ranked = sorted(set(lot.times))
-            place = {t: i for i, t in enumerate(ranked)}
-            denom = max(len(ranked) - 1, 1)
-            scores = [scores[i] + RECENCY * (place.get(lot.times[i], 0) / denom)
-                      for i in range(len(scores))]
-            order = sorted(range(len(scores)), key=lambda i: -scores[i])
-        elif REL_PEAK <= 0 and ADAPT_PEAK <= 0:
-            scores = None
+        order = f2pass.fuse(self.bm25(q), att, lot.shard, WEIGHT, NEIGHBOUR, SHARD)
         reach = [x >= FLOOR for x in att] if who else None
-        fill = budget
-        if ADAPT_PEAK > 0 and scores is not None:
-            top = []
-            for i in order:
-                if who and (lot.authors[i] not in who or not reach[i]):
-                    continue
-                top.append(scores[i])
-                if len(top) >= 5:
-                    break
-            if len(top) >= 5 and top[4] > 0 and top[0] / top[4] > ADAPT_PEAK:
-                fill = min(fill, ADAPT_BUDGET)
-        used, taken, peak = 0.0, [], None
+        used, taken = 0.0, []
         for i in order:
             if who and (lot.authors[i] not in who or not reach[i]):
                 continue
-            if scores is not None and REL_PEAK > 0:
-                sc = scores[i]
-                if peak is None:
-                    peak = sc
-                elif peak > 0 and sc < REL_PEAK * peak and used >= REL_FLOOR:
-                    break
             si, label, chars, x, y = lot.paras[i]
             text = said(self.shards[si]["text"][y - chars:y])  # the line less its label
             if any(repeats(text, t) for t in taken):
                 continue
             cost = chars / CHARS_PER_TOKEN
-            if used + cost > fill and used > 0:
+            if used + cost > budget and used > 0:
                 break
             taken.append(text)
             out[self.keys[si]].append((label, len(taken)))
